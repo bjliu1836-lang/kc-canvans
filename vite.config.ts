@@ -1,4 +1,5 @@
 import path from 'path';
+import fs from 'fs';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import type { Plugin } from 'vite';
@@ -109,6 +110,30 @@ function corsProxyPlugin(): Plugin {
     };
 }
 
+function directorDeskStaticIndexPlugin(): Plugin {
+    return {
+        name: 'director-desk-static-index',
+        configureServer(server) {
+            server.middlewares.use((req, res, next) => {
+                const requestPath = (req.url || '').split('?')[0];
+                if (requestPath !== '/director-desk' && requestPath !== '/director-desk/') {
+                    next();
+                    return;
+                }
+
+                const indexPath = path.resolve(__dirname, 'public/director-desk/index.html');
+                if (!fs.existsSync(indexPath)) {
+                    next();
+                    return;
+                }
+
+                res.setHeader('Content-Type', 'text/html; charset=utf-8');
+                res.end(fs.readFileSync(indexPath));
+            });
+        }
+    };
+}
+
 export default defineConfig(() => {
     return {
       server: {
@@ -121,7 +146,7 @@ export default defineConfig(() => {
           }
         }
       },
-      plugins: [react(), corsProxyPlugin()],
+      plugins: [react(), directorDeskStaticIndexPlugin(), corsProxyPlugin()],
       resolve: {
         alias: {
           '@': path.resolve(__dirname, '.'),

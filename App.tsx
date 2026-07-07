@@ -2,7 +2,7 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import Sidebar from './components/Sidebar';
 import { AssetSelectionModal } from './components/AssetSelectionModal';
-import { AssetLibraryItem, AssetLibraryType, AddToAssetPanelState, ImageVersionSnapshot, InputMedia, MultiAngleOptions, NodeData, Connection, CanvasTransform, Point, DragMode, NodeType, ProjectCanvasItem, ShotClip } from './types';
+import { AssetLibraryItem, AssetLibraryType, AddToAssetPanelState, ImageVersionSnapshot, InputMedia, MultiAngleOptions, NodeData, Connection, CanvasTransform, Point, DragMode, NodeType, ProjectCanvasItem, ShotClip, TextVersionSnapshot } from './types';
 import BaseNode from './components/Nodes/BaseNode';
 import { NodeContent } from './components/Nodes/NodeContent';
 import { Icons } from './components/Icons';
@@ -27,7 +27,17 @@ const CANVAS_MIN_SCALE = 0.4;
 const CANVAS_MAX_SCALE = 2;
 const IMAGE_ASPECT_RATIOS = ['1:1', '3:4', '4:3', '9:16', '16:9'];
 const VIDEO_ASPECT_RATIOS = ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9', '9:21'];
+const DIRECTOR_DESK_APP_PATH = '/director-desk/';
 type LocalExportType = 'video' | 'image' | 'text' | 'audio' | 'all';
+type DirectorDeskSession = {
+    nodeId: string;
+    instanceId: string;
+    title: string;
+};
+type DirectorDeskCapture = {
+    dataUrl?: unknown;
+    fileName?: unknown;
+};
 type CanvasHistoryEntry =
     | { type: 'delete'; label: string; nodes: NodeData[]; connections: Connection[] }
     | { type: 'create'; label: string; nodes: NodeData[]; connections: Connection[] }
@@ -317,6 +327,7 @@ const DEMO_LINEAR_SHOT = {
 
 // 节点媒体类别：正向/反向连接共用同一套合法性校验规则。
 type MediaCategory = 'image' | 'video' | 'text';
+type UploadKind = 'image' | 'video' | 'audio' | 'text';
 
 const NODE_MEDIA_CATEGORY: Record<NodeType, MediaCategory> = {
     [NodeType.TEXT_TO_IMAGE]: 'image',
@@ -327,6 +338,7 @@ const NODE_MEDIA_CATEGORY: Record<NodeType, MediaCategory> = {
     [NodeType.START_END_TO_VIDEO]: 'video',
     [NodeType.CREATIVE_DESC]: 'text',
     [NodeType.TEXT_TO_AUDIO]: 'text',
+    [NodeType.DIRECTOR_DESK]: 'image',
 };
 
 // 目标节点（下游）允许接收的来源节点（上游）类别：
@@ -337,6 +349,35 @@ const ALLOWED_SOURCE_CATEGORIES: Record<MediaCategory, MediaCategory[]> = {
     image: ['image', 'text'],
     video: ['image', 'video', 'text'],
     text: ['image', 'video', 'text'],
+};
+
+const TEXT_FILE_PATTERN = /\.(txt|md|markdown)$/i;
+
+const getUploadKindForNode = (type: NodeType): UploadKind => {
+    if (type === NodeType.TEXT_TO_AUDIO) return 'audio';
+    if (type === NodeType.CREATIVE_DESC) return 'text';
+    return NODE_MEDIA_CATEGORY[type] === 'video' ? 'video' : 'image';
+};
+
+const UPLOAD_ACCEPT_BY_KIND: Record<UploadKind, string> = {
+    image: '.png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,image/*',
+    video: '.mp4,.webm,.mov,.avi,.mkv,.flv,.wmv,video/*',
+    audio: '.mp3,.wav,.ogg,.aac,.m4a,.flac,audio/*',
+    text: '.txt,.md,.markdown,text/plain,text/markdown,text/*',
+};
+
+const UPLOAD_LABEL_BY_KIND: Record<UploadKind, string> = {
+    image: '图片',
+    video: '视频',
+    audio: '音频',
+    text: '文本',
+};
+
+const isFileCompatibleWithUploadKind = (file: File, kind: UploadKind) => {
+    if (kind === 'image') return file.type.startsWith('image/');
+    if (kind === 'video') return file.type.startsWith('video/');
+    if (kind === 'audio') return file.type.startsWith('audio/');
+    return file.type.startsWith('text/') || TEXT_FILE_PATTERN.test(file.name);
 };
 
 const getNodeSizeForAspectRatio = (aspectRatio = '1:1', baseSize = IMAGE_NODE_BASE_SIZE) => {
@@ -360,6 +401,13 @@ const getClosestAspectRatio = (width: number, height: number, options = IMAGE_AS
         return Math.abs(w / h - sourceRatio) < Math.abs(bestW / bestH - sourceRatio) ? candidate : best;
     }, options[0]);
 };
+
+const getImageSizeFromDataUrl = (src: string): Promise<{ width: number; height: number }> => new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth || img.width || 1, height: img.naturalHeight || img.height || 1 });
+    img.onerror = () => resolve({ width: 1, height: 1 });
+    img.src = src;
+});
 
 const mergeArtifactVersions = (newArtifacts: string | string[], currentArtifact?: string, existingArtifacts: string[] = []) => {
     const ordered = [
@@ -403,6 +451,33 @@ const mergeImageVersionSnapshots = (
         if (!versionByUrl.has(version.url)) versionByUrl.set(version.url, version);
     });
     return urls.map(url => versionByUrl.get(url) || createImageVersionSnapshot(url, fallbackNode, 0));
+};
+
+const createTextVersionSnapshot = (
+    content: string,
+    node: Pick<NodeData, 'prompt' | 'model' | 'title'>,
+    source: TextVersionSnapshot['source'],
+    createdAt = Date.now()
+): TextVersionSnapshot => ({
+    content,
+    prompt: node.prompt || '',
+    model: node.model || 'Xiaomi MiMo 2.5 Pro',
+    title: node.title || 'Text',
+    source,
+    createdAt,
+});
+
+const mergeTextVersionSnapshots = (
+    newVersion: TextVersionSnapshot,
+    existingVersions: TextVersionSnapshot[] = []
+) => {
+    const seen = new Set<string>();
+    return [newVersion, ...existingVersions].filter(version => {
+        const key = version.content.trim();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    }).slice(0, 50);
 };
 
 const normalizeTextNodeContent = (node: NodeData): NodeData => {
@@ -808,6 +883,7 @@ const CanvasWithSidebar: React.FC = () => {
   const [isMiniMapOpen, setIsMiniMapOpen] = useState(false);
   const [pendingDeleteRequest, setPendingDeleteRequest] = useState<{ nodeIds: string[]; connectionIds: string[] } | null>(null);
   const [frameExtractTarget, setFrameExtractTarget] = useState<{ nodeId: string; videoSrc: string } | null>(null);
+  const [directorDeskSession, setDirectorDeskSession] = useState<DirectorDeskSession | null>(null);
   
   // Quick Add Menu State
   const [quickAddMenu, setQuickAddMenu] = useState<{ sourceId: string, x: number, y: number, worldX: number, worldY: number, direction?: 'forward' | 'backward' } | null>(null);
@@ -836,6 +912,7 @@ const CanvasWithSidebar: React.FC = () => {
   const assetInputRef = useRef<HTMLInputElement>(null);
   const replaceImageRef = useRef<HTMLInputElement>(null);
   const attachInputRef = useRef<HTMLInputElement>(null);
+  const directorDeskIframeRef = useRef<HTMLIFrameElement>(null);
   const localExportMenuRef = useRef<HTMLDivElement>(null);
   const nodeToReplaceRef = useRef<string | null>(null);
   const nodeToAttachInputRef = useRef<string | null>(null);
@@ -917,6 +994,128 @@ const CanvasWithSidebar: React.FC = () => {
   });
 
   const generateId = () => Math.random().toString(36).substr(2, 9);
+
+  const resolveDirectorDeskPanorama = useCallback((nodeId: string) => {
+      const incoming = connections.find(connection => connection.targetId === nodeId);
+      if (!incoming) return null;
+      const sourceNode = nodes.find(node => node.id === incoming.sourceId);
+      if (!sourceNode?.imageSrc) return null;
+      return {
+          edgeId: incoming.id,
+          sourceNodeId: sourceNode.id,
+          imageUrl: sourceNode.imageSrc,
+          fileName: `${sourceNode.title || '画布全景图'}.png`,
+      };
+  }, [connections, nodes]);
+
+  const postDirectorDeskSessionToIframe = useCallback(() => {
+      if (!directorDeskSession) return;
+      const targetWindow = directorDeskIframeRef.current?.contentWindow;
+      if (!targetWindow) return;
+
+      targetWindow.postMessage({
+          type: 'storyai:director-desk-session',
+          payload: {
+              instanceId: directorDeskSession.instanceId,
+              theme: isDark ? 'dark' : 'light',
+          },
+      }, window.location.origin);
+
+      const panorama = resolveDirectorDeskPanorama(directorDeskSession.nodeId);
+      if (panorama) {
+          targetWindow.postMessage({
+              type: 'storyai:director-desk-panorama',
+              payload: panorama,
+          }, window.location.origin);
+      }
+  }, [directorDeskSession, isDark, resolveDirectorDeskPanorama]);
+
+  const openDirectorDesk = useCallback((nodeId: string) => {
+      const node = nodes.find(item => item.id === nodeId);
+      if (!node || node.type !== NodeType.DIRECTOR_DESK) return;
+      const instanceId = node.directorDeskInstanceId || `director-desk-${node.id}`;
+      if (!node.directorDeskInstanceId) {
+          setNodes(prev => prev.map(item => item.id === node.id ? { ...item, directorDeskInstanceId: instanceId } : item));
+      }
+      setDirectorDeskSession({
+          nodeId: node.id,
+          instanceId,
+          title: node.title || '3D导演台',
+      });
+      setContextMenu(null);
+  }, [nodes]);
+
+  const createDirectorDeskCaptureNodes = useCallback(async (captures: DirectorDeskCapture[]) => {
+      if (!directorDeskSession || captures.length === 0) return;
+      const sourceNode = nodes.find(node => node.id === directorDeskSession.nodeId);
+      if (!sourceNode) return;
+
+      const validCaptures = captures
+          .map((capture, index) => ({
+              dataUrl: typeof capture.dataUrl === 'string' ? capture.dataUrl : '',
+              fileName: typeof capture.fileName === 'string' ? capture.fileName : `导演台截图_${index + 1}.png`,
+          }))
+          .filter(capture => capture.dataUrl.startsWith('data:image/'));
+
+      if (validCaptures.length === 0) return;
+
+      const createdNodes = await Promise.all(validCaptures.map(async (capture, index): Promise<NodeData> => {
+          const size = await getImageSizeFromDataUrl(capture.dataUrl);
+          const aspectRatio = getClosestAspectRatio(size.width, size.height, IMAGE_ASPECT_RATIOS);
+          const { width, height } = getNodeSizeForAspectRatio(aspectRatio);
+          return {
+              id: generateId(),
+              type: NodeType.TEXT_TO_IMAGE,
+              x: sourceNode.x + sourceNode.width + 80,
+              y: sourceNode.y + index * (height + 36),
+              width,
+              height,
+              title: capture.fileName.replace(/\.[^.]+$/, '') || `导演台截图_${index + 1}`,
+              imageSrc: capture.dataUrl,
+              aspectRatio,
+              model: 'Seedream 5.0',
+              resolution: '1k',
+              count: 1,
+              prompt: '',
+              outputArtifacts: [capture.dataUrl],
+              source: 'canvas',
+          };
+      }));
+
+      addCreatedCanvasItems(createdNodes, [], '导演台截图');
+      setNodes(prev => prev.map(node => node.id === sourceNode.id ? {
+          ...node,
+          directorDeskLastCaptureUrl: validCaptures[0].dataUrl,
+      } : node));
+      setSelectedNodeIds(new Set(createdNodes.map(node => node.id)));
+  }, [addCreatedCanvasItems, directorDeskSession, nodes]);
+
+  useEffect(() => {
+      if (!directorDeskSession) return;
+
+      const handleDirectorDeskMessage = (event: MessageEvent) => {
+          if (event.origin !== window.location.origin) return;
+          if (directorDeskIframeRef.current?.contentWindow && event.source !== directorDeskIframeRef.current.contentWindow) return;
+
+          if (event.data?.type === 'storyai:director-desk-ready') {
+              postDirectorDeskSessionToIframe();
+              return;
+          }
+
+          if (event.data?.type === 'storyai:director-desk-close') {
+              setDirectorDeskSession(null);
+              return;
+          }
+
+          if (event.data?.type === 'storyai:director-desk-captures-sent') {
+              const captures = Array.isArray(event.data?.payload?.captures) ? event.data.payload.captures : [];
+              void createDirectorDeskCaptureNodes(captures);
+          }
+      };
+
+      window.addEventListener('message', handleDirectorDeskMessage);
+      return () => window.removeEventListener('message', handleDirectorDeskMessage);
+  }, [createDirectorDeskCaptureNodes, directorDeskSession, postDirectorDeskSessionToIframe]);
 
   // Memoize inputs map to prevent array recreation on every render
   const inputsMap = useMemo(() => {
@@ -1125,6 +1324,9 @@ const CanvasWithSidebar: React.FC = () => {
     } else if (type === NodeType.CREATIVE_DESC) {
         if (!dataOverride?.width) w = 520;
         if (!dataOverride?.height) h = 520;
+    } else if (type === NodeType.DIRECTOR_DESK) {
+        if (!dataOverride?.width) w = 420;
+        if (!dataOverride?.height) h = 260;
     }
     
     const getDefaultTitle = (t: NodeType) => {
@@ -1133,6 +1335,7 @@ const CanvasWithSidebar: React.FC = () => {
             case NodeType.TEXT_TO_VIDEO: return '生视频';
             case NodeType.TEXT_TO_AUDIO: return '音频';
             case NodeType.CREATIVE_DESC: return 'Text';
+            case NodeType.DIRECTOR_DESK: return '3D导演台';
             default: return `原始图片_${Date.now()}`;
         }
     };
@@ -1147,6 +1350,8 @@ const CanvasWithSidebar: React.FC = () => {
                 return 'Minimax-speech-2.8-hd';
             case NodeType.CREATIVE_DESC:
                 return 'Xiaomi MiMo 2.5 Pro';
+            case NodeType.DIRECTOR_DESK:
+                return 'StoryAI 3D Director Desk';
             default:
                 return '';
         }
@@ -1172,6 +1377,9 @@ const CanvasWithSidebar: React.FC = () => {
       textContent: type === NodeType.CREATIVE_DESC ? (dataOverride?.textContent ?? '') : dataOverride?.textContent,
       imageSrc: dataOverride?.imageSrc,
       videoSrc: dataOverride?.videoSrc,
+      directorDeskInstanceId: dataOverride?.directorDeskInstanceId || (type === NodeType.DIRECTOR_DESK ? `director-desk-${Date.now()}` : undefined),
+      directorDeskLastCaptureUrl: dataOverride?.directorDeskLastCaptureUrl,
+      textVersions: dataOverride?.textVersions,
       outputArtifacts: dataOverride?.outputArtifacts || (dataOverride?.imageSrc || dataOverride?.videoSrc ? [dataOverride.imageSrc || dataOverride.videoSrc!] : [])
     };
     
@@ -1248,6 +1456,7 @@ const CanvasWithSidebar: React.FC = () => {
           count: 1,
           prompt: '',
           textContent: type === NodeType.CREATIVE_DESC ? '' : undefined,
+          textVersions: type === NodeType.CREATIVE_DESC ? [] : undefined,
           outputArtifacts: []
       };
 
@@ -1545,6 +1754,10 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+        if (directorDeskSession) {
+            if (e.key === 'Escape') setDirectorDeskSession(null);
+            return;
+        }
         const target = e.target as HTMLElement;
         const isInput = target.tagName === 'INPUT'
             || target.tagName === 'TEXTAREA'
@@ -1579,6 +1792,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
             if (previewText) setPreviewText(null);
             if (contextMenu) setContextMenu(null);
             if (quickAddMenu) setQuickAddMenu(null);
+            if (directorDeskSession) setDirectorDeskSession(null);
             if (showNewWorkflowDialog) setShowNewWorkflowDialog(false);
             if (isStorageOpen) setIsStorageOpen(false);
             if (isExportImportOpen) setIsExportImportOpen(false);
@@ -1592,7 +1806,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
         window.removeEventListener('keydown', handleKeyDown);
         window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedNodeIds, selectedConnectionId, pendingDeleteRequest, previewMedia, previewText, contextMenu, quickAddMenu, showNewWorkflowDialog, isStorageOpen, isExportImportOpen, handleAlign, deleteCanvasItems, undoLastCanvasAction]);
+  }, [selectedNodeIds, selectedConnectionId, pendingDeleteRequest, previewMedia, previewText, contextMenu, quickAddMenu, directorDeskSession, showNewWorkflowDialog, isStorageOpen, isExportImportOpen, handleAlign, deleteCanvasItems, undoLastCanvasAction]);
 
   useEffect(() => {
     // Load storage directory name for the top-right indicator
@@ -1886,7 +2100,17 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
     try {
       if (node.type === NodeType.CREATIVE_DESC) {
         const res = await generateCreativeDescription(node.prompt || '', node.model === 'TEXT_TO_VIDEO' ? 'VIDEO' : 'IMAGE', node.model);
-        updateNodeData(nodeId, { textContent: res, optimizedPrompt: res, isLoading: false, creditEstimate, creditStatus: 'confirmed' });
+        updateNodeData(nodeId, {
+            textContent: res,
+            optimizedPrompt: res,
+            textVersions: mergeTextVersionSnapshots(
+                createTextVersionSnapshot(res, node, 'generate'),
+                node.textVersions
+            ),
+            isLoading: false,
+            creditEstimate,
+            creditStatus: 'confirmed'
+        });
       } else {
           let results: string[] = [];
           
@@ -1972,6 +2196,10 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           updateNodeData(nodeId, {
               textContent: text,
               optimizedPrompt: text,
+              textVersions: mergeTextVersionSnapshots(
+                  createTextVersionSnapshot(text, node, 'media_analysis'),
+                  node.textVersions
+              ),
               isLoading: false,
               creditEstimate,
               creditStatus: 'confirmed'
@@ -1995,7 +2223,17 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       updateNodeData(nodeId, { isLoading: true, creditEstimate, creditStatus: 'reserved' });
       try {
           const text = await analyzeScriptAssets(node.prompt, node.model);
-          updateNodeData(nodeId, { textContent: text, optimizedPrompt: text, isLoading: false, creditEstimate, creditStatus: 'confirmed' });
+          updateNodeData(nodeId, {
+              textContent: text,
+              optimizedPrompt: text,
+              textVersions: mergeTextVersionSnapshots(
+                  createTextVersionSnapshot(text, node, 'script_analysis'),
+                  node.textVersions
+              ),
+              isLoading: false,
+              creditEstimate,
+              creditStatus: 'confirmed'
+          });
       } catch (e) {
           console.error(e);
           alert(`剧本分析失败: ${(e as Error).message}`);
@@ -2450,13 +2688,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       const node = nodes.find(n => n.id === nodeId);
       if (!node || !replaceImageRef.current) return;
       nodeToReplaceRef.current = nodeId;
-      const cat = NODE_MEDIA_CATEGORY[node.type];
-      const acceptMap: Record<MediaCategory, string> = {
-          image: '.png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,image/*',
-          video: '.mp4,.webm,.mov,.avi,.mkv,.flv,.wmv,video/*',
-          text: '.mp3,.wav,.ogg,.aac,.m4a,.flac,audio/*',
-      };
-      replaceImageRef.current.setAttribute('accept', acceptMap[cat] ?? '*/*');
+      replaceImageRef.current.setAttribute('accept', UPLOAD_ACCEPT_BY_KIND[getUploadKindForNode(node.type)] ?? '*/*');
       replaceImageRef.current.value = '';
       replaceImageRef.current.click();
   };
@@ -2468,14 +2700,10 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           const node = nodes.find(n => n.id === nodeId);
           if (!node) { /* noop */ }
           // 校验文件类型是否匹配节点类别，不匹配则拒绝
-          const _cat = node ? NODE_MEDIA_CATEGORY[node.type] : undefined;
-          const _typeOk = !node ||
-              (_cat === 'image' && file.type.startsWith('image/')) ||
-              (_cat === 'video' && file.type.startsWith('video/')) ||
-              (_cat === 'text' && file.type.startsWith('audio/'));
+          const _kind = node ? getUploadKindForNode(node.type) : undefined;
+          const _typeOk = !node || isFileCompatibleWithUploadKind(file, _kind!);
           if (!_typeOk) {
-              const _labels: Record<string, string> = { image: '图片', video: '视频', text: '音频' };
-              alert('当前节点只能上传' + (_labels[_cat!] || '') + '文件');
+              alert('当前节点只能上传' + (UPLOAD_LABEL_BY_KIND[_kind!] || '') + '文件');
               if (replaceImageRef.current) replaceImageRef.current.value = '';
               nodeToReplaceRef.current = null;
               return;
@@ -2507,6 +2735,22 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                   title: file.name || node.title,
                   outputArtifacts: mergeArtifactVersions(url, node.audioSrc, node.outputArtifacts || []),
               });
+          } else if ((file.type.startsWith('text/') || TEXT_FILE_PATTERN.test(file.name)) && node.type === NodeType.CREATIVE_DESC) {
+              const reader = new FileReader();
+              reader.onload = (event) => {
+                  const text = String(event.target?.result || '');
+                  recordCanvasHistory({ type: 'upload-update', label: '上传文件', beforeNodes: [node] });
+                  updateNodeData(nodeId, {
+                      title: file.name || node.title,
+                      textContent: text,
+                      optimizedPrompt: text,
+                      textVersions: mergeTextVersionSnapshots(
+                          createTextVersionSnapshot(text, { ...node, title: file.name || node.title }, 'upload'),
+                          node.textVersions
+                      ),
+                  });
+              };
+              reader.readAsText(file, 'utf-8');
           } else if (file.type.startsWith('image/') && NODE_MEDIA_CATEGORY[node.type] === 'image') {
            const reader = new FileReader();
            reader.onload = (event) => {
@@ -2541,13 +2785,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       nodeToAttachInputRef.current = nodeId;
       const node = nodes.find(n => n.id === nodeId);
       if (attachInputRef.current && node) {
-          const cat = NODE_MEDIA_CATEGORY[node.type];
-          const acceptMap: Record<MediaCategory, string> = {
-              image: '.png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,image/*',
-              video: '.mp4,.webm,.mov,.avi,.mkv,.flv,.wmv,video/*',
-              text: '.mp3,.wav,.ogg,.aac,.m4a,.flac,audio/*',
-          };
-          attachInputRef.current.setAttribute('accept', acceptMap[cat] ?? '*/*');
+          attachInputRef.current.setAttribute('accept', UPLOAD_ACCEPT_BY_KIND[getUploadKindForNode(node.type)] ?? '*/*');
           attachInputRef.current.value = '';
           attachInputRef.current.click();
       }
@@ -2581,14 +2819,10 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       }
 
       // 校验文件类型是否匹配节点类别
-      const _cat = NODE_MEDIA_CATEGORY[target.type];
-      const _typeOk =
-          (_cat === 'image' && file.type.startsWith('image/')) ||
-          (_cat === 'video' && file.type.startsWith('video/')) ||
-          (_cat === 'text' && (file.type.startsWith('audio/') || file.type.startsWith('text/') || file.name.endsWith('.md') || file.name.endsWith('.txt')));
+      const _kind = getUploadKindForNode(target.type);
+      const _typeOk = isFileCompatibleWithUploadKind(file, _kind);
       if (!_typeOk) {
-          const _labels: Record<string, string> = { image: '图片', video: '视频', text: '文本/音频' };
-          alert('当前节点只能上传' + (_labels[_cat] || '') + '文件');
+          alert('当前节点只能上传' + (UPLOAD_LABEL_BY_KIND[_kind] || '') + '文件');
           if (attachInputRef.current) attachInputRef.current.value = '';
           nodeToAttachInputRef.current = null;
           return;
@@ -2683,6 +2917,12 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                   prompt: target.type === NodeType.CREATIVE_DESC ? target.prompt : text,
                   textContent: target.type === NodeType.CREATIVE_DESC ? text : target.textContent,
                   optimizedPrompt: target.type === NodeType.CREATIVE_DESC ? text : target.optimizedPrompt,
+                  textVersions: target.type === NodeType.CREATIVE_DESC
+                      ? mergeTextVersionSnapshots(
+                          createTextVersionSnapshot(text, { ...target, title: baseTitle }, 'upload'),
+                          target.textVersions
+                      )
+                      : target.textVersions,
               });
           };
           reader.readAsText(file, 'utf-8');
@@ -3183,11 +3423,16 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           return;
       }
 
-      if (file.type.startsWith('text/') || /\.(txt|md|markdown)$/i.test(file.name)) {
+      if (file.type.startsWith('text/') || TEXT_FILE_PATTERN.test(file.name)) {
           const reader = new FileReader();
           reader.onload = (event) => {
               const text = String(event.target?.result || '');
               const nodeId = generateId();
+              const versionSource = {
+                  prompt: '',
+                  model: 'Xiaomi MiMo 2.5 Pro',
+                  title: file.name,
+              };
               const newNode: NodeData = {
                   id: nodeId,
                   type: NodeType.CREATIVE_DESC,
@@ -3201,6 +3446,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                   optimizedPrompt: text,
                   model: 'Xiaomi MiMo 2.5 Pro',
                   source: 'local_upload',
+                  textVersions: [createTextVersionSnapshot(text, versionSource, 'upload')],
               };
               const newConnection = getImportedNodeConnection(nodeId);
               addCreatedCanvasItems([newNode], newConnection ? [newConnection] : [], '上传文件');
@@ -3536,6 +3782,10 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       if (!node) return;
       e.stopPropagation();
       e.preventDefault();
+      if (node.type === NodeType.DIRECTOR_DESK) {
+          openDirectorDesk(node.id);
+          return;
+      }
       setDragMode('NONE');
       setSelectedNodeIds(new Set([id]));
       setSelectedConnectionId(null);
@@ -4404,12 +4654,18 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                 const isImageNode = Boolean(node?.imageSrc) || contextMenu.nodeType === NodeType.TEXT_TO_IMAGE || contextMenu.nodeType === NodeType.IMAGE_TO_IMAGE || contextMenu.nodeType === NodeType.ORIGINAL_IMAGE;
                 const isVideoNode = Boolean(node?.videoSrc) || contextMenu.nodeType === NodeType.TEXT_TO_VIDEO || contextMenu.nodeType === NodeType.IMAGE_TO_VIDEO || contextMenu.nodeType === NodeType.START_END_TO_VIDEO;
                 const isTextNode = contextMenu.nodeType === NodeType.CREATIVE_DESC;
+                const isDirectorDeskNode = contextMenu.nodeType === NodeType.DIRECTOR_DESK;
                 
                 return (
                     <>
                         <button className={menuItemClass} onClick={() => { performCopy(); setContextMenu(null); }}>
                             <Icons.Copy size={14}/> 复制节点
                         </button>
+                        {isDirectorDeskNode && (
+                            <button className={menuItemClass} onClick={() => { if (contextMenu.nodeId) openDirectorDesk(contextMenu.nodeId); }}>
+                                <Icons.Clapperboard size={14}/> 进入导演台
+                            </button>
+                        )}
                         {isTextNode && (
                             <button className={menuItemClass} onClick={() => { const text = node ? getTextNodeOutput(node) : ''; if (text) navigator.clipboard?.writeText(text); setContextMenu(null); }}>
                                 <Icons.FileText size={14}/> 复制文本
@@ -4451,6 +4707,10 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                         <button className={menuItemClass} onClick={() => { addNode(NodeType.TEXT_TO_AUDIO, contextMenu.worldX, contextMenu.worldY); setContextMenu(null); }}>
                             <div className="w-5 h-5 rounded bg-amber-500/10 flex items-center justify-center"><Icons.Music size={12} className="text-amber-300"/></div>
                             <span>音频</span>
+                        </button>
+                        <button className={menuItemClass} onClick={() => { addNode(NodeType.DIRECTOR_DESK, contextMenu.worldX, contextMenu.worldY); setContextMenu(null); }}>
+                            <div className="w-5 h-5 rounded bg-[#4446CE]/10 flex items-center justify-center"><Icons.Clapperboard size={12} className="text-[#8F91F4]"/></div>
+                            <span>3D导演台</span>
                         </button>
                         <button className={menuItemClass} onClick={() => { assetImportPositionRef.current = { x: contextMenu.worldX, y: contextMenu.worldY }; assetImportConnectionRef.current = null; assetInputRef.current?.click(); setContextMenu(null); }}>
                             <div className="w-5 h-5 rounded bg-emerald-500/10 flex items-center justify-center"><Icons.Upload size={12} className="text-emerald-400"/></div>
@@ -4610,7 +4870,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
         <input type="file" ref={workflowInputRef} hidden accept=".aistudio-flow,.json" onChange={handleLoadWorkflow} />
         <input type="file" ref={assetInputRef} hidden accept="image/*,video/*,.txt,.md,.markdown,text/plain" onChange={handleImportAsset} />
         <input type="file" ref={replaceImageRef} hidden accept="*/*" onChange={handleReplaceImage} />
-        <input type="file" ref={attachInputRef} hidden accept="image/*,video/*,.txt,.md,text/plain" onChange={handleAttachInputAsset} />
+        <input type="file" ref={attachInputRef} hidden accept="image/*,video/*,audio/*,.txt,.md,.markdown,text/plain,text/markdown" onChange={handleAttachInputAsset} />
         <div 
             ref={containerRef}
             className={`flex-1 w-full h-full relative grid-pattern select-none ${dragMode === 'PAN' ? 'cursor-grabbing' : 'cursor-grab'}`}
@@ -4895,6 +5155,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                             onMultiAngle={handleMultiAngleGenerate}
                             onLighting={handleLightingEdit}
                             onEnhanceImage={handleEnhanceImageEdit}
+                            onOpenDirectorDesk={openDirectorDesk}
                             onExtractFrames={(nodeId: string) => {
                                 const n = nodes.find(nd => nd.id === nodeId);
                                 if (n?.videoSrc) setFrameExtractTarget({ nodeId, videoSrc: n.videoSrc });
@@ -5218,6 +5479,38 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
             {renderDeleteConfirmDialog()}
             {renderSaveResultModal()}
             {renderCreditDashboardV2()}
+            {directorDeskSession && (
+                <div className="fixed inset-0 z-[900] flex flex-col bg-[#0B0C0E]">
+                    <div className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950/95 px-4 text-zinc-100">
+                        <div className="flex min-w-0 items-center gap-3">
+                            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#4446CE]/20 text-[#B9BAFF]">
+                                <Icons.Clapperboard size={18} />
+                            </div>
+                            <div className="min-w-0">
+                                <div className="truncate text-sm font-semibold">{directorDeskSession.title}</div>
+                                <div className="text-[11px] text-zinc-500">截图后会在导演台节点旁边生成图片节点</div>
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            className="flex h-9 items-center gap-2 rounded-xl border border-zinc-700 px-3 text-xs font-semibold text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-900"
+                            onClick={() => setDirectorDeskSession(null)}
+                        >
+                            <Icons.X size={15} />
+                            <span>关闭</span>
+                        </button>
+                    </div>
+                    <iframe
+                        key={directorDeskSession.instanceId}
+                        ref={directorDeskIframeRef}
+                        title="3D导演台"
+                        src={`${DIRECTOR_DESK_APP_PATH}?instanceId=${encodeURIComponent(directorDeskSession.instanceId)}&theme=${isDark ? 'dark' : 'light'}`}
+                        className="min-h-0 flex-1 border-0 bg-black"
+                        onLoad={postDirectorDeskSessionToIframe}
+                        allow="clipboard-write; fullscreen"
+                    />
+                </div>
+            )}
             {previewMedia && (
                 <div data-media-preview-overlay className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/80 backdrop-blur-md animate-in fade-in duration-200" onClick={() => setPreviewMedia(null)}>
                     <div className={`relative bg-black rounded-2xl shadow-2xl overflow-hidden border border-zinc-700 ${previewMedia.type === 'audio' ? 'w-[min(420px,90vw)] p-5' : 'max-w-[90vw] max-h-[90vh]'}`} onClick={(e) => e.stopPropagation()}>

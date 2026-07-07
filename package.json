@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "clean": "node -e \"const fs=require('fs'),path=require('path'); const clean=p=>{if(!fs.existsSync(p))return; for(const e of fs.readdirSync(p,{withFileTypes:true})){const f=path.join(p,e.name); if(e.isDirectory()){clean(f); fs.rmdirSync(f);} else fs.unlinkSync(f);}}; clean('dist');\"",
-    "build": "npm run clean && vite build",
+    "build:director-desk": "npm --prefix micro-apps/director-desk ci && npm --prefix micro-apps/director-desk run build",
+    "build": "npm run build:director-desk && npm run clean && vite build",
     "preview": "vite preview",
     "deploy:cloudflare": "npm run build && npx wrangler deploy",
     "server": "node server/server.mjs",

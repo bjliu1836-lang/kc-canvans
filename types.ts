@@ -8,6 +8,7 @@ export enum NodeType {
   START_END_TO_VIDEO = 'START_END_TO_VIDEO',
   CREATIVE_DESC = 'CREATIVE_DESC',
   ORIGINAL_IMAGE = 'ORIGINAL_IMAGE',
+  DIRECTOR_DESK = 'DIRECTOR_DESK',
 }
 
 export type VideoGenerationMode = 'text' | 'image' | 'start_end' | 'omni';
@@ -38,6 +39,15 @@ export interface ImageVersionSnapshot {
   batchIndex?: number;
 }
 
+export interface TextVersionSnapshot {
+  content: string;
+  prompt: string;
+  model: string;
+  title: string;
+  source: 'generate' | 'media_analysis' | 'script_analysis' | 'upload';
+  createdAt: number;
+}
+
 export interface NodeData {
   id: string;
   type: NodeType;
@@ -52,8 +62,11 @@ export interface NodeData {
   imageSrc?: string; // Result or Input (Active Selection)
   videoSrc?: string; // Result (Active Selection)
   audioSrc?: string; // Result (Active Selection)
+  directorDeskInstanceId?: string; // Scoped 3D director desk scene id
+  directorDeskLastCaptureUrl?: string; // Latest capture returned from the embedded director desk
   outputArtifacts?: string[]; // History/Batch results
   imageVersions?: ImageVersionSnapshot[]; // Image history with generation parameters
+  textVersions?: TextVersionSnapshot[]; // Text history with generation/upload metadata
   favoriteArtifacts?: string[]; // User-favorited node materials
   isLoading?: boolean;
   errorMessage?: string;

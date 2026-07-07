@@ -5,6 +5,7 @@ import { TextToVideoNode } from './TextToVideoNode';
 import { OriginalImageNode } from './OriginalImageNode';
 import { CreativeDescNode } from './CreativeDescNode';
 import { TextToAudioNode } from './TextToAudioNode';
+import { DirectorDeskNode } from './DirectorDeskNode';
 
 interface NodeContentProps {
   data: NodeData;
@@ -35,6 +36,7 @@ interface NodeContentProps {
   onRepaint?: (nodeId: string) => void;
   onLighting?: (nodeId: string) => void;
   onEnhanceImage?: (nodeId: string, resolution: '2K' | '4K') => void;
+  onOpenDirectorDesk?: (nodeId: string) => void;
   onPanorama?: (nodeId: string) => void;
   onToggleFavoriteArtifact?: (nodeId: string, url: string, type: 'image' | 'video') => void;
   isArtifactFavorited?: (nodeId: string, url: string) => boolean;
@@ -62,6 +64,8 @@ const NodeContentComponent: React.FC<NodeContentProps> = (props) => {
             return <OriginalImageNode {...props} />;
         case NodeType.CREATIVE_DESC:
             return <CreativeDescNode {...props} />;
+        case NodeType.DIRECTOR_DESK:
+            return <DirectorDeskNode {...props} />;
         default:
             return null;
     }

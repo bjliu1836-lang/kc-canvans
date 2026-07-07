@@ -26,6 +26,7 @@ export const CreativeDescNode: React.FC<CreativeDescNodeProps> = ({
     const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
     const [isEditingBody, setIsEditingBody] = useState(false);
     const bodyInputRef = useRef<HTMLTextAreaElement>(null);
+    const historyRef = useRef<HTMLDivElement>(null);
     const isSelectedAndStable = selected && showControls && !isSelecting;
     const titleColor = isDark ? 'text-zinc-300' : 'text-gray-700';
     const containerBg = isDark ? 'bg-[#1f1f1f]' : 'bg-white';
@@ -40,6 +41,10 @@ export const CreativeDescNode: React.FC<CreativeDescNodeProps> = ({
     const disabledButton = 'opacity-45 cursor-not-allowed hover:bg-transparent';
     const mediaInputCount = inputMedia.filter(item => item.type === 'image' || item.type === 'video').length;
     const bodyText = data.textContent ?? data.optimizedPrompt ?? '';
+    const textVersions = data.textVersions || [];
+    const currentVersionIndex = textVersions.findIndex(version => version.content === bodyText);
+    const currentVersionNumber = currentVersionIndex >= 0 ? textVersions.length - currentVersionIndex : textVersions.length;
+    const showHistoryBadge = isSelectedAndStable && !data.isStackOpen && textVersions.length > 1;
     const creditLabel = data.creditStatus === 'reserved'
         ? '已预扣'
         : data.creditStatus === 'confirmed'
@@ -63,8 +68,34 @@ export const CreativeDescNode: React.FC<CreativeDescNodeProps> = ({
     useEffect(() => {
         if (!selected) {
             setIsEditingBody(false);
+            if (data.isStackOpen) {
+                updateData(data.id, { isStackOpen: false });
+            }
         }
-    }, [selected]);
+    }, [selected, data.isStackOpen, data.id, updateData]);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (data.isStackOpen && historyRef.current && !historyRef.current.contains(event.target as Node)) {
+                updateData(data.id, { isStackOpen: false });
+            }
+        };
+        if (data.isStackOpen) document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [data.isStackOpen, data.id, updateData]);
+
+    const sourceLabel = (source?: string) => {
+        switch (source) {
+            case 'media_analysis':
+                return '媒体分析';
+            case 'script_analysis':
+                return '角色表';
+            case 'upload':
+                return '上传';
+            default:
+                return '生成';
+        }
+    };
 
     return (
         <>
@@ -112,6 +143,107 @@ export const CreativeDescNode: React.FC<CreativeDescNodeProps> = ({
                     <div className="absolute inset-0 bg-black/45 backdrop-blur-sm flex flex-col items-center justify-center z-20">
                         <Icons.Loader2 size={34} className="text-zinc-100 animate-spin mb-3" />
                         <span className="text-zinc-100 text-sm font-medium">生成中...</span>
+                    </div>
+                )}
+
+                {showHistoryBadge && (
+                    <button
+                        type="button"
+                        className="absolute bottom-4 right-4 z-[90] flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/55 px-2.5 py-1.5 text-[10px] font-semibold text-white shadow-lg backdrop-blur-md hover:bg-black/75"
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            updateData(data.id, { isStackOpen: true });
+                        }}
+                    >
+                        <Icons.Clock size={12} />
+                        <span>历史版本</span>
+                        <span className="text-zinc-300">{textVersions.length}</span>
+                        <Icons.ChevronRight size={11} className="text-zinc-400" />
+                    </button>
+                )}
+
+                {data.isStackOpen && textVersions.length > 0 && (
+                    <div
+                        ref={historyRef}
+                        className={`history-version-drawer absolute left-[calc(100%+16px)] top-0 z-[120] flex w-[420px] max-w-[calc(100vw-48px)] flex-col overflow-hidden rounded-2xl border shadow-2xl backdrop-blur-xl ${isDark ? 'border-zinc-700 bg-[#181818]/97 text-zinc-100' : 'border-gray-200 bg-white/97 text-gray-900'}`}
+                        style={{ height: Math.max(440, data.height) }}
+                        data-canvas-wheel-pass-through="true"
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onWheelCapture={(event) => event.stopPropagation()}
+                    >
+                        <div className={`flex items-start justify-between border-b px-4 py-4 ${isDark ? 'border-zinc-800' : 'border-gray-100'}`}>
+                            <div>
+                                <div className="text-sm font-semibold">历史版本</div>
+                                <div className={`mt-1 text-[11px] ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>
+                                    当前 V{currentVersionNumber || textVersions.length}
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                className={`flex h-8 w-8 items-center justify-center rounded-lg ${isDark ? 'text-zinc-400 hover:bg-zinc-800 hover:text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-900'}`}
+                                title="关闭历史版本"
+                                aria-label="关闭历史版本"
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    updateData(data.id, { isStackOpen: false });
+                                }}
+                            >
+                                <Icons.X size={17} />
+                            </button>
+                        </div>
+                        <div className="custom-scrollbar flex-1 space-y-3 overflow-y-auto overscroll-contain p-3">
+                            {textVersions.map((version, index) => {
+                                const versionNumber = textVersions.length - index;
+                                const isCurrent = version.content === bodyText;
+                                return (
+                                    <div
+                                        key={`${version.createdAt}-${index}`}
+                                        className={`rounded-xl border p-3 transition-colors ${isCurrent
+                                            ? (isDark ? 'border-[#8F91F4]/50 bg-[#4446CE]/12' : 'border-[#C7C8FF] bg-[#F0F1FF]')
+                                            : (isDark ? 'border-zinc-800 bg-black/20 hover:border-zinc-700 hover:bg-white/[0.04]' : 'border-gray-200 bg-gray-50/70 hover:border-gray-300 hover:bg-white')
+                                        }`}
+                                    >
+                                        <div className="mb-2 flex items-center justify-between gap-2">
+                                            <div className="flex items-center gap-2">
+                                                <span className="rounded-full border border-white/15 bg-black/55 px-2.5 py-1 text-[11px] font-bold text-white backdrop-blur-md">
+                                                    V{versionNumber}
+                                                </span>
+                                                <span className={`text-[11px] ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                                                    {sourceLabel(version.source)}
+                                                </span>
+                                            </div>
+                                            <span className={`text-[10px] ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>
+                                                {new Date(version.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                            </span>
+                                        </div>
+                                        <div className={`max-h-28 overflow-hidden whitespace-pre-wrap break-words rounded-lg border px-3 py-2 text-xs leading-relaxed ${isDark ? 'border-zinc-800 bg-zinc-950/60 text-zinc-300' : 'border-gray-200 bg-white text-gray-700'}`}>
+                                            {version.content}
+                                        </div>
+                                        <div className="mt-3 flex items-center justify-end">
+                                            {isCurrent ? (
+                                                <span className={`text-[11px] font-semibold ${isDark ? 'text-[#B9BAFF]' : 'text-[#3739B0]'}`}>当前版本</span>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    className="h-8 rounded-lg bg-[#4446CE] px-3.5 text-[11px] font-semibold text-white shadow-lg hover:bg-[#5557DB]"
+                                                    onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        updateData(data.id, {
+                                                            textContent: version.content,
+                                                            optimizedPrompt: version.content,
+                                                            isStackOpen: false,
+                                                        });
+                                                    }}
+                                                >
+                                                    设为当前
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
                     </div>
                 )}
             </div>
