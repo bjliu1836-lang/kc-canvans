@@ -1,21 +1,39 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+const localGuoAssetsAvailable = existsSync(resolve(process.cwd(), "public/local-assets/guo-3d-assets"));
+const appVersion = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")).version ?? "0.0.0";
+const requiredMixamoCharacters = ["camille.fbx", "xbot.glb", "soldier.glb"];
+const localMixamoCharacterAvailable = requiredMixamoCharacters.every((fileName) =>
+  existsSync(resolve(process.cwd(), "public/local-assets/mixamo/characters", fileName))
+);
+const requiredMixamoAnimations = [
+  "walk.fbx",
+  "run.fbx",
+  "sit-stand.fbx",
+  "side-step-left.fbx",
+  "jump.fbx",
+  "wave.fbx",
+];
+const localMixamoAnimationsAvailable = requiredMixamoAnimations.every((fileName) =>
+  existsSync(resolve(process.cwd(), "public/local-assets/mixamo/animations", fileName))
+);
 
 export default defineConfig({
   base: "/director-desk/",
+  assetsInclude: ["**/*.fbx", "**/*.glb", "**/*.obj"],
+  plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+    __LOCAL_GUO_ASSETS_AVAILABLE__: JSON.stringify(localGuoAssetsAvailable),
+    __LOCAL_MIXAMO_CHARACTER_AVAILABLE__: JSON.stringify(localMixamoCharacterAvailable),
+    __LOCAL_MIXAMO_ANIMATIONS_AVAILABLE__: JSON.stringify(localMixamoAnimationsAvailable),
+  },
   build: {
     outDir: "../../public/director-desk",
     emptyOutDir: true,
-  },
-  assetsInclude: ["**/*.fbx", "**/*.obj"],
-  plugins: [react()],
-  server: {
-    fs: {
-      allow: [
-        decodeURIComponent(new URL(".", import.meta.url).pathname),
-        decodeURIComponent(new URL("../模型库", import.meta.url).pathname),
-      ],
-    },
   },
   test: {
     environment: "jsdom",

@@ -16,10 +16,10 @@ import {
   Grid2X2,
   Grid3X3,
   Image,
-  ImagePlus,
   Move3D,
   Plus,
   Ratio,
+  Route,
   Rotate3D,
   Scale3D,
   Trash2,
@@ -30,8 +30,16 @@ import {
 } from "lucide-react";
 import { requestViewportCapture } from "../io/captureBridge";
 import { readLocalModelFile } from "../loaders/localModelImport";
-import { readPanoramaFile } from "../loaders/panoramaImport";
 import {
+  inspectCharacterModelFile,
+  type CharacterAssetInspection,
+} from "../loaders/characterAssetInspection";
+import {
+  getCharacterImportPreviewSteps,
+  type CharacterImportPreviewStep,
+} from "../loaders/characterImportPreview";
+import {
+  getModelLibraryCharacterStatus,
   getModelLibraryItems,
   MODEL_LIBRARY_CATEGORIES,
   type ModelLibraryCategoryId,
@@ -41,6 +49,10 @@ import {
   VIEWPORT_ASPECT_RATIO_OPTIONS,
   type ViewportAspectRatio,
 } from "../schema/viewportAspectRatio";
+import {
+  DIRECTOR_CHARACTER_BONE_PART_OPTIONS,
+  isCompleteDirectorCharacterBoneMap,
+} from "../schema/semanticBody";
 import { BODY_TYPE_OPTIONS, type CharacterBodyType } from "../runtime/mannequin/bodyTypes";
 import { GEOMETRY_PRIMITIVE_OPTIONS, type GeometryPrimitiveType } from "../schema/directorProject";
 import {
@@ -54,6 +66,7 @@ type ToolbarAction = {
   label: string;
   icon: LucideIcon;
   mode?: TransformMode;
+  pressed?: boolean;
   onClick: () => void;
 };
 
@@ -66,6 +79,23 @@ const MIN_CROWD_GRID_SIZE = 1;
 const MAX_CROWD_GRID_SIZE = 12;
 const MIN_CROWD_SPACING = 0.1;
 const MAX_CROWD_SPACING = 10;
+const CHARACTER_IMPORT_PREVIEW_STEP_MS = 1800;
+
+const CHARACTER_IMPORT_STATUS_LABELS = {
+  ready: "可直接使用",
+  "native-only": "仅自带动作",
+  "manual-mapping": "需要手动映射",
+  "static-only": "仅静态使用",
+} as const;
+
+export function canImportCharacterFromInspection(
+  report: CharacterAssetInspection,
+  boneMap: CharacterAssetInspection["boneMap"] = report.boneMap
+) {
+  if (report.readiness === "static-only") return false;
+  if (report.readiness === "manual-mapping") return isCompleteDirectorCharacterBoneMap(boneMap);
+  return true;
+}
 
 function clampCrowdGridSize(value: number) {
   if (!Number.isFinite(value)) return MIN_CROWD_GRID_SIZE;
@@ -101,13 +131,26 @@ export function ViewportToolbar({
   const crowdPanelRef = useRef<HTMLDivElement | null>(null);
   const modelLibraryPanelRef = useRef<HTMLDivElement | null>(null);
   const sceneLocalModelInputRef = useRef<HTMLInputElement | null>(null);
+  const characterLocalModelInputRef = useRef<HTMLInputElement | null>(null);
   const libraryLocalModelInputRef = useRef<HTMLInputElement | null>(null);
-  const panoramaInputRef = useRef<HTMLInputElement | null>(null);
   const [characterMenuOpen, setCharacterMenuOpen] = useState(false);
   const [geometryMenuOpen, setGeometryMenuOpen] = useState(false);
   const [crowdPanelOpen, setCrowdPanelOpen] = useState(false);
   const [modelLibraryOpen, setModelLibraryOpen] = useState(false);
   const [aspectRatioPanelOpen, setAspectRatioPanelOpen] = useState(false);
+  const [pendingCharacterImport, setPendingCharacterImport] = useState<{
+    file: File;
+    report: CharacterAssetInspection;
+    boneMap: NonNullable<CharacterAssetInspection["boneMap"]>;
+  } | null>(null);
+  const [characterImportError, setCharacterImportError] = useState<string | null>(null);
+  const [characterImportBusy, setCharacterImportBusy] = useState(false);
+  const [characterImportPreview, setCharacterImportPreviewState] = useState<{
+    objectId: string;
+    steps: CharacterImportPreviewStep[];
+    stepIndex: number;
+  } | null>(null);
+  const characterImportPlaybackRestoreRef = useRef<{ playing: boolean; progress: number } | null>(null);
   const [toolbarHeight, setToolbarHeight] = useState(DEFAULT_VIEWPORT_TOOLBAR_HEIGHT);
   const [characterMenuStyle, setCharacterMenuStyle] = useState<CSSProperties>({});
   const [geometryMenuStyle, setGeometryMenuStyle] = useState<CSSProperties>({});
@@ -120,6 +163,12 @@ export function ViewportToolbar({
   const [activeModelLibraryCategoryId, setActiveModelLibraryCategoryId] =
     useState<ModelLibraryCategoryId>("convenience");
   const addImportedAsset = useDirectorStore((state) => state.addImportedAsset);
+  const addImportedAnimationAsset = useDirectorStore((state) => state.addImportedAnimationAsset);
+  const applyCharacterActionPreset = useDirectorStore((state) => state.applyCharacterActionPreset);
+  const restartCameraMotionPlayback = useDirectorStore((state) => state.restartCameraMotionPlayback);
+  const setCameraMotionPlaying = useDirectorStore((state) => state.setCameraMotionPlaying);
+  const setCameraMotionProgress = useDirectorStore((state) => state.setCameraMotionProgress);
+  const setCharacterActionPreview = useDirectorStore((state) => state.setCharacterActionPreview);
   const addObjectFromAsset = useDirectorStore((state) => state.addObjectFromAsset);
   const removeImportedAsset = useDirectorStore((state) => state.removeImportedAsset);
   const assets = useDirectorStore((state) => state.project.assets);
@@ -131,11 +180,63 @@ export function ViewportToolbar({
   const activeCameraId = useDirectorStore((state) => state.project.activeCameraId);
   const viewMode = useDirectorStore((state) => state.viewMode);
   const transformMode = useDirectorStore((state) => state.transformMode);
+  const showCharacterRoutes = useDirectorStore((state) => state.showCharacterRoutes);
   const viewportAspectRatio = useDirectorStore((state) => state.viewportAspectRatio);
   const setViewMode = useDirectorStore((state) => state.setViewMode);
   const setTransformMode = useDirectorStore((state) => state.setTransformMode);
+  const setShowCharacterRoutes = useDirectorStore((state) => state.setShowCharacterRoutes);
   const setViewportAspectRatio = useDirectorStore((state) => state.setViewportAspectRatio);
   const toggleViewportPanelsCollapsed = useDirectorStore((state) => state.toggleViewportPanelsCollapsed);
+
+  function stopCharacterImportPreview() {
+    setCharacterImportPreviewState(null);
+    setCharacterActionPreview(null);
+    const restore = characterImportPlaybackRestoreRef.current;
+    characterImportPlaybackRestoreRef.current = null;
+    if (restore) {
+      setCameraMotionPlaying(false);
+      setCameraMotionProgress(restore.progress);
+      setCameraMotionPlaying(restore.playing);
+    }
+  }
+
+  function startCharacterImportPreview(objectId: string, steps: CharacterImportPreviewStep[]) {
+    if (!steps.length) return;
+    const runtime = useDirectorStore.getState();
+    characterImportPlaybackRestoreRef.current = {
+      playing: runtime.cameraMotionPlaying,
+      progress: runtime.cameraMotionProgress,
+    };
+    setCharacterImportPreviewState({ objectId, steps, stepIndex: 0 });
+  }
+
+  useEffect(() => {
+    if (!characterImportPreview) return;
+    const step = characterImportPreview.steps[characterImportPreview.stepIndex];
+    if (!step) {
+      stopCharacterImportPreview();
+      return;
+    }
+    setCharacterActionPreview({
+      objectId: characterImportPreview.objectId,
+      actionPresetId: step.actionPresetId,
+    });
+    restartCameraMotionPlayback();
+    const timeout = window.setTimeout(() => {
+      if (characterImportPreview.stepIndex + 1 >= characterImportPreview.steps.length) {
+        stopCharacterImportPreview();
+        return;
+      }
+      setCharacterImportPreviewState((current) => current
+        ? { ...current, stepIndex: current.stepIndex + 1 }
+        : current);
+    }, CHARACTER_IMPORT_PREVIEW_STEP_MS);
+    return () => window.clearTimeout(timeout);
+  }, [characterImportPreview, restartCameraMotionPlayback, setCharacterActionPreview]);
+
+  useEffect(() => () => {
+    setCharacterActionPreview(null);
+  }, [setCharacterActionPreview]);
 
   useEffect(() => {
     if (!characterMenuOpen && !crowdPanelOpen && !modelLibraryOpen && !aspectRatioPanelOpen) return;
@@ -148,8 +249,8 @@ export function ViewportToolbar({
       if (event.target instanceof Node && modelLibraryPanelRef.current?.contains(event.target)) return;
       if (event.target instanceof Node && aspectRatioPanelRef.current?.contains(event.target)) return;
       if (event.target instanceof Node && sceneLocalModelInputRef.current?.contains(event.target)) return;
+      if (event.target instanceof Node && characterLocalModelInputRef.current?.contains(event.target)) return;
       if (event.target instanceof Node && libraryLocalModelInputRef.current?.contains(event.target)) return;
-      if (event.target instanceof Node && panoramaInputRef.current?.contains(event.target)) return;
 
       setCharacterMenuOpen(false);
       setGeometryMenuOpen(false);
@@ -291,18 +392,101 @@ export function ViewportToolbar({
     }
   }
 
-  async function handlePanoramaChange(event: ChangeEvent<HTMLInputElement>) {
+  async function handleCharacterModelChange(event: ChangeEvent<HTMLInputElement>) {
     const input = event.currentTarget;
     const file = input.files?.[0];
     if (!file) return;
+    setCharacterImportError(null);
+    setCharacterImportBusy(true);
 
     try {
-      const result = await readPanoramaFile(file);
-      addImportedAsset({ kind: "panorama", ...result });
-    } catch {
-      // The toolbar keeps file actions quiet; detailed import feedback lives in the side panel.
+      const report = await inspectCharacterModelFile(file);
+      setPendingCharacterImport({ file, report, boneMap: report.boneMap ?? {} });
+      setCharacterMenuOpen(false);
+    } catch (error) {
+      setCharacterImportError(error instanceof Error ? error.message : "人物模型体检失败");
     } finally {
+      setCharacterImportBusy(false);
       input.value = "";
+    }
+  }
+
+  async function confirmCharacterImport(kind: "character" | "prop") {
+    if (!pendingCharacterImport) return;
+    setCharacterImportError(null);
+
+    if (kind === "character" && !canImportCharacterFromInspection(
+      pendingCharacterImport.report,
+      pendingCharacterImport.boneMap
+    )) {
+      setCharacterImportError(
+        pendingCharacterImport.report.readiness === "static-only"
+          ? "该文件没有可用蒙皮骨架，只能作为静态道具加入"
+          : "请先完成 15 个身体部位的骨骼映射"
+      );
+      return;
+    }
+
+    setCharacterImportBusy(true);
+
+    try {
+      const result = await readLocalModelFile(pendingCharacterImport.file);
+      addImportedAsset({
+        kind,
+        ...result,
+        assetSource: "local",
+        characterRigProfile: pendingCharacterImport.report.rigProfile,
+        characterImportReadiness: kind === "character" && pendingCharacterImport.report.readiness === "manual-mapping"
+          ? "ready"
+          : pendingCharacterImport.report.readiness,
+        characterOrientationCorrection: pendingCharacterImport.report.orientationCorrection,
+        characterBoneMap: pendingCharacterImport.boneMap,
+      });
+      const embeddedClips = pendingCharacterImport.report.animations.filter(
+        (clip) => clip.duration > 0.05 && clip.trackCount > 0
+      );
+      let embeddedAnimationAssetId: string | null = null;
+      if (kind === "character" && embeddedClips.length) {
+        const animationAssetId = addImportedAnimationAsset({
+          name: `${result.name} 自带动作`,
+          fileName: result.fileName,
+          url: result.url,
+          modelFormat: pendingCharacterImport.report.format,
+          storageKey: result.storageKey,
+          byteLength: result.byteLength,
+          rigProfile: pendingCharacterImport.report.rigProfile,
+          sourceCharacterAssetId: result.storageKey ? `local_asset_${result.storageKey}` : undefined,
+          clips: embeddedClips.map((clip, index) => ({
+            id: `clip_${index + 1}`,
+            name: clip.name,
+            duration: clip.duration,
+            trackCount: clip.trackCount,
+          })),
+        });
+        embeddedAnimationAssetId = animationAssetId;
+        const importedCharacterId = useDirectorStore.getState().selectedObjectId;
+        if (importedCharacterId && pendingCharacterImport.report.readiness === "native-only") {
+          applyCharacterActionPreset(importedCharacterId, null);
+        }
+      }
+      const importedCharacterId = useDirectorStore.getState().selectedObjectId;
+      if (kind === "character" && importedCharacterId) {
+        startCharacterImportPreview(importedCharacterId, getCharacterImportPreviewSteps({
+          animationAssetId: embeddedAnimationAssetId,
+          clips: embeddedClips.map((clip, index) => ({
+            id: `clip_${index + 1}`,
+            name: clip.name,
+            duration: clip.duration,
+            trackCount: clip.trackCount,
+          })),
+          readiness: pendingCharacterImport.report.readiness,
+        }));
+      }
+      setPendingCharacterImport(null);
+    } catch (error) {
+      setCharacterImportError(error instanceof Error ? error.message : "人物模型导入失败");
+    } finally {
+      setCharacterImportBusy(false);
     }
   }
 
@@ -394,11 +578,15 @@ export function ViewportToolbar({
 
   function addModelLibraryItem(item: ModelLibraryItem) {
     addImportedAsset({
-      kind: "prop",
+      kind: item.kind ?? "prop",
       assetSource: "library",
       fileName: item.fileName,
       name: item.name,
       url: item.url,
+      modelFormat: item.fileName.toLowerCase().endsWith(".glb") ? "glb" : item.fileName.toLowerCase().endsWith(".fbx") ? "fbx" : undefined,
+      characterRigProfile: item.characterRigProfile,
+      characterImportReadiness: item.characterImportReadiness,
+      characterOrientationCorrection: item.characterOrientationCorrection,
     });
     setModelLibraryOpen(false);
   }
@@ -415,7 +603,8 @@ export function ViewportToolbar({
           categoryId: "my-models",
           fileName: asset.fileName,
           id: asset.id,
-          name: asset.name ?? asset.fileName.replace(/\.(fbx|obj)$/i, ""),
+          kind: asset.kind === "character" ? "character" : "prop",
+          name: asset.name ?? asset.fileName.replace(/\.(fbx|obj|glb)$/i, ""),
           thumbUrl: undefined,
           url: asset.url,
         }) satisfies ModelLibraryItem
@@ -443,7 +632,12 @@ export function ViewportToolbar({
     { label: "移动", icon: Move3D, mode: "translate", onClick: () => selectTransformMode("translate") },
     { label: "旋转", icon: Rotate3D, mode: "rotate", onClick: () => selectTransformMode("rotate") },
     { label: "缩放", icon: Scale3D, mode: "scale", onClick: () => selectTransformMode("scale") },
-    { label: "导入全景图", icon: ImagePlus, onClick: () => panoramaInputRef.current?.click() },
+    {
+      label: "显示人物路线",
+      icon: Route,
+      pressed: showCharacterRoutes,
+      onClick: () => setShowCharacterRoutes(!showCharacterRoutes),
+    },
     {
       label: "导入本地模型",
       icon: Box,
@@ -462,13 +656,13 @@ export function ViewportToolbar({
 
   function renderActionButton(action: ToolbarAction) {
     const Icon = action.icon;
-    const active = action.mode ? transformMode === action.mode : false;
+    const active = action.mode ? transformMode === action.mode : action.pressed ?? false;
 
     return (
       <button
         key={action.label}
         aria-label={action.label}
-        aria-pressed={action.mode ? active : undefined}
+        aria-pressed={action.mode || action.pressed !== undefined ? active : undefined}
         className={`ui-icon-button viewport-toolbar-button${active ? " is-active" : ""}`}
         type="button"
         onClick={action.onClick}
@@ -559,6 +753,15 @@ export function ViewportToolbar({
               {option.label}
             </button>
           ))}
+          <button
+            className="viewport-toolbar-menu-item-inline"
+            role="menuitem"
+            type="button"
+            onClick={() => characterLocalModelInputRef.current?.click()}
+          >
+            <UserPlus aria-hidden="true" size={14} strokeWidth={1.8} />
+            <span>{characterImportBusy ? "正在体检..." : "导入绑骨人物"}</span>
+          </button>
           <div
             className="viewport-toolbar-submenu-wrap"
             onMouseEnter={openCrowdPanel}
@@ -769,6 +972,9 @@ export function ViewportToolbar({
                         )}
                       </span>
                       <span className="model-library-name">{item.name}</span>
+                      {getModelLibraryCharacterStatus(item) ? (
+                        <small className="model-library-character-status">{getModelLibraryCharacterStatus(item)}</small>
+                      ) : null}
                     </button>
                     <button
                       aria-label={`删除模型 ${item.name}`}
@@ -805,6 +1011,9 @@ export function ViewportToolbar({
                       )}
                     </span>
                     <span className="model-library-name">{item.name}</span>
+                    {getModelLibraryCharacterStatus(item) ? (
+                      <small className="model-library-character-status">{getModelLibraryCharacterStatus(item)}</small>
+                    ) : null}
                   </button>
                 )
               ))}
@@ -855,24 +1064,146 @@ export function ViewportToolbar({
           </div>
         </div>
       ) : null}
-      <input
-        ref={panoramaInputRef}
-        aria-hidden="true"
-        className="hidden-file-input"
-        tabIndex={-1}
-        accept=".jpg,.jpeg,.png,.webp"
-        type="file"
-        onChange={(event) => void handlePanoramaChange(event)}
-      />
+      {pendingCharacterImport ? (
+        <div className="character-import-dialog" role="dialog" aria-label="人物模型体检结果">
+          <div className="character-import-dialog-header">
+            <div>
+              <h2>人物模型体检</h2>
+              <p>{pendingCharacterImport.file.name}</p>
+            </div>
+            <button
+              aria-label="关闭人物模型体检"
+              className="top-bar-action-button"
+              type="button"
+              onClick={() => setPendingCharacterImport(null)}
+            >
+              <X aria-hidden="true" size={16} />
+            </button>
+          </div>
+          <div className={`character-import-status is-${pendingCharacterImport.report.readiness}`}>
+            {CHARACTER_IMPORT_STATUS_LABELS[pendingCharacterImport.report.readiness]}
+          </div>
+          {(() => {
+            const boneMap = pendingCharacterImport.boneMap ?? {};
+            const mappingCount = Object.keys(boneMap).length;
+            const canAddAsCharacter = canImportCharacterFromInspection(
+              pendingCharacterImport.report,
+              boneMap
+            );
+            const boneNames = pendingCharacterImport.report.boneNames ?? [];
+
+            return <>
+          <dl className="character-import-metrics">
+            <div><dt>骨架</dt><dd>{pendingCharacterImport.report.primaryBoneCount} 根骨骼</dd></div>
+            <div><dt>身体识别</dt><dd>{mappingCount + 1}/16</dd></div>
+            <div><dt>可播放动作</dt><dd>{pendingCharacterImport.report.playableAnimationCount} 个</dd></div>
+            <div><dt>站立方向</dt><dd>{pendingCharacterImport.report.uprightAxis.toUpperCase()} 轴</dd></div>
+          </dl>
+          {pendingCharacterImport.report.readiness === "manual-mapping" ? (
+            <section className="character-import-mapping" aria-label="手动骨架映射">
+              <div className="character-import-mapping-header">
+                <strong>补全骨架映射</strong>
+                <span>{mappingCount}/15</span>
+              </div>
+              <p>只需把下面主要部位对应到模型骨骼，完成后即可跟拍和使用外部动作。</p>
+              <div className="character-import-mapping-grid">
+                {DIRECTOR_CHARACTER_BONE_PART_OPTIONS.map((part) => (
+                  <label key={part.value}>
+                    <span>{part.label}</span>
+                    <select
+                      aria-label={`映射 ${part.label}`}
+                      value={boneMap[part.value] ?? ""}
+                      onChange={(event) => setPendingCharacterImport((current) => current
+                        ? {
+                            ...current,
+                            boneMap: {
+                              ...current.boneMap,
+                              [part.value]: event.target.value || undefined,
+                            },
+                          }
+                        : current)}
+                    >
+                      <option value="">未映射</option>
+                      {boneNames.map((boneName) => <option key={boneName} value={boneName}>{boneName}</option>)}
+                    </select>
+                  </label>
+                ))}
+              </div>
+            </section>
+          ) : null}
+          {pendingCharacterImport.report.warnings.length ? (
+            <ul className="character-import-warnings">
+              {pendingCharacterImport.report.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+            </ul>
+          ) : (
+            <p className="character-import-ready-copy">骨架和身体部位识别完整，可以直接加入场景。</p>
+          )}
+          {characterImportError ? <p className="character-import-error">{characterImportError}</p> : null}
+          <div className="character-import-actions">
+            <button type="button" onClick={() => setPendingCharacterImport(null)}>取消</button>
+            {canAddAsCharacter ? (
+              <button
+                className="is-primary"
+                disabled={characterImportBusy}
+                type="button"
+                onClick={() => void confirmCharacterImport("character")}
+              >
+                {characterImportBusy ? "正在导入..." : "作为人物加入"}
+              </button>
+            ) : (
+              <button
+                className="is-primary"
+                disabled={characterImportBusy || pendingCharacterImport.report.readiness === "manual-mapping"}
+                type="button"
+                onClick={() => void confirmCharacterImport("prop")}
+              >
+                {characterImportBusy ? "正在导入..." : pendingCharacterImport.report.readiness === "manual-mapping" ? "补全映射后作为人物加入" : "作为静态道具加入"}
+              </button>
+            )}
+          </div>
+            </>;
+          })()}
+        </div>
+      ) : null}
+      {characterImportError && !pendingCharacterImport ? (
+        <div className="character-import-toast" role="alert">{characterImportError}</div>
+      ) : null}
+      {characterImportPreview ? (
+        <div className="character-import-preview-bar" role="status" aria-label="人物动作自动自检">
+          <div>
+            <strong>人物动作自检</strong>
+            <span>
+              正在预览：{characterImportPreview.steps[characterImportPreview.stepIndex]?.label}
+              {` ${characterImportPreview.stepIndex + 1}/${characterImportPreview.steps.length}`}
+            </span>
+          </div>
+          <div className="character-import-preview-steps" aria-hidden="true">
+            {characterImportPreview.steps.map((step, index) => (
+              <i key={`${step.actionPresetId}-${index}`} className={index <= characterImportPreview.stepIndex ? "is-active" : undefined} />
+            ))}
+          </div>
+          <button type="button" onClick={stopCharacterImportPreview}>跳过</button>
+        </div>
+      ) : null}
       <input
         ref={sceneLocalModelInputRef}
         aria-hidden="true"
         className="hidden-file-input"
         data-testid="scene-local-model-input"
         tabIndex={-1}
-        accept=".fbx,.obj"
+        accept=".fbx,.obj,.glb"
         type="file"
         onChange={(event) => void handleLocalModelChange(event, true)}
+      />
+      <input
+        ref={characterLocalModelInputRef}
+        aria-hidden="true"
+        className="hidden-file-input"
+        data-testid="character-local-model-input"
+        tabIndex={-1}
+        accept=".fbx,.glb"
+        type="file"
+        onChange={(event) => void handleCharacterModelChange(event)}
       />
       <input
         ref={libraryLocalModelInputRef}
@@ -880,7 +1211,7 @@ export function ViewportToolbar({
         className="hidden-file-input"
         data-testid="library-local-model-input"
         tabIndex={-1}
-        accept=".fbx,.obj"
+        accept=".fbx,.obj,.glb"
         multiple
         type="file"
         onChange={(event) => void handleLocalModelChange(event, false)}

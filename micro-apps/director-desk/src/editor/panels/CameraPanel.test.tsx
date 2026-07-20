@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, vi } from "vitest";
 import { clearViewportCaptureHandler, setViewportCaptureHandler } from "../io/captureBridge";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
 import { CameraPanel } from "./CameraPanel";
+import { getDirectorObjectFocusTarget } from "../schema/cameraTarget";
 
 function seedCameraCapture() {
   useDirectorStore.setState((state) => ({
@@ -82,6 +83,9 @@ beforeEach(() => {
     ...useDirectorStore.getState(),
     ...createInitialDirectorState(),
     selectedObjectId: "cam_object_1",
+    selectedCameraKeyframeId: null,
+    cameraMotionProgress: 0,
+    cameraMotionPlaying: false,
   });
 });
 
@@ -139,6 +143,116 @@ it("keeps camera panel tab labels in fixed slots while switching tabs", async ()
   expect(propertyTab).toHaveClass("right-inspector-tab-button");
   expect(capturesTab).toHaveClass("right-inspector-tab-button");
   expect(capturesTab).toHaveAttribute("aria-pressed", "true");
+});
+
+it("builds and previews a free camera motion path from the motion tab", async () => {
+  const user = userEvent.setup();
+  render(<CameraPanel />);
+
+  await user.click(screen.getByRole("button", { name: "轨迹" }));
+
+  expect(screen.getByRole("status")).toHaveTextContent("还没有摄影机轨迹");
+  await user.click(screen.getByRole("button", { name: "将当前机位添加为轨迹点" }));
+
+  const currentCamera = useDirectorStore.getState().project.cameras[0];
+  act(() => {
+    useDirectorStore.getState().updateCamera("cam_1", {
+      transform: { ...currentCamera.transform, position: [4, 3, -2] },
+      fov: 38,
+    });
+  });
+  await user.click(screen.getByRole("button", { name: "将当前机位添加为轨迹点" }));
+
+  const keyframeList = screen.getByRole("list", { name: "摄影机轨迹点" });
+  expect(within(keyframeList).getAllByRole("listitem")).toHaveLength(2);
+  expect(screen.getByLabelText("摄影机路径插值")).toHaveTextContent("平滑曲线");
+
+  const playButton = screen.getByRole("button", { name: "播放轨迹预演" });
+  expect(playButton).toBeEnabled();
+  await user.click(playButton);
+
+  expect(useDirectorStore.getState().viewMode).toBe("camera");
+  expect(useDirectorStore.getState().cameraMotionPlaying).toBe(true);
+
+  fireEvent.change(screen.getByLabelText("摄影机轨迹播放位置"), { target: { value: "0.4" } });
+
+  expect(useDirectorStore.getState().cameraMotionPlaying).toBe(false);
+  expect(useDirectorStore.getState().cameraMotionProgress).toBe(0.4);
+});
+
+it("activates the first existing motion point when opening the motion tab", async () => {
+  const user = userEvent.setup();
+  useDirectorStore.getState().addCameraMotionKeyframe("cam_1");
+  useDirectorStore.setState({
+    ...useDirectorStore.getState(),
+    viewMode: "camera",
+    selectedCameraKeyframeId: null,
+    cameraMotionProgress: 0.75,
+  });
+
+  render(<CameraPanel />);
+  await user.click(screen.getByRole("button", { name: "轨迹" }));
+
+  expect(useDirectorStore.getState().viewMode).toBe("director");
+  expect(useDirectorStore.getState().selectedCameraKeyframeId).toBe("cam_1_motion_key_1");
+  expect(useDirectorStore.getState().cameraMotionProgress).toBe(0);
+  expect(screen.getByRole("button", { name: "选择轨迹点 K1" })).toHaveAttribute("aria-pressed", "true");
+});
+
+it("uses computed automatic arrival times when selecting motion points", async () => {
+  const user = userEvent.setup();
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    ...state,
+    project: {
+      ...state.project,
+      cameras: state.project.cameras.map((camera) => ({
+        ...camera,
+        motionPath: {
+          duration: 10,
+          loop: false,
+          interpolation: "linear",
+          easing: "linear",
+          speedMode: "uniform",
+          keyframes: [
+            { id: "panel_uniform_1", time: 0, position: [0, 2, 8], target: [0, 1, 0], fov: 50 },
+            { id: "panel_uniform_2", time: 0.5, position: [1, 2, 8], target: [0, 1, 0], fov: 50 },
+            { id: "panel_uniform_3", time: 1, position: [10, 2, 8], target: [0, 1, 0], fov: 50 },
+          ],
+        },
+      })),
+    },
+  });
+  render(<CameraPanel />);
+
+  await user.click(screen.getByRole("button", { name: "轨迹" }));
+  await user.click(screen.getByRole("button", { name: "选择轨迹点 K2" }));
+
+  expect(useDirectorStore.getState().cameraMotionProgress).toBeCloseTo(0.1, 4);
+  expect(screen.getByRole("button", { name: "选择轨迹点 K2" })).toHaveTextContent("1.0s");
+});
+
+it("edits and removes the selected camera motion keyframe", async () => {
+  const user = userEvent.setup();
+  useDirectorStore.getState().addCameraMotionKeyframe("cam_1");
+  render(<CameraPanel />);
+
+  await user.click(screen.getByRole("button", { name: "轨迹" }));
+  await user.clear(screen.getByLabelText("轨迹点位置 X"));
+  await user.type(screen.getByLabelText("轨迹点位置 X"), "7.5");
+  await user.clear(screen.getByLabelText("轨迹点 FOV"));
+  await user.type(screen.getByLabelText("轨迹点 FOV"), "32");
+  await user.tab();
+
+  expect(useDirectorStore.getState().project.cameras[0].motionPath?.keyframes[0]).toMatchObject({
+    position: [7.5, expect.any(Number), expect.any(Number)],
+    fov: 32,
+  });
+
+  await user.click(screen.getByRole("button", { name: "删除当前轨迹点" }));
+
+  expect(useDirectorStore.getState().project.cameras[0].motionPath?.keyframes).toEqual([]);
+  expect(screen.getByRole("status")).toHaveTextContent("还没有摄影机轨迹");
 });
 
 it("updates the selected camera name and fov", async () => {
@@ -212,10 +326,10 @@ it("lists visible viewport models as camera focus targets and centers on the sel
   expect(focusedObject).toBeTruthy();
   expect(camera?.targetMode).toBe("object");
   expect(camera?.targetObjectId).toBe(focusedObject?.id);
-  expect(camera?.target).toEqual([-1.25, 0.99, 0]);
+  expect(camera?.target).toEqual(getDirectorObjectFocusTarget(focusedObject!));
   expect(screen.getByLabelText("注视目标模式")).toHaveTextContent("角色02");
   expect(screen.getByLabelText("注视坐标 X")).toHaveValue(-1.25);
-  expect(screen.getByLabelText("注视坐标 Y")).toHaveValue(0.99);
+  expect(screen.getByLabelText("注视坐标 Y")).toHaveValue(camera?.target[1]);
   expect(screen.getByLabelText("注视坐标 Z")).toHaveValue(0);
 });
 

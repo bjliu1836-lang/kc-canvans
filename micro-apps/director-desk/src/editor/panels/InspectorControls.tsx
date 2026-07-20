@@ -53,6 +53,7 @@ type RangeNumberFieldProps = {
   min: string | number;
   max: string | number;
   step: string | number;
+  disabled?: boolean;
 };
 
 type InspectorSelectOption = {
@@ -437,6 +438,7 @@ export function InspectorRangeNumberField({
   min,
   max,
   step,
+  disabled = false,
 }: RangeNumberFieldProps) {
   const rangeDragCleanupRef = useRef<(() => void) | null>(null);
   const { beginInteraction, endInteraction } = useUndoBatchInteraction();
@@ -469,6 +471,7 @@ export function InspectorRangeNumberField({
           min={min}
           step={step}
           type="range"
+          disabled={disabled}
           value={value}
           onChange={(event) => (onRangeChange ?? onValueChange)(event.currentTarget.value)}
           onPointerCancel={stopRangeDrag}
@@ -482,6 +485,7 @@ export function InspectorRangeNumberField({
           min={min}
           step={step}
           type="number"
+          disabled={disabled}
           value={value}
           onBlur={(event) => {
             onNumberBlur?.(event.currentTarget.value);

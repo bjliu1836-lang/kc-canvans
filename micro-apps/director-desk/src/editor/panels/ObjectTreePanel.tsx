@@ -155,7 +155,9 @@ export function ObjectTreePanel() {
           (item.object?.kind === "scene" && !isModelBackedObject(item.object)) ||
           (item.object?.kind === "prop" && !item.object?.assetRefId)
       ),
-      myModels: regularItems.filter((item) => isModelBackedObject(item.object)),
+      myModels: regularItems.filter(
+        (item) => item.object?.kind !== "character" && item.object?.kind !== "camera" && isModelBackedObject(item.object)
+      ),
       cameras: regularItems.filter((item) => item.object?.kind === "camera"),
     };
   }, [objects, assetsById]);

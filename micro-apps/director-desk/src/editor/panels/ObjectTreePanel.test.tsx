@@ -280,6 +280,34 @@ it("keeps any object backed by a model asset visible in my models even when olde
   expect(within(screen.getByRole("group", { name: "我的模型分组" })).getByRole("button", { name: "微波炉" })).toBeInTheDocument();
 });
 
+it("shows model-backed characters only in the character group", () => {
+  const base = createInitialDirectorState();
+  const character = base.project.objects.find((item) => item.kind === "character");
+  if (!character) throw new Error("Expected default character");
+  character.assetRefId = "asset_mixamo_1";
+
+  useDirectorStore.setState({
+    ...useDirectorStore.getState(),
+    ...base,
+    project: {
+      ...base.project,
+      assets: [{
+        id: "asset_mixamo_1",
+        kind: "character",
+        sourceType: "model",
+        fileName: "camille.fbx",
+        url: "/local-assets/mixamo/characters/camille.fbx",
+      }],
+    },
+  });
+
+  render(<ObjectTreePanel />);
+
+  expect(within(screen.getByRole("group", { name: "角色分组" })).getByRole("button", { name: "角色01" }))
+    .toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "我的模型分组" })).not.toBeInTheDocument();
+});
+
 it("selects rows and keeps selected state available for styling", async () => {
   const user = userEvent.setup();
   render(<ObjectTreePanel />);

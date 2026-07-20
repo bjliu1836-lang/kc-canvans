@@ -2,7 +2,8 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach } from "vitest";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
-import { CharacterPanel } from "./CharacterPanel";
+import { areAnimationProfilesCompatible, CharacterPanel } from "./CharacterPanel";
+import { createImportedCharacterActionId } from "../schema/importedCharacterAction";
 
 beforeEach(() => {
   useDirectorStore.setState({
@@ -10,6 +11,13 @@ beforeEach(() => {
     ...createInitialDirectorState(),
     selectedObjectId: "char_default_a",
   });
+});
+
+it("allows a fully mapped external rig to use a recognizable external action profile", () => {
+  expect(areAnimationProfilesCompatible("bip", "mixamo", true)).toBe(true);
+  expect(areAnimationProfilesCompatible("generic-humanoid", "cc-base", true)).toBe(true);
+  expect(areAnimationProfilesCompatible("generic-humanoid", "unknown", true)).toBe(false);
+  expect(areAnimationProfilesCompatible("bip", "mixamo", false)).toBe(false);
 });
 
 it("renders the approved role property order", () => {
@@ -156,4 +164,306 @@ it("applies pose presets to every member in a selected crowd group", async () =>
   expect(crowdMembers).toHaveLength(4);
   expect(new Set(crowdMembers.map((item) => item.characterRig?.posePresetId))).toEqual(new Set(["t-pose"]));
   expect(new Set(crowdMembers.map((item) => item.characterRig?.controls["leftShoulder.spread"]))).toEqual(new Set([-70]));
+});
+
+it("selects and starts a character action preset", async () => {
+  const user = userEvent.setup();
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "动作" }));
+  await user.click(screen.getByRole("button", { name: "播放动作 正常行走" }));
+
+  const state = useDirectorStore.getState();
+  const role = state.project.objects.find((item) => item.id === "char_default_a");
+  expect(role?.characterRig?.actionPresetId).toBe("walk-cycle");
+  expect(state.cameraMotionPlaying).toBe(true);
+  expect(state.cameraMotionProgress).toBe(0);
+});
+
+it("blocks humanoid presets for a library character that still needs bone mapping", async () => {
+  const user = userEvent.setup();
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    project: {
+      ...state.project,
+      assets: [{
+        id: "asset_horse",
+        kind: "character",
+        sourceType: "model",
+        fileName: "0033_horse.fbx",
+        url: "/local-assets/guo-3d-assets/guo-skeleton-models/models/0033_horse.fbx",
+        modelFormat: "fbx",
+        characterRigProfile: "unknown",
+        characterImportReadiness: "manual-mapping",
+      }],
+      objects: state.project.objects.map((item) => item.id === "char_default_a"
+        ? { ...item, assetRefId: "asset_horse", characterRig: { rigType: "mixamo", posePresetId: "stand", controls: {} } }
+        : item),
+    },
+  });
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "动作" }));
+
+  expect(screen.getByRole("status")).toHaveTextContent("需要补全骨骼映射");
+  expect(screen.queryByRole("button", { name: "播放动作 正常行走" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "播放动作 跑步" })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "姿势" }));
+  expect(screen.getByRole("status")).toHaveTextContent("尚未完成标准人形骨骼映射");
+  expect(screen.queryByRole("button", { name: "T型" })).not.toBeInTheDocument();
+});
+
+it("plays and removes a compatible imported character action", async () => {
+  const user = userEvent.setup();
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    project: {
+      ...state.project,
+      animationAssets: [{
+        id: "local_animation_walk",
+        name: "本地走路",
+        fileName: "walk.fbx",
+        url: "director-asset://local/walk",
+        modelFormat: "fbx",
+        storageKey: "walk",
+        rigProfile: "bip",
+        clips: [{ id: "clip_1", name: "Walk", duration: 1.25, trackCount: 48 }],
+      }],
+    },
+  });
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "动作" }));
+  const playButton = screen.getByRole("button", { name: "播放导入动作 本地走路 · Walk" });
+  expect(playButton).toHaveTextContent("1.25 秒");
+  await user.click(playButton);
+
+  const actionId = createImportedCharacterActionId("local_animation_walk", "clip_1");
+  expect(useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a")?.characterRig?.actionPresetId)
+    .toBe(actionId);
+  expect(useDirectorStore.getState().cameraMotionPlaying).toBe(true);
+
+  await user.click(screen.getByRole("button", { name: "删除动作文件 本地走路" }));
+  expect(useDirectorStore.getState().project.animationAssets).toEqual([]);
+  expect(useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a")?.characterRig?.actionPresetId)
+    .toBeNull();
+});
+
+it("lets a native-only character replay its own embedded actions without exposing unrelated actions", async () => {
+  const user = userEvent.setup();
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    project: {
+      ...state.project,
+      assets: [{
+        id: "asset_native_actor",
+        kind: "character",
+        sourceType: "model",
+        fileName: "native-actor.glb",
+        url: "director-asset://local/native-actor",
+        modelFormat: "glb",
+        characterRigProfile: "unknown",
+        characterImportReadiness: "native-only",
+      }],
+      animationAssets: [{
+        id: "local_animation_native_actor",
+        name: "演员自带动作",
+        fileName: "native-actor.glb",
+        url: "director-asset://local/native-actor",
+        modelFormat: "glb",
+        rigProfile: "unknown",
+        sourceCharacterAssetId: "asset_native_actor",
+        clips: [{ id: "clip_1", name: "Native Walk", duration: 1.5, trackCount: 32 }],
+      }, {
+        id: "local_animation_other_actor",
+        name: "其他未知动作",
+        fileName: "other.glb",
+        url: "director-asset://local/other",
+        modelFormat: "glb",
+        rigProfile: "unknown",
+        sourceCharacterAssetId: "asset_other_actor",
+        clips: [{ id: "clip_1", name: "Other Motion", duration: 1, trackCount: 20 }],
+      }],
+      objects: state.project.objects.map((item) => item.id === "char_default_a"
+        ? {
+            ...item,
+            assetRefId: "asset_native_actor",
+            characterRig: { rigType: "mixamo", posePresetId: "stand", actionPresetId: null, controls: {} },
+          }
+        : item),
+    },
+  });
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "动作" }));
+
+  expect(screen.getByRole("status")).toHaveTextContent("只保证播放自带动作");
+  expect(screen.getByRole("button", { name: "播放导入动作 演员自带动作 · Native Walk" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "播放导入动作 其他未知动作 · Other Motion" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "播放动作 正常行走" })).not.toBeInTheDocument();
+});
+
+it("recognizes embedded actions from older projects by matching the character file", async () => {
+  const user = userEvent.setup();
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    project: {
+      ...state.project,
+      assets: [{
+        id: "asset_legacy_native",
+        kind: "character",
+        sourceType: "model",
+        fileName: "legacy.glb",
+        url: "director-asset://local/legacy",
+        characterRigProfile: "unknown",
+        characterImportReadiness: "native-only",
+      }],
+      animationAssets: [{
+        id: "legacy_animation",
+        name: "旧版自带动作",
+        fileName: "legacy.glb",
+        url: "director-asset://local/legacy",
+        modelFormat: "glb",
+        rigProfile: "unknown",
+        clips: [{ id: "clip_1", name: "Legacy Clip", duration: 2, trackCount: 24 }],
+      }],
+      objects: state.project.objects.map((item) => item.id === "char_default_a"
+        ? { ...item, assetRefId: "asset_legacy_native" }
+        : item),
+    },
+  });
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "动作" }));
+
+  expect(screen.getByRole("button", { name: "播放导入动作 旧版自带动作 · Legacy Clip" })).toBeInTheDocument();
+});
+
+it("shows native action durations for RobotExpressive characters", async () => {
+  const user = userEvent.setup();
+  const state = useDirectorStore.getState();
+  const role = state.project.objects.find((item) => item.id === "char_default_a")!;
+  useDirectorStore.setState({
+    project: {
+      ...state.project,
+      assets: [{
+        id: "asset_robot",
+        kind: "character",
+        sourceType: "model",
+        fileName: "robot-expressive.glb",
+        url: "/local-assets/mixamo/characters/robot-expressive.glb",
+      }],
+      objects: state.project.objects.map((item) => item.id === role.id
+        ? {
+            ...item,
+            assetRefId: "asset_robot",
+            characterRig: { rigType: "mixamo", posePresetId: "stand", controls: {} },
+          }
+        : item),
+    },
+  });
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "动作" }));
+
+  expect(screen.getByRole("button", { name: "播放动作 挥手打招呼" })).toHaveTextContent("1.83 秒");
+  expect(screen.getByRole("button", { name: "播放动作 原地跳跃" })).toHaveTextContent("0.71 秒");
+});
+
+it("restarts action playback from zero when another action is chosen while already playing", async () => {
+  const user = userEvent.setup();
+  useDirectorStore.getState().setCameraMotionProgress(0.65);
+  useDirectorStore.getState().setCameraMotionPlaying(true);
+  const previousRevision = useDirectorStore.getState().cameraMotionPlaybackRevision;
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "动作" }));
+  await user.click(screen.getByRole("button", { name: "播放动作 跑步" }));
+
+  const state = useDirectorStore.getState();
+  expect(state.cameraMotionProgress).toBe(0);
+  expect(state.cameraMotionPlaying).toBe(true);
+  expect(state.cameraMotionPlaybackRevision).toBe(previousRevision + 1);
+});
+
+it("adds and edits a route point from the character route tab", async () => {
+  const user = userEvent.setup();
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "路线" }));
+  await user.click(screen.getByRole("button", { name: "添加点" }));
+
+  expect(screen.getByRole("button", { name: "选择路线点 1" })).toHaveAttribute("aria-pressed", "true");
+  await user.selectOptions(screen.getByLabelText("路线点本段动作"), "run-cycle");
+  await user.selectOptions(screen.getByLabelText("路线点朝向方式"), "path");
+
+  const point = useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a")?.motionPath?.keyframes[0];
+  expect(point?.actionPresetId).toBe("run-cycle");
+  expect(point?.facingMode).toBe("path");
+});
+
+it("selects a route point without moving the scene preview until explicitly requested", async () => {
+  const user = userEvent.setup();
+  useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
+  useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
+  useDirectorStore.getState().setCameraMotionProgress(0.25);
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "路线" }));
+  await user.click(screen.getByRole("button", { name: "选择路线点 2" }));
+  expect(useDirectorStore.getState().cameraMotionProgress).toBe(0.25);
+
+  await user.click(screen.getByRole("button", { name: "预览当前路线点" }));
+  expect(useDirectorStore.getState().cameraMotionProgress).toBe(1);
+});
+
+it("switches the character route between smooth curve and straight line", async () => {
+  const user = userEvent.setup();
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "路线" }));
+  await user.click(screen.getByRole("button", { name: "折线" }));
+
+  let role = useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a");
+  expect(role?.motionPath?.interpolation).toBe("linear");
+  expect(screen.getByRole("button", { name: "折线" })).toHaveAttribute("aria-pressed", "true");
+
+  await user.click(screen.getByRole("button", { name: "平滑" }));
+  role = useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a");
+  expect(role?.motionPath?.interpolation).toBe("smooth");
+});
+
+it("uses the same speed and hold controls for a character route", async () => {
+  const user = userEvent.setup();
+  useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
+  useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
+  useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "路线" }));
+  await user.click(screen.getByRole("button", { name: "柔和" }));
+  expect(useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a")?.motionPath?.speedMode).toBe("soft");
+
+  await user.click(screen.getByRole("button", { name: "选择路线点 2" }));
+  expect(screen.getByRole("spinbutton", { name: "路线点到达时间" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "停留" }));
+  fireEvent.change(screen.getByRole("slider", { name: "路线点停留时长滑杆" }), { target: { value: "1.2" } });
+  await user.selectOptions(screen.getByRole("combobox", { name: "路线点停留动作方式" }), "custom");
+  await user.selectOptions(screen.getByRole("combobox", { name: "路线点指定停留动作" }), "wave-cycle");
+
+  const route = useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a")?.motionPath;
+  expect(route?.keyframes[1]).toMatchObject({
+    pointBehavior: "hold",
+    holdSeconds: 1.2,
+    holdAction: "custom",
+    holdActionPresetId: "wave-cycle",
+  });
+  await user.click(screen.getByRole("button", { name: "自定义" }));
+  expect(screen.getByRole("spinbutton", { name: "路线点到达时间" })).toBeEnabled();
+  const characterEasing = screen.getByRole("group", { name: "人物段内节奏" });
+  await user.click(within(characterEasing).getByRole("button", { name: "两头柔和" }));
+  expect(useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a")?.motionPath?.customEasing)
+    .toEqual([0.42, 0, 0.58, 1]);
+  expect(within(characterEasing).getByRole("button", { name: "两头柔和" })).toHaveAttribute("aria-pressed", "true");
 });

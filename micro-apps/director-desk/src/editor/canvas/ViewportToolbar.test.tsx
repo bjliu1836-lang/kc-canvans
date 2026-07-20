@@ -8,9 +8,14 @@ import { getCameraRigPositionFromViewSnapshot, getCameraViewSnapshotFromShot } f
 import { ViewportToolbar } from "./ViewportToolbar";
 
 const mockReadLocalModelFile = vi.fn();
+const mockInspectCharacterModelFile = vi.fn();
 
 vi.mock("../loaders/localModelImport", () => ({
   readLocalModelFile: (...args: unknown[]) => mockReadLocalModelFile(...args),
+}));
+
+vi.mock("../loaders/characterAssetInspection", () => ({
+  inspectCharacterModelFile: (...args: unknown[]) => mockInspectCharacterModelFile(...args),
 }));
 
 function createMemoryStorage(): Storage {
@@ -39,6 +44,7 @@ beforeEach(() => {
     ...createInitialDirectorState(),
   });
   mockReadLocalModelFile.mockReset();
+  mockInspectCharacterModelFile.mockReset();
 });
 
 afterEach(() => {
@@ -55,8 +61,8 @@ it("renders the viewport capsule as project icon-system buttons", () => {
     "移动",
     "旋转",
     "缩放",
+    "显示人物路线",
     "添加角色",
-    "导入全景图",
     "导入本地模型",
     "模型库",
     "添加机位",
@@ -80,6 +86,18 @@ it("renders the viewport capsule as project icon-system buttons", () => {
     button.getAttribute("aria-label")
   );
   expect(toolbarButtonLabels.indexOf("模型库")).toBe(toolbarButtonLabels.indexOf("导入本地模型") + 1);
+});
+
+it("keeps character routes visible by default and lets the viewport toolbar hide them", async () => {
+  const user = userEvent.setup();
+  render(<ViewportToolbar />);
+
+  const toggle = screen.getByRole("button", { name: "显示人物路线" });
+  expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+  await user.click(toggle);
+  expect(useDirectorStore.getState().showCharacterRoutes).toBe(false);
+  expect(toggle).toHaveAttribute("aria-pressed", "false");
 });
 
 it("renders custom hover labels instead of native title tooltips", () => {
@@ -458,6 +476,45 @@ it("adds a selected model library item into the viewport scene", async () => {
   expect(state.selectedObjectId).toBe(prop?.id);
 });
 
+it("preserves validated rig metadata when adding a GUO character from the model library", async () => {
+  const user = userEvent.setup();
+  render(<ViewportToolbar />);
+
+  await user.click(screen.getByRole("button", { name: "模型库" }));
+  await user.click(screen.getByRole("tab", { name: "人物" }));
+  expect(screen.getByRole("button", { name: "添加模型 健壮男性" })).toHaveTextContent("可用动作");
+  await user.click(screen.getByRole("button", { name: "添加模型 健壮男性" }));
+
+  const state = useDirectorStore.getState();
+  const asset = state.project.assets.find((item) => item.fileName === "0040_muscular-male.fbx");
+  const role = state.project.objects.find((item) => item.assetRefId === asset?.id);
+  expect(asset).toMatchObject({
+    kind: "character",
+    modelFormat: "fbx",
+    characterRigProfile: "mixamo",
+    characterImportReadiness: "ready",
+    characterOrientationCorrection: [0, 0, 0],
+  });
+  expect(role?.characterRig?.rigType).toBe("mixamo");
+});
+
+it("marks non-humanoid GUO models as requiring mapping instead of pretending they are action-ready", async () => {
+  const user = userEvent.setup();
+  render(<ViewportToolbar />);
+
+  await user.click(screen.getByRole("button", { name: "模型库" }));
+  await user.click(screen.getByRole("tab", { name: "人物" }));
+  expect(screen.getByRole("button", { name: "添加模型 马" })).toHaveTextContent("需骨架映射");
+  await user.click(screen.getByRole("button", { name: "添加模型 马" }));
+
+  const asset = useDirectorStore.getState().project.assets.find((item) => item.fileName === "0033_horse.fbx");
+  expect(asset).toMatchObject({
+    characterRigProfile: "unknown",
+    characterImportReadiness: "manual-mapping",
+    characterOrientationCorrection: [0, 0, 0],
+  });
+});
+
 it("shows a centered empty state with a local import action inside the my-models tab", async () => {
   const user = userEvent.setup();
   render(<ViewportToolbar />);
@@ -599,6 +656,311 @@ it("still imports a local model directly into the scene from the viewport capsul
   const state = useDirectorStore.getState();
   expect(state.project.assets.some((item) => item.fileName === "lamp.obj")).toBe(true);
   expect(state.project.objects.some((item) => item.name === "本地台灯")).toBe(true);
+});
+
+it("inspects a rigged character before adding it as a character", async () => {
+  const user = userEvent.setup();
+  useDirectorStore.getState().setCameraMotionProgress(0.42);
+  useDirectorStore.getState().setCameraMotionPlaying(false);
+  mockInspectCharacterModelFile.mockResolvedValue({
+    format: "fbx",
+    readiness: "ready",
+    rigProfile: "mixamo",
+    skinnedMeshCount: 1,
+    skeletonCount: 1,
+    primaryBoneCount: 65,
+    skeletonDepth: 8,
+    animationNames: ["Idle"],
+    animations: [{ name: "Idle", duration: 1.5, trackCount: 52 }],
+    animationCount: 1,
+    playableAnimationCount: 1,
+    boneNames: [],
+    boneMap: {
+      head: "Head", chest: "Chest", waist: "Hips",
+      leftUpperArm: "LeftArm", leftForearm: "LeftForeArm", leftHand: "LeftHand",
+      rightUpperArm: "RightArm", rightForearm: "RightForeArm", rightHand: "RightHand",
+      leftThigh: "LeftUpLeg", leftCalf: "LeftLeg", leftFoot: "LeftFoot",
+      rightThigh: "RightUpLeg", rightCalf: "RightLeg", rightFoot: "RightFoot",
+    },
+    mappedBodyParts: [
+      "center", "head", "chest", "waist", "leftUpperArm", "leftForearm", "leftHand", "rightUpperArm",
+      "rightForearm", "rightHand", "leftThigh", "leftCalf", "leftFoot", "rightThigh", "rightCalf", "rightFoot",
+    ],
+    missingBodyParts: [],
+    dimensions: [1, 1.8, 0.5],
+    footOffsetY: 0,
+    uprightAxis: "y",
+    orientationCorrection: [0, 0, 0],
+    recommendedScale: 1,
+    warnings: [],
+  });
+  mockReadLocalModelFile.mockResolvedValue({
+    id: "local-character",
+    fileName: "actor.fbx",
+    name: "演员",
+    url: "director-asset://local/actor-key",
+    storageKey: "actor-key",
+    byteLength: 1024,
+    modelFormat: "fbx",
+  });
+  render(<ViewportToolbar />);
+
+  await user.click(screen.getByRole("button", { name: "添加角色" }));
+  await user.click(screen.getByRole("menuitem", { name: "导入绑骨人物" }));
+  await user.upload(
+    screen.getByTestId("character-local-model-input") as HTMLInputElement,
+    new File(["rigged"], "actor.fbx", { type: "model/fbx" })
+  );
+
+  const dialog = await screen.findByRole("dialog", { name: "人物模型体检结果" });
+  expect(within(dialog).getByText("可直接使用")).toBeInTheDocument();
+  expect(within(dialog).getByText("16/16")).toBeInTheDocument();
+  await user.click(within(dialog).getByRole("button", { name: "作为人物加入" }));
+
+  await waitFor(() => {
+    expect(useDirectorStore.getState().project.objects.some((item) => item.name === "演员")).toBe(true);
+  });
+  const asset = useDirectorStore.getState().project.assets.find((item) => item.fileName === "actor.fbx");
+  const actor = useDirectorStore.getState().project.objects.find((item) => item.assetRefId === asset?.id);
+  expect(asset).toMatchObject({
+    id: "local_asset_actor-key",
+    kind: "character",
+    storageKey: "actor-key",
+    characterRigProfile: "mixamo",
+    characterImportReadiness: "ready",
+  });
+  expect(actor?.kind).toBe("character");
+  expect(actor?.characterRig?.rigType).toBe("mixamo");
+  expect(actor?.characterRig?.actionPresetId).toBeNull();
+  expect(useDirectorStore.getState().cameraMotionProgress).toBe(0);
+  expect(useDirectorStore.getState().cameraMotionPlaying).toBe(true);
+  expect(useDirectorStore.getState().characterActionPreview).toEqual({
+    objectId: actor?.id,
+    actionPresetId: "walk-cycle",
+  });
+  const previewStatus = screen.getByRole("status", { name: "人物动作自动自检" });
+  expect(previewStatus).toHaveTextContent("正在预览：走路 1/4");
+  expect(useDirectorStore.getState().project.animationAssets).toEqual([
+    expect.objectContaining({
+      id: "local_animation_actor-key",
+      name: "演员 自带动作",
+      rigProfile: "mixamo",
+      sourceCharacterAssetId: "local_asset_actor-key",
+      clips: [{ id: "clip_1", name: "Idle", duration: 1.5, trackCount: 52 }],
+    }),
+  ]);
+
+  await user.click(within(previewStatus).getByRole("button", { name: "跳过" }));
+  expect(useDirectorStore.getState().characterActionPreview).toBeNull();
+  expect(useDirectorStore.getState().cameraMotionProgress).toBe(0.42);
+  expect(useDirectorStore.getState().cameraMotionPlaying).toBe(false);
+  expect(actor?.characterRig?.actionPresetId).toBeNull();
+});
+
+it("only allows an unrigged character file to be added as a static prop", async () => {
+  const user = userEvent.setup();
+  mockInspectCharacterModelFile.mockResolvedValue({
+    format: "glb",
+    readiness: "static-only",
+    rigProfile: "unknown",
+    skinnedMeshCount: 0,
+    skeletonCount: 0,
+    primaryBoneCount: 0,
+    skeletonDepth: 0,
+    animationNames: [],
+    animations: [],
+    animationCount: 0,
+    playableAnimationCount: 0,
+    boneNames: [],
+    boneMap: {},
+    mappedBodyParts: ["center"],
+    missingBodyParts: ["head"],
+    dimensions: [1, 1, 1],
+    footOffsetY: 0,
+    uprightAxis: "y",
+    orientationCorrection: [0, 0, 0],
+    recommendedScale: 1,
+    warnings: ["没有检测到蒙皮骨架，只能作为静态模型使用"],
+  });
+  mockReadLocalModelFile.mockResolvedValue({
+    id: "local-static-model",
+    fileName: "statue.glb",
+    name: "雕像",
+    url: "director-asset://local/statue-key",
+    storageKey: "statue-key",
+    byteLength: 1024,
+    modelFormat: "glb",
+  });
+  render(<ViewportToolbar />);
+
+  await user.click(screen.getByRole("button", { name: "添加角色" }));
+  await user.click(screen.getByRole("menuitem", { name: "导入绑骨人物" }));
+  await user.upload(
+    screen.getByTestId("character-local-model-input") as HTMLInputElement,
+    new File(["static"], "statue.glb", { type: "model/gltf-binary" })
+  );
+
+  const dialog = await screen.findByRole("dialog", { name: "人物模型体检结果" });
+  expect(within(dialog).getByText("仅静态使用")).toBeInTheDocument();
+  expect(within(dialog).queryByRole("button", { name: "作为人物加入" })).not.toBeInTheDocument();
+  await user.click(within(dialog).getByRole("button", { name: "作为静态道具加入" }));
+
+  await waitFor(() => {
+    const asset = useDirectorStore.getState().project.assets.find((item) => item.fileName === "statue.glb");
+    expect(asset?.kind).toBe("prop");
+    expect(useDirectorStore.getState().project.objects.find((item) => item.assetRefId === asset?.id)?.kind).toBe("prop");
+  });
+});
+
+it("automatically previews all four humanoid checks and restores playback afterward", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const report = {
+    format: "fbx" as const,
+    readiness: "ready" as const,
+    rigProfile: "mixamo" as const,
+    skinnedMeshCount: 1,
+    skeletonCount: 1,
+    primaryBoneCount: 65,
+    skeletonDepth: 8,
+    animationNames: [],
+    animations: [],
+    animationCount: 0,
+    playableAnimationCount: 0,
+    boneNames: [],
+    boneMap: {
+      head: "Head", chest: "Chest", waist: "Hips",
+      leftUpperArm: "LeftArm", leftForearm: "LeftForeArm", leftHand: "LeftHand",
+      rightUpperArm: "RightArm", rightForearm: "RightForeArm", rightHand: "RightHand",
+      leftThigh: "LeftUpLeg", leftCalf: "LeftLeg", leftFoot: "LeftFoot",
+      rightThigh: "RightUpLeg", rightCalf: "RightLeg", rightFoot: "RightFoot",
+    },
+    mappedBodyParts: [
+      "center", "head", "chest", "waist", "leftUpperArm", "leftForearm", "leftHand", "rightUpperArm",
+      "rightForearm", "rightHand", "leftThigh", "leftCalf", "leftFoot", "rightThigh", "rightCalf", "rightFoot",
+    ],
+    missingBodyParts: [],
+    dimensions: [1, 1.8, 0.5] as [number, number, number],
+    footOffsetY: 0,
+    uprightAxis: "y" as const,
+    orientationCorrection: [0, 0, 0] as [number, number, number],
+    recommendedScale: 1,
+    warnings: [],
+  };
+  mockInspectCharacterModelFile.mockResolvedValue(report);
+  mockReadLocalModelFile.mockResolvedValue({
+    id: "preview-actor",
+    fileName: "preview-actor.fbx",
+    name: "预览演员",
+    url: "director-asset://local/preview-actor",
+    storageKey: "preview-actor",
+    byteLength: 1024,
+    modelFormat: "fbx",
+  });
+  useDirectorStore.getState().setCameraMotionProgress(0.36);
+  useDirectorStore.getState().setCameraMotionPlaying(false);
+  render(<ViewportToolbar />);
+
+  await user.click(screen.getByRole("button", { name: "添加角色" }));
+  await user.click(screen.getByRole("menuitem", { name: "导入绑骨人物" }));
+  await user.upload(
+    screen.getByTestId("character-local-model-input") as HTMLInputElement,
+    new File(["rigged"], "preview-actor.fbx", { type: "model/fbx" })
+  );
+  await user.click(within(await screen.findByRole("dialog", { name: "人物模型体检结果" }))
+    .getByRole("button", { name: "作为人物加入" }));
+
+  const expectStep = (label: string, actionPresetId: string) => {
+    expect(screen.getByRole("status", { name: "人物动作自动自检" })).toHaveTextContent(label);
+    expect(useDirectorStore.getState().characterActionPreview?.actionPresetId).toBe(actionPresetId);
+  };
+  expectStep("走路 1/4", "walk-cycle");
+  await act(async () => vi.advanceTimersByTime(1_800));
+  expectStep("跑步 2/4", "run-cycle");
+  await act(async () => vi.advanceTimersByTime(1_800));
+  expectStep("跳跃 3/4", "jump-cycle");
+  await act(async () => vi.advanceTimersByTime(1_800));
+  expectStep("挥手 4/4", "wave-cycle");
+  await act(async () => vi.advanceTimersByTime(1_800));
+
+  expect(screen.queryByRole("status", { name: "人物动作自动自检" })).not.toBeInTheDocument();
+  expect(useDirectorStore.getState().characterActionPreview).toBeNull();
+  expect(useDirectorStore.getState().cameraMotionProgress).toBe(0.36);
+  expect(useDirectorStore.getState().cameraMotionPlaying).toBe(false);
+  vi.useRealTimers();
+});
+
+it("lets users complete a manual bone map before importing a generic rig as a character", async () => {
+  const user = userEvent.setup();
+  const parts = [
+    ["leftUpperArm", "左上臂"], ["leftForearm", "左前臂"], ["leftHand", "左手"],
+    ["rightUpperArm", "右上臂"], ["rightForearm", "右前臂"], ["rightHand", "右手"],
+    ["leftThigh", "左大腿"], ["leftCalf", "左小腿"], ["leftFoot", "左脚"],
+    ["rightThigh", "右大腿"], ["rightCalf", "右小腿"], ["rightFoot", "右脚"],
+    ["head", "头部"], ["chest", "胸口"], ["waist", "腰部"],
+  ] as const;
+  const boneNames = parts.map(([id]) => `Rig_${id}`);
+  mockInspectCharacterModelFile.mockResolvedValue({
+    format: "fbx",
+    readiness: "manual-mapping",
+    rigProfile: "generic-humanoid",
+    skinnedMeshCount: 1,
+    skeletonCount: 1,
+    primaryBoneCount: 48,
+    skeletonDepth: 7,
+    animationNames: [],
+    animations: [],
+    animationCount: 0,
+    playableAnimationCount: 0,
+    boneNames,
+    boneMap: {},
+    mappedBodyParts: ["center"],
+    missingBodyParts: ["head"],
+    dimensions: [1, 1.8, 0.5],
+    footOffsetY: 0,
+    uprightAxis: "y",
+    orientationCorrection: [0, 0, 0],
+    recommendedScale: 1,
+    warnings: ["身体部位识别不完整，跟拍和外部动作可能受限"],
+  });
+  mockReadLocalModelFile.mockResolvedValue({
+    id: "local-generic-character",
+    fileName: "generic.fbx",
+    name: "通用演员",
+    url: "director-asset://local/generic-key",
+    storageKey: "generic-key",
+    byteLength: 1024,
+    modelFormat: "fbx",
+  });
+  render(<ViewportToolbar />);
+
+  await user.click(screen.getByRole("button", { name: "添加角色" }));
+  await user.click(screen.getByRole("menuitem", { name: "导入绑骨人物" }));
+  await user.upload(
+    screen.getByTestId("character-local-model-input") as HTMLInputElement,
+    new File(["rigged"], "generic.fbx", { type: "model/fbx" })
+  );
+
+  const dialog = await screen.findByRole("dialog", { name: "人物模型体检结果" });
+  expect(within(dialog).getByText("补全骨架映射")).toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "补全映射后作为人物加入" })).toBeDisabled();
+
+  for (const [id, label] of parts) {
+    await user.selectOptions(within(dialog).getByLabelText(`映射 ${label}`), `Rig_${id}`);
+  }
+
+  await user.click(within(dialog).getByRole("button", { name: "作为人物加入" }));
+  await waitFor(() => {
+    const asset = useDirectorStore.getState().project.assets.find((item) => item.fileName === "generic.fbx");
+    expect(asset).toMatchObject({
+      kind: "character",
+      characterImportReadiness: "ready",
+      characterBoneMap: {
+        head: "Rig_head",
+        rightHand: "Rig_rightHand",
+      },
+    });
+  });
 });
 
 it("shows a delete action on my-models cards and removes the asset plus its scene instances", async () => {

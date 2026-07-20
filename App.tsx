@@ -5504,7 +5504,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                         key={directorDeskSession.instanceId}
                         ref={directorDeskIframeRef}
                         title="3D导演台"
-                        src={`${DIRECTOR_DESK_APP_PATH}?instanceId=${encodeURIComponent(directorDeskSession.instanceId)}&theme=${isDark ? 'dark' : 'light'}`}
+                        src={`${DIRECTOR_DESK_APP_PATH}?instanceId=${encodeURIComponent(directorDeskSession.instanceId)}&theme=${isDark ? 'dark' : 'light'}&hostOrigin=${encodeURIComponent(window.location.origin)}`}
                         className="min-h-0 flex-1 border-0 bg-black"
                         onLoad={postDirectorDeskSessionToIframe}
                         allow="clipboard-write; fullscreen"

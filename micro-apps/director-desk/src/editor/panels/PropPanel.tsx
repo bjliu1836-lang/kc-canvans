@@ -31,7 +31,7 @@ export function PropPanel() {
 
   if (!prop) return null;
 
-  const propColor = prop.color ?? "#d7e7ff";
+  const propColor = prop.color ?? "#ffffff";
 
   return (
     <InspectorPanel title="模型" ariaLabel="模型右侧属性面板" className="prop-inspector">

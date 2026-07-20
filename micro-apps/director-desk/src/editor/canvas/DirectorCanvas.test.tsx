@@ -21,6 +21,7 @@ const mockCaptureVisibleObject = vi.hoisted(() => ({
 const mockRenderVisibilitySnapshots = vi.hoisted(() => [] as boolean[][]);
 
 beforeEach(() => {
+  window.history.replaceState({}, "", "/?instanceId=desk_1");
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(() => null);
@@ -36,6 +37,7 @@ beforeEach(() => {
   useDirectorStore.setState({
     ...useDirectorStore.getState(),
     ...createInitialDirectorState(),
+    openScopedScene: vi.fn(),
   });
 });
 
@@ -204,8 +206,21 @@ vi.mock("@react-three/drei", async () => {
         type="button"
       />
     ),
-    OrbitControls: forwardRef(({ enabled }: { enabled?: boolean }) => (
-      <div data-enabled={String(enabled)} data-testid="orbit-controls" />
+    OrbitControls: forwardRef(({
+      enabled,
+      rotateSpeed,
+      zoomSpeed,
+    }: {
+      enabled?: boolean;
+      rotateSpeed?: number;
+      zoomSpeed?: number;
+    }) => (
+      <div
+        data-enabled={String(enabled)}
+        data-rotate-speed={String(rotateSpeed)}
+        data-zoom-speed={String(zoomSpeed)}
+        data-testid="orbit-controls"
+      />
     )),
     PerspectiveCamera: () => null,
     Html: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
@@ -218,6 +233,12 @@ vi.mock("./SceneRoot", () => ({
   SceneRoot: () => null,
 }));
 
+vi.mock("./ViewportBackground", () => ({
+  ViewportBackground: ({ panoramaAsset }: { panoramaAsset?: { id: string } | null }) => (
+    <div data-panorama-asset-id={panoramaAsset?.id ?? "none"} data-testid="viewport-background" />
+  ),
+}));
+
 import App from "../../App";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
 
@@ -225,10 +246,28 @@ it("renders a live R3F viewport and director scene controls", () => {
   render(<App />);
 
   expect(screen.getByTestId("director-canvas")).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "人物和道具动作播放条" })).toBeInTheDocument();
   expect(screen.getByLabelText("场景缩放")).toBeInTheDocument();
-  expect(screen.getByText("全景背景")).toBeInTheDocument();
-  expect(screen.getByText("全景球")).toBeInTheDocument();
+  expect(screen.getByText("背景")).toBeInTheDocument();
+  expect(screen.getByLabelText("天空颜色 HEX")).toBeInTheDocument();
   expect(screen.getByTestId("orbit-controls")).toHaveAttribute("data-enabled", "true");
+});
+
+it("passes the active panorama to the interactive viewport", () => {
+  useDirectorStore.getState().setPanoramaAsset({
+    name: "测试全景",
+    fileName: "panorama.jpg",
+    url: "data:image/jpeg;base64,panorama",
+    projectionMode: "equirectangular",
+  });
+  const panoramaAssetId = useDirectorStore.getState().project.panoramaAssetId;
+
+  render(<App />);
+
+  expect(screen.getByTestId("viewport-background")).toHaveAttribute(
+    "data-panorama-asset-id",
+    panoramaAssetId
+  );
 });
 
 it("keeps orbit controls available when a transformable object is selected but no handle is being dragged", () => {
@@ -240,6 +279,34 @@ it("keeps orbit controls available when a transformable object is selected but n
   render(<App />);
 
   expect(screen.getByTestId("orbit-controls")).toHaveAttribute("data-enabled", "true");
+});
+
+it("applies the user-adjusted rotate and zoom sensitivity to orbit controls", () => {
+  useDirectorStore.setState({
+    ...useDirectorStore.getState(),
+    viewportRotateSensitivity: 0.8,
+    viewportZoomSensitivity: 0.65,
+  });
+
+  render(<App />);
+
+  expect(screen.getByTestId("orbit-controls")).toHaveAttribute("data-rotate-speed", "0.8");
+  expect(screen.getByTestId("orbit-controls")).toHaveAttribute("data-zoom-speed", "0.65");
+});
+
+it("applies sensitivity changes from the visible settings panel to orbit controls immediately", () => {
+  render(<App />);
+
+  fireEvent.click(screen.getByRole("button", { name: "视角手感" }));
+  fireEvent.change(screen.getByRole("slider", { name: "转动视角灵敏度" }), {
+    target: { value: "125" },
+  });
+  fireEvent.change(screen.getByRole("slider", { name: "缩放视角灵敏度" }), {
+    target: { value: "110" },
+  });
+
+  expect(screen.getByTestId("orbit-controls")).toHaveAttribute("data-rotate-speed", "1.25");
+  expect(screen.getByTestId("orbit-controls")).toHaveAttribute("data-zoom-speed", "1.1");
 });
 
 it("does not render a full-viewport transform drag layer over the 3D viewport", () => {
@@ -263,6 +330,32 @@ it("renders only the dark major viewport grid lines", () => {
   expect(screen.getByTestId("viewport-grid")).toHaveAttribute("data-section-color", "#2A4065");
   expect(screen.getByTestId("viewport-grid")).toHaveAttribute("data-fade-distance", "80");
   expect(screen.getByTestId("viewport-grid")).toHaveAttribute("data-infinite-grid", "true");
+});
+
+it("hides only the editing grid when its independent switch is disabled", () => {
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    ...state,
+    project: {
+      ...state.project,
+      scene: {
+        ...state.project.scene,
+        showGrid: false,
+        snapToGrid: true,
+        showGround: true,
+        pathCollisionEnabled: true,
+      },
+    },
+  });
+
+  render(<App />);
+
+  expect(screen.queryByTestId("viewport-grid")).not.toBeInTheDocument();
+  expect(useDirectorStore.getState().project.scene).toMatchObject({
+    snapToGrid: true,
+    showGround: true,
+    pathCollisionEnabled: true,
+  });
 });
 
 it("keeps the viewport grid slightly above the configured ground plane", () => {
@@ -308,7 +401,7 @@ it("renders the viewport aspect ratio overlay when a non-auto frame is selected"
   render(<App />);
 
   expect(screen.getByLabelText("视口画幅框")).toBeInTheDocument();
-  expect(screen.getAllByLabelText("视口画幅遮罩")).toHaveLength(4);
+  expect(screen.getAllByLabelText("视口画幅遮罩")).toHaveLength(1);
   expect(screen.getByLabelText("视口画幅框")).toHaveAttribute("data-aspect-ratio", "9:16");
 });
 
@@ -351,7 +444,7 @@ it("offsets the native viewport gizmo inward when overlay side panels are open",
   const gizmo = screen.getByLabelText("3D视口原生坐标控件");
 
   expect(gizmo).toHaveStyle({
-    right: "320px",
+    right: "296px",
   });
 });
 
@@ -544,8 +637,8 @@ it("captures screenshots from the same safe-area frame shown by the aspect overl
   });
 
   const expectedFrame = getViewportAspectFrameRect("16:9", 1000, 700, 124, {
-    left: 220,
-    right: 300,
+    left: 196,
+    right: 276,
     top: 0,
     bottom: 0,
   });
@@ -602,4 +695,239 @@ it("captures every four-view screenshot using the selected viewport aspect ratio
   });
   expect(drawImage).toHaveBeenCalledTimes(4);
   expect(cropCanvas.width / cropCanvas.height).toBeCloseTo(4 / 3, 2);
+});
+
+it("synchronizes the real render camera on every first-person motion preview update", () => {
+  const state = useDirectorStore.getState();
+  const firstCharacter = state.project.objects.find((item) => item.id === "char_default_a")!;
+  const secondCharacter = {
+    ...firstCharacter,
+    id: "char_second",
+    name: "角色02",
+    transform: {
+      ...firstCharacter.transform,
+      position: [4, 0, 0] as [number, number, number],
+    },
+  };
+  useDirectorStore.setState({
+    ...state,
+    viewMode: "camera",
+    cameraMotionProgress: 0.5,
+    cameraMotionPlaying: true,
+    motionStudioOpen: true,
+    project: {
+      ...state.project,
+      objects: [...state.project.objects, secondCharacter],
+      cameras: state.project.cameras.map((camera) => ({
+        ...camera,
+        motionPath: {
+          duration: 6,
+          loop: false,
+          interpolation: "linear" as const,
+          easing: "linear" as const,
+          keyframes: [
+            { id: "point_1", time: 0, position: [0, 2, 8] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 50, targetMode: "object" as const, targetObjectId: "char_default_a" },
+            { id: "point_2", time: 1, position: [4, 2, 4] as [number, number, number], target: [4, 1, 0] as [number, number, number], fov: 40, targetMode: "object" as const, targetObjectId: "char_second" },
+          ],
+        },
+      })),
+    },
+  });
+
+  render(<App />);
+
+  expect(mockCameraPositionSet).toHaveBeenCalledWith(2, 2, 6);
+  expect(mockCameraLookAt).toHaveBeenCalledWith(2, expect.any(Number), 0);
+  expect(mockCameraUpdateProjectionMatrix).toHaveBeenCalled();
+});
+
+it("keeps the bottom timeline available in finished-shot view and pauses when scrubbing", () => {
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    ...state,
+    viewMode: "camera",
+    cameraMotionProgress: 0.25,
+    cameraMotionPlaying: true,
+    motionStudioOpen: true,
+    project: {
+      ...state.project,
+      cameras: state.project.cameras.map((camera) => ({
+        ...camera,
+        motionPath: {
+          duration: 6,
+          loop: false,
+          interpolation: "linear" as const,
+          easing: "linear" as const,
+          keyframes: [
+            { id: "preview_1", time: 0, position: [0, 2, 8] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 50 },
+            { id: "preview_2", time: 1, position: [4, 2, 4] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 45 },
+          ],
+        },
+      })),
+    },
+  });
+
+  render(<App />);
+
+  const timeline = screen.getByRole("slider", { name: "场景动作时间轴" });
+  expect(timeline).toHaveValue("0.25");
+  expect(screen.queryByRole("group", { name: "3D视口快捷工具" })).not.toBeInTheDocument();
+  fireEvent.change(timeline, { target: { value: "0.6" } });
+  expect(useDirectorStore.getState().cameraMotionPlaying).toBe(false);
+  expect(useDirectorStore.getState().cameraMotionProgress).toBe(0.6);
+  expect(useDirectorStore.getState().viewMode).toBe("camera");
+  expect(document.querySelector(".director-shell")).toHaveClass("is-camera-previewing");
+  expect(screen.queryByRole("group", { name: "3D视口快捷工具" })).not.toBeInTheDocument();
+  expect(screen.getByLabelText("路线实时监看")).toBeInTheDocument();
+});
+
+it("keeps the finished-shot monitor mounted while paused for timeline scrubbing", () => {
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    ...state,
+    viewMode: "director",
+    motionStudioOpen: true,
+    cameraMotionPlaying: false,
+    cameraMotionProgress: 0.5,
+    project: {
+      ...state.project,
+      cameras: state.project.cameras.map((camera) => ({
+        ...camera,
+        motionPath: {
+          duration: 6,
+          loop: false,
+          interpolation: "linear" as const,
+          easing: "linear" as const,
+          keyframes: [
+            { id: "monitor_1", time: 0, position: [0, 2, 8] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 50 },
+            { id: "monitor_2", time: 1, position: [4, 2, 4] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 42 },
+          ],
+        },
+      })),
+    },
+  });
+
+  render(<App />);
+
+  expect(screen.getByLabelText("成片实时监看")).toBeInTheDocument();
+  expect(screen.getByLabelText("拖动监看窗口")).toBeInTheDocument();
+  expect(screen.getByRole("slider", { name: "看成片 FOV" })).toHaveValue("46");
+  expect(screen.getByRole("slider", { name: "小窗 FOV" })).toHaveValue("46");
+});
+
+it("passes the active panorama to both the main viewport and finished-shot monitor", () => {
+  const state = useDirectorStore.getState();
+  const panoramaAsset = {
+    id: "panorama_monitor",
+    kind: "panorama" as const,
+    sourceType: "image" as const,
+    fileName: "monitor.jpg",
+    name: "监看全景",
+    url: "data:image/jpeg;base64,panorama",
+    projectionMode: "equirectangular" as const,
+  };
+  useDirectorStore.setState({
+    ...state,
+    viewMode: "director",
+    motionStudioOpen: true,
+    project: {
+      ...state.project,
+      assets: [...state.project.assets, panoramaAsset],
+      panoramaAssetId: panoramaAsset.id,
+      cameras: state.project.cameras.map((camera) => ({
+        ...camera,
+        motionPath: {
+          duration: 6,
+          loop: false,
+          interpolation: "linear" as const,
+          easing: "linear" as const,
+          keyframes: [
+            { id: "panorama_1", time: 0, position: [0, 2, 8] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 50 },
+            { id: "panorama_2", time: 1, position: [4, 2, 4] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 42 },
+          ],
+        },
+      })),
+    },
+  });
+
+  render(<App />);
+
+  const backgrounds = screen.getAllByTestId("viewport-background");
+  expect(backgrounds).toHaveLength(2);
+  backgrounds.forEach((background) => {
+    expect(background).toHaveAttribute("data-panorama-asset-id", panoramaAsset.id);
+  });
+});
+
+it("keeps finished-shot and monitor FOV controls independent", () => {
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    ...state,
+    viewMode: "director",
+    motionStudioOpen: true,
+    finishedShotFov: 36,
+    motionMonitorFov: 72,
+    project: {
+      ...state.project,
+      cameras: state.project.cameras.map((camera) => ({
+        ...camera,
+        motionPath: {
+          duration: 6,
+          loop: false,
+          interpolation: "linear" as const,
+          easing: "linear" as const,
+          keyframes: [
+            { id: "fov_1", time: 0, position: [0, 2, 8] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 50 },
+            { id: "fov_2", time: 1, position: [4, 2, 4] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 42 },
+          ],
+        },
+      })),
+    },
+  });
+
+  render(<App />);
+
+  const finishedSlider = screen.getByRole("slider", { name: "看成片 FOV" });
+  const monitorSlider = screen.getByRole("slider", { name: "小窗 FOV" });
+  expect(finishedSlider).toHaveValue("36");
+  expect(monitorSlider).toHaveValue("72");
+
+  fireEvent.change(monitorSlider, { target: { value: "80" } });
+  expect(useDirectorStore.getState().motionMonitorFov).toBe(80);
+  expect(useDirectorStore.getState().finishedShotFov).toBe(36);
+
+  fireEvent.change(finishedSlider, { target: { value: "40" } });
+  expect(useDirectorStore.getState().finishedShotFov).toBe(40);
+  expect(useDirectorStore.getState().motionMonitorFov).toBe(80);
+});
+
+it("adds a new waypoint for every Enter press while character action playback is paused", () => {
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    ...state,
+    cameraPilotMode: "pilot",
+    cameraMotionPlaying: false,
+    cameraMotionProgress: 0.5,
+    motionStudioOpen: true,
+    project: {
+      ...state.project,
+      objects: state.project.objects.map((object) => object.id === "char_default_a" ? {
+        ...object,
+        motionPath: {
+          interpolation: "linear" as const,
+          keyframes: [
+            { id: "action_1", time: 0, transform: object.transform },
+            { id: "action_2", time: 1, transform: { ...object.transform, position: [4, 0, 0] as [number, number, number] } },
+          ],
+        },
+      } : object),
+    },
+  });
+
+  render(<App />);
+  fireEvent.keyDown(window, { code: "Enter", repeat: false });
+  fireEvent.keyDown(window, { code: "Enter", repeat: false });
+  fireEvent.keyDown(window, { code: "Enter", repeat: false });
+
+  expect(useDirectorStore.getState().project.cameras[0].motionPath?.keyframes).toHaveLength(3);
 });
