@@ -266,7 +266,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     if (!canvas || !ctx) return;
     ctx.save();
     ctx.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over';
-    ctx.strokeStyle = 'rgba(68, 70, 206, 0.64)';
+    ctx.strokeStyle = 'rgba(239, 68, 68, 0.72)';
     ctx.lineWidth = brushSize;
     ctx.beginPath();
     ctx.moveTo(from?.x ?? point.x, from?.y ?? point.y);
@@ -308,8 +308,8 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
       const y = Math.min(rectStartRef.current.y, point.y);
       const width = Math.abs(point.x - rectStartRef.current.x);
       const height = Math.abs(point.y - rectStartRef.current.y);
-      ctx.fillStyle = 'rgba(68, 70, 206, 0.34)';
-      ctx.strokeStyle = 'rgba(142, 145, 244, 0.95)';
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.22)';
+      ctx.strokeStyle = 'rgba(248, 113, 113, 0.98)';
       ctx.lineWidth = 2;
       ctx.fillRect(x, y, width, height);
       ctx.strokeRect(x, y, width, height);
@@ -331,8 +331,8 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
       const y = Math.min(rectStartRef.current.y, point.y);
       const width = Math.abs(point.x - rectStartRef.current.x);
       const height = Math.abs(point.y - rectStartRef.current.y);
-      ctx.fillStyle = 'rgba(68, 70, 206, 0.34)';
-      ctx.strokeStyle = 'rgba(142, 145, 244, 0.95)';
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.22)';
+      ctx.strokeStyle = 'rgba(248, 113, 113, 0.98)';
       ctx.lineWidth = 2;
       ctx.fillRect(x, y, width, height);
       ctx.strokeRect(x, y, width, height);
@@ -509,13 +509,12 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                 onPointerCancel={handleDrawPointerUp}
               />
             </div>
-            <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-3 rounded-2xl bg-black/60 px-3 py-2 text-white backdrop-blur-md">
+            <div className="absolute bottom-3 left-1/2 flex w-[184px] -translate-x-1/2 items-center justify-center gap-5 rounded-2xl bg-black/60 px-4 py-2.5 text-white backdrop-blur-md">
               <button type="button" className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white/10" onClick={() => seekTo(currentTime - FRAME_STEP)} title="上一帧"><Icons.SkipBack size={16} /></button>
               <button type="button" className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-zinc-950" onClick={togglePlay} title={isPlaying ? '暂停' : '播放'}>
                 {isPlaying ? <Icons.Pause size={18} fill="currentColor" /> : <Icons.Play size={18} fill="currentColor" className="ml-0.5" />}
               </button>
               <button type="button" className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white/10" onClick={() => seekTo(currentTime + FRAME_STEP)} title="下一帧"><Icons.SkipForward size={16} /></button>
-              <span className="min-w-[86px] text-center text-xs tabular-nums">{formatTimecode(currentTime)} / {formatTimecode(duration)}</span>
             </div>
           </div>
 
