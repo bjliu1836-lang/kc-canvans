@@ -52,6 +52,8 @@ interface VideoReferencePromptEditorProps {
     onPreviewReference?: (item: InputMedia) => void;
     allowExpand?: boolean;
     headerContent?: React.ReactNode;
+    referenceHint?: string;
+    expandedTitle?: string;
 }
 
 interface ExtractedEditorState {
@@ -122,6 +124,8 @@ export const VideoReferencePromptEditor: React.FC<VideoReferencePromptEditorProp
     onPreviewReference,
     allowExpand = true,
     headerContent,
+    referenceHint,
+    expandedTitle = '编辑视频提示词',
 }) => {
     const editorRef = useRef<HTMLDivElement>(null);
     const lastRenderedSignatureRef = useRef('');
@@ -440,7 +444,7 @@ export const VideoReferencePromptEditor: React.FC<VideoReferencePromptEditorProp
                 />
                 {allowedTypes.size > 0 && (
                     <div className={`mt-1 text-[10px] ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>
-                        输入 @ 引用当前节点已连接的{mode === 'image' ? '图片' : '图片、视频或音频'}
+                        {referenceHint || `输入 @ 引用当前节点已连接的${mode === 'image' ? '图片' : '图片、视频或音频'}`}
                     </div>
                 )}
             </div>
@@ -501,7 +505,7 @@ export const VideoReferencePromptEditor: React.FC<VideoReferencePromptEditorProp
                         onMouseDown={event => event.stopPropagation()}
                     >
                         <div className="mb-3 flex items-center justify-between">
-                            <span className={`text-sm font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>编辑视频提示词</span>
+                            <span className={`text-sm font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{expandedTitle}</span>
                             <button
                                 type="button"
                                 className={`flex h-8 w-8 items-center justify-center rounded-lg ${isDark ? 'text-zinc-400 hover:bg-zinc-800 hover:text-white' : 'text-gray-500 hover:bg-gray-100'}`}

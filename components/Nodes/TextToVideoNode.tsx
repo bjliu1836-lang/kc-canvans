@@ -24,6 +24,7 @@ interface TextToVideoNodeProps {
   onSaveResult?: (id: string) => void;
   onExtractFrames?: (id: string) => void;
   onExtractSingleFrame?: (id: string, imageDataUrl: string, timeSeconds: number) => void;
+  onEditVideo?: (id: string) => void;
   onRemoveSubtitles?: (id: string) => void;
   onEnhanceVideo?: (id: string) => void;
   onRemoveBGM?: (id: string) => void;
@@ -36,7 +37,7 @@ interface TextToVideoNodeProps {
 }
 
 export const TextToVideoNode: React.FC<TextToVideoNodeProps> = ({
-    data, updateData, onGenerate, selected, showControls, inputs = [], inputMedia = [], onPreviewReference, onMaximize, onPreviewMedia, onUseVideoVersion, onDownload, onUpload, onSaveResult, onExtractFrames, onExtractSingleFrame, onRemoveSubtitles, onEnhanceVideo, onRemoveBGM, onToggleFavoriteArtifact, isArtifactFavorited, onAddToAssetLibrary, isDark = true, isSelecting, canvasScale = 1
+    data, updateData, onGenerate, selected, showControls, inputs = [], inputMedia = [], onPreviewReference, onMaximize, onPreviewMedia, onUseVideoVersion, onDownload, onUpload, onSaveResult, onExtractFrames, onExtractSingleFrame, onEditVideo, onRemoveSubtitles, onEnhanceVideo, onRemoveBGM, onToggleFavoriteArtifact, isArtifactFavorited, onAddToAssetLibrary, isDark = true, isSelecting, canvasScale = 1
 }) => {
     const [deferredInputs, setDeferredInputs] = useState(false);
     const [progress, setProgress] = useState(0);
@@ -248,6 +249,10 @@ export const TextToVideoNode: React.FC<TextToVideoNodeProps> = ({
 
         {isSelectedAndStable && showControls && hasResult && (
             <div className={`absolute bottom-full left-1/2 mb-2 z-[75] flex items-center gap-1.5 rounded-2xl border px-3 py-2 shadow-2xl backdrop-blur-xl pointer-events-auto ${isDark ? 'bg-[#202020]/95 border-zinc-700 text-zinc-100' : 'bg-white/95 border-gray-200 text-gray-900'}`} style={topToolbarTransform} onMouseDown={(e) => e.stopPropagation()}>
+                <button className={`h-9 px-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-100'}`} onClick={() => onEditVideo?.(data.id)} title="使用关键帧和蒙版对当前视频进行二次编辑">
+                    <Icons.Edit3 size={16} />
+                    <span>视频编辑</span>
+                </button>
                 <button className={`h-9 px-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-100'}`} onClick={() => onRemoveSubtitles?.(data.id)} title="AI 检测并移除硬字幕和水印">
                     <Icons.Subtitles size={16} />
                     <span>去字幕</span>

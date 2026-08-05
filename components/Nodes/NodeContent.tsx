@@ -29,6 +29,7 @@ interface NodeContentProps {
   onPreviewReference?: (item: InputMedia) => void;
   onExtractFrames?: (nodeId: string) => void;
   onExtractSingleFrame?: (nodeId: string, imageDataUrl: string, timeSeconds: number) => void;
+  onEditVideo?: (nodeId: string) => void;
   onRemoveSubtitles?: (nodeId: string) => void;
   onEnhanceVideo?: (nodeId: string) => void;
   onRemoveBGM?: (nodeId: string) => void;

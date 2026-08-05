@@ -25,6 +25,23 @@ export interface VideoPromptReference {
   offset?: number;
 }
 
+export interface VideoEditAnchor {
+  id: string;
+  timeSeconds: number;
+  timecode: string;
+  estimatedFrame: number;
+  originalFrameDataUrl: string;
+  maskDataUrl: string;
+  annotatedFrameDataUrl: string;
+}
+
+export interface VideoEditRequest {
+  sourceVideoUrl: string;
+  prompt: string;
+  scope: 'track_same_subject_full_clip';
+  anchors: VideoEditAnchor[];
+}
+
 export interface ImageVersionSnapshot {
   url: string;
   prompt: string;

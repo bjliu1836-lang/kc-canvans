@@ -2,7 +2,7 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import Sidebar from './components/Sidebar';
 import { AssetSelectionModal } from './components/AssetSelectionModal';
-import { AssetLibraryItem, AssetLibraryType, AddToAssetPanelState, ImageVersionSnapshot, InputMedia, MultiAngleOptions, NodeData, Connection, CanvasTransform, Point, DragMode, NodeType, ProjectCanvasItem, ShotClip, TextVersionSnapshot } from './types';
+import { AssetLibraryItem, AssetLibraryType, AddToAssetPanelState, ImageVersionSnapshot, InputMedia, MultiAngleOptions, NodeData, Connection, CanvasTransform, Point, DragMode, NodeType, ProjectCanvasItem, ShotClip, TextVersionSnapshot, VideoEditRequest } from './types';
 import BaseNode from './components/Nodes/BaseNode';
 import { NodeContent } from './components/Nodes/NodeContent';
 import { Icons } from './components/Icons';
@@ -14,6 +14,7 @@ import { ExportImportModal } from './components/Settings/ExportImportModal';
 import { WelcomeModal, hasShownWelcome } from './components/Settings/WelcomeModal';
 import { CropModal } from './components/CropModal';
 import { VideoFrameExtractPanel } from './components/VideoFrameExtractPanel';
+import { VideoEditPanel } from './components/VideoEditPanel';
 import { LoginScreen } from './components/LoginScreen';
 import { authService } from './services/authService';
 import { getVideoModelCapability, inferVideoMode, resolveVideoMode } from './services/mode/video/capabilities';
@@ -883,6 +884,7 @@ const CanvasWithSidebar: React.FC = () => {
   const [isMiniMapOpen, setIsMiniMapOpen] = useState(false);
   const [pendingDeleteRequest, setPendingDeleteRequest] = useState<{ nodeIds: string[]; connectionIds: string[] } | null>(null);
   const [frameExtractTarget, setFrameExtractTarget] = useState<{ nodeId: string; videoSrc: string } | null>(null);
+  const [videoEditTarget, setVideoEditTarget] = useState<{ nodeId: string; videoSrc: string; title: string } | null>(null);
   const [directorDeskSession, setDirectorDeskSession] = useState<DirectorDeskSession | null>(null);
   
   // Quick Add Menu State
@@ -2539,6 +2541,63 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           return;
       }
       setPreviewMedia({ url: item.url, type: item.type, title: item.title });
+  };
+
+  const handleOpenVideoEdit = (nodeId: string) => {
+      const requestedSource = nodes.find(node => node.id === nodeId);
+      const source = requestedSource ? resolveSecondaryEditSource(requestedSource) : undefined;
+      if (!source?.videoSrc) {
+          alert('当前节点没有可编辑的视频');
+          return;
+      }
+      setVideoEditTarget({ nodeId: source.id, videoSrc: source.videoSrc, title: source.title });
+  };
+
+  const handleVideoEditSubmit = (request: VideoEditRequest) => {
+      const requestedSource = nodes.find(node => node.id === videoEditTarget?.nodeId);
+      const source = requestedSource ? resolveSecondaryEditSource(requestedSource) : undefined;
+      if (!source?.videoSrc) {
+          setVideoEditTarget(null);
+          alert('原视频已不存在，请重新打开视频编辑');
+          return;
+      }
+
+      console.info('[VideoEditMock] request', {
+          sourceVideoUrl: request.sourceVideoUrl,
+          prompt: request.prompt,
+          scope: request.scope,
+          anchors: request.anchors.map(anchor => ({
+              timeSeconds: anchor.timeSeconds,
+              timecode: anchor.timecode,
+              estimatedFrame: anchor.estimatedFrame,
+              hasOriginalFrame: Boolean(anchor.originalFrameDataUrl),
+              hasMask: Boolean(anchor.maskDataUrl),
+              hasAnnotatedPreview: Boolean(anchor.annotatedFrameDataUrl),
+          })),
+      });
+
+      const editNode = buildVideoEditNode(source, '视频编辑·模拟', `视频编辑_${source.title}`, {
+          videoSrc: undefined,
+          outputArtifacts: [],
+          prompt: request.prompt,
+          isLoading: true,
+          errorMessage: undefined,
+          creditEstimate: 6,
+          creditStatus: 'reserved',
+      });
+      addCreatedCanvasItems([editNode], [createDerivedConnection(source, editNode.id)], '新建节点');
+      setSelectedNodeIds(new Set([editNode.id]));
+      setVideoEditTarget(null);
+
+      window.setTimeout(() => {
+          updateNodeData(editNode.id, {
+              videoSrc: source.videoSrc,
+              outputArtifacts: [source.videoSrc],
+              isLoading: false,
+              errorMessage: undefined,
+              creditStatus: 'confirmed',
+          });
+      }, 900);
   };
 
   const handleCropStart = (nodeId: string) => {
@@ -5160,6 +5219,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                                 const n = nodes.find(nd => nd.id === nodeId);
                                 if (n?.videoSrc) setFrameExtractTarget({ nodeId, videoSrc: n.videoSrc });
                             }}
+                            onEditVideo={handleOpenVideoEdit}
                             onRemoveSubtitles={handleRemoveSubtitlesEdit}
                             onEnhanceVideo={handleEnhanceVideoEdit}
                             onRemoveBGM={handleRemoveBGMEdit}
@@ -5579,6 +5639,17 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                     isDark={isDark}
                     onClose={() => setCropTarget(null)}
                     onConfirm={handleCropConfirm}
+                />
+            )}
+
+            {videoEditTarget && (
+                <VideoEditPanel
+                    isOpen={true}
+                    videoSrc={videoEditTarget.videoSrc}
+                    sourceTitle={videoEditTarget.title}
+                    isDark={isDark}
+                    onClose={() => setVideoEditTarget(null)}
+                    onSubmit={handleVideoEditSubmit}
                 />
             )}
 
