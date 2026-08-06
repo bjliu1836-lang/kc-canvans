@@ -133,6 +133,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [isTimelineDragging, setIsTimelineDragging] = useState(false);
   const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([]);
+  const [timelineHover, setTimelineHover] = useState<{ x: number; y: number } | null>(null);
   const [hasDrawing, setHasDrawing] = useState(false);
   const [brushHover, setBrushHover] = useState<{ x: number; y: number } | null>(null);
   const [historyVersion, setHistoryVersion] = useState(0);
@@ -157,6 +158,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     setIsPlaying(false);
     setIsTimelineDragging(false);
     setTimelineThumbnails([]);
+    setTimelineHover(null);
     setHasDrawing(false);
     setBrushHover(null);
     setHistoryVersion(value => value + 1);
@@ -386,21 +388,34 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     seekTo(ratio * duration, false);
   };
 
+  const updateTimelineHover = (event: React.PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const isInside = event.clientX >= rect.left && event.clientX <= rect.right
+      && event.clientY >= rect.top && event.clientY <= rect.bottom;
+    setTimelineHover(isInside ? {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    } : null);
+  };
+
   const handleTimelinePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
     if (!confirmSeek()) return;
     setIsTimelineDragging(true);
+    updateTimelineHover(event);
     event.currentTarget.setPointerCapture(event.pointerId);
     updateTimeline(event.clientX);
   };
 
   const handleTimelinePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    updateTimelineHover(event);
     if (isTimelineDragging) updateTimeline(event.clientX);
   };
 
   const handleTimelinePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
     setIsTimelineDragging(false);
+    updateTimelineHover(event);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
@@ -483,7 +498,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
       const width = Math.abs(point.x - rectStartRef.current.x);
       const height = Math.abs(point.y - rectStartRef.current.y);
       ctx.strokeStyle = '#ef4444';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 4;
       ctx.strokeRect(x, y, width, height);
       maskCtx.fillStyle = '#fff';
       maskCtx.fillRect(x, y, width, height);
@@ -509,7 +524,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
       const width = Math.abs(point.x - rectStartRef.current.x);
       const height = Math.abs(point.y - rectStartRef.current.y);
       ctx.strokeStyle = '#ef4444';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 4;
       ctx.strokeRect(x, y, width, height);
       if (maskCtx) {
         maskCtx.fillStyle = '#fff';
@@ -738,11 +753,13 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
             </div>
             <div
               ref={timelineRef}
-              className="relative mt-1 h-[72px] cursor-pointer touch-none select-none"
+              className="relative mt-1 h-[72px] cursor-none touch-none select-none"
               onPointerDown={handleTimelinePointerDown}
+              onPointerEnter={updateTimelineHover}
               onPointerMove={handleTimelinePointerMove}
               onPointerUp={handleTimelinePointerUp}
               onPointerCancel={handleTimelinePointerUp}
+              onPointerLeave={() => setTimelineHover(null)}
             >
               <div className="absolute inset-x-0 top-0 flex justify-between">
                 {timelineTicks.map(tick => (
@@ -769,6 +786,25 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                   <div key={index} className={`h-10 flex-1 rounded-md ${isDark ? 'bg-zinc-800' : 'bg-zinc-200'}`} />
                 ))}
               </div>
+              {timelineHover && (
+                <svg
+                  viewBox="0 0 32 24"
+                  width="34"
+                  height="26"
+                  aria-hidden="true"
+                  className={`pointer-events-none absolute z-30 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)] ${isDark ? 'text-white' : 'text-zinc-950'}`}
+                  style={{ left: timelineHover.x, top: timelineHover.y, transform: 'translate(-50%, -50%)' }}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M16 3v18" />
+                  <path d="M3 12h9M8 8l4 4-4 4" />
+                  <path d="M29 12h-9M24 8l-4 4 4 4" />
+                </svg>
+              )}
             </div>
           </div>
 
