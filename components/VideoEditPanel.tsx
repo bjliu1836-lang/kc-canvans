@@ -13,7 +13,7 @@ interface VideoEditPanelProps {
 }
 
 type EditTool = 'brush' | 'rect' | 'eraser';
-type HistoryEntry = { image: ImageData; hasDrawing: boolean };
+type HistoryEntry = { image: ImageData; mask: ImageData; hasDrawing: boolean };
 
 const MAX_WORK_SIZE = 1280;
 const FRAME_STEP = 1 / 24;
@@ -58,6 +58,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+  const selectionMaskRef = useRef<HTMLCanvasElement>(null);
   const sourceCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const historyRef = useRef<HistoryEntry[]>([]);
@@ -66,6 +67,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
   const rectStartRef = useRef<{ x: number; y: number } | null>(null);
   const rectBaseRef = useRef<ImageData | null>(null);
+  const rectMaskBaseRef = useRef<ImageData | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -76,6 +78,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [isTimelineDragging, setIsTimelineDragging] = useState(false);
   const [hasDrawing, setHasDrawing] = useState(false);
+  const [brushHover, setBrushHover] = useState<{ x: number; y: number } | null>(null);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [anchors, setAnchors] = useState<VideoEditAnchor[]>([]);
   const [prompt, setPrompt] = useState('');
@@ -98,6 +101,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     setIsPlaying(false);
     setIsTimelineDragging(false);
     setHasDrawing(false);
+    setBrushHover(null);
     setHistoryVersion(value => value + 1);
     setAnchors([]);
     setPrompt('');
@@ -108,6 +112,8 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     redoRef.current = [];
     const canvas = overlayRef.current;
     canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+    const selectionMask = selectionMaskRef.current;
+    selectionMask?.getContext('2d')?.clearRect(0, 0, selectionMask.width, selectionMask.height);
   }, []);
 
   useEffect(() => {
@@ -116,27 +122,42 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
 
   useEffect(() => {
     const canvas = overlayRef.current;
+    const selectionMask = selectionMaskRef.current;
     if (!canvas || !workingSize.width || !workingSize.height) return;
     canvas.width = workingSize.width;
     canvas.height = workingSize.height;
+    if (selectionMask) {
+      selectionMask.width = workingSize.width;
+      selectionMask.height = workingSize.height;
+    }
     const ctx = canvas.getContext('2d');
+    const maskCtx = selectionMask?.getContext('2d');
     if (ctx) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
     }
+    maskCtx?.clearRect(0, 0, selectionMask?.width || 0, selectionMask?.height || 0);
+    if (maskCtx) {
+      maskCtx.lineCap = 'round';
+      maskCtx.lineJoin = 'round';
+    }
     historyRef.current = [];
     redoRef.current = [];
     setHasDrawing(false);
+    setBrushHover(null);
     setHistoryVersion(value => value + 1);
   }, [workingSize]);
 
   const saveHistory = useCallback(() => {
     const canvas = overlayRef.current;
     const ctx = canvas?.getContext('2d');
-    if (!canvas || !ctx) return;
+    const selectionMask = selectionMaskRef.current;
+    const maskCtx = selectionMask?.getContext('2d');
+    if (!canvas || !ctx || !selectionMask || !maskCtx) return;
     historyRef.current = [...historyRef.current.slice(-7), {
       image: ctx.getImageData(0, 0, canvas.width, canvas.height),
+      mask: maskCtx.getImageData(0, 0, selectionMask.width, selectionMask.height),
       hasDrawing,
     }];
     redoRef.current = [];
@@ -146,8 +167,11 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const restoreHistoryEntry = useCallback((entry: HistoryEntry) => {
     const canvas = overlayRef.current;
     const ctx = canvas?.getContext('2d');
-    if (!canvas || !ctx) return;
+    const selectionMask = selectionMaskRef.current;
+    const maskCtx = selectionMask?.getContext('2d');
+    if (!canvas || !ctx || !selectionMask || !maskCtx) return;
     ctx.putImageData(entry.image, 0, 0);
+    maskCtx.putImageData(entry.mask, 0, 0);
     setHasDrawing(entry.hasDrawing);
     setHistoryVersion(value => value + 1);
   }, []);
@@ -155,18 +179,22 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const undo = () => {
     const canvas = overlayRef.current;
     const ctx = canvas?.getContext('2d');
+    const selectionMask = selectionMaskRef.current;
+    const maskCtx = selectionMask?.getContext('2d');
     const previous = historyRef.current.pop();
-    if (!canvas || !ctx || !previous) return;
-    redoRef.current.push({ image: ctx.getImageData(0, 0, canvas.width, canvas.height), hasDrawing });
+    if (!canvas || !ctx || !selectionMask || !maskCtx || !previous) return;
+    redoRef.current.push({ image: ctx.getImageData(0, 0, canvas.width, canvas.height), mask: maskCtx.getImageData(0, 0, selectionMask.width, selectionMask.height), hasDrawing });
     restoreHistoryEntry(previous);
   };
 
   const redo = () => {
     const canvas = overlayRef.current;
     const ctx = canvas?.getContext('2d');
+    const selectionMask = selectionMaskRef.current;
+    const maskCtx = selectionMask?.getContext('2d');
     const next = redoRef.current.pop();
-    if (!canvas || !ctx || !next) return;
-    historyRef.current.push({ image: ctx.getImageData(0, 0, canvas.width, canvas.height), hasDrawing });
+    if (!canvas || !ctx || !selectionMask || !maskCtx || !next) return;
+    historyRef.current.push({ image: ctx.getImageData(0, 0, canvas.width, canvas.height), mask: maskCtx.getImageData(0, 0, selectionMask.width, selectionMask.height), hasDrawing });
     restoreHistoryEntry(next);
   };
 
@@ -175,14 +203,19 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     saveHistory();
     const canvas = overlayRef.current;
     canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+    const selectionMask = selectionMaskRef.current;
+    selectionMask?.getContext('2d')?.clearRect(0, 0, selectionMask.width, selectionMask.height);
     setHasDrawing(false);
   };
 
   const clearUncommittedDrawing = useCallback(() => {
     const canvas = overlayRef.current;
     const ctx = canvas?.getContext('2d');
-    if (!canvas || !ctx) return;
+    const selectionMask = selectionMaskRef.current;
+    const maskCtx = selectionMask?.getContext('2d');
+    if (!canvas || !ctx || !selectionMask || !maskCtx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    maskCtx.clearRect(0, 0, selectionMask.width, selectionMask.height);
     historyRef.current = [];
     redoRef.current = [];
     setHasDrawing(false);
@@ -263,16 +296,41 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const drawBrush = (point: { x: number; y: number }, from?: { x: number; y: number }) => {
     const canvas = overlayRef.current;
     const ctx = canvas?.getContext('2d');
-    if (!canvas || !ctx) return;
+    const selectionMask = selectionMaskRef.current;
+    const maskCtx = selectionMask?.getContext('2d');
+    if (!canvas || !ctx || !selectionMask || !maskCtx) return;
+    const startPoint = from || point;
     ctx.save();
     ctx.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over';
-    ctx.strokeStyle = 'rgba(239, 68, 68, 0.72)';
+    ctx.strokeStyle = '#ef4444';
     ctx.lineWidth = brushSize;
     ctx.beginPath();
-    ctx.moveTo(from?.x ?? point.x, from?.y ?? point.y);
+    ctx.moveTo(startPoint.x, startPoint.y);
     ctx.lineTo(point.x, point.y);
     ctx.stroke();
     ctx.restore();
+
+    maskCtx.save();
+    maskCtx.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over';
+    maskCtx.strokeStyle = '#fff';
+    maskCtx.lineWidth = brushSize;
+    maskCtx.beginPath();
+    maskCtx.moveTo(startPoint.x, startPoint.y);
+    maskCtx.lineTo(point.x, point.y);
+    maskCtx.stroke();
+    maskCtx.restore();
+  };
+
+  const updateBrushHover = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (tool === 'rect') {
+      setBrushHover(null);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    setBrushHover({
+      x: Math.max(0, Math.min(rect.width, event.clientX - rect.left)),
+      y: Math.max(0, Math.min(rect.height, event.clientY - rect.top)),
+    });
   };
 
   const handleDrawPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -289,6 +347,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     if (tool === 'rect') {
       rectStartRef.current = point;
       rectBaseRef.current = canvas.getContext('2d')?.getImageData(0, 0, canvas.width, canvas.height) || null;
+      rectMaskBaseRef.current = selectionMaskRef.current?.getContext('2d')?.getImageData(0, 0, canvas.width, canvas.height) || null;
     } else {
       drawBrush(point);
       lastPointRef.current = point;
@@ -297,22 +356,26 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   };
 
   const handleDrawPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    updateBrushHover(event);
     if (!drawingRef.current) return;
     const canvas = overlayRef.current;
     const ctx = canvas?.getContext('2d');
-    if (!canvas || !ctx) return;
+    const selectionMask = selectionMaskRef.current;
+    const maskCtx = selectionMask?.getContext('2d');
+    if (!canvas || !ctx || !selectionMask || !maskCtx) return;
     const point = getCanvasPoint(event, canvas);
     if (tool === 'rect' && rectStartRef.current && rectBaseRef.current) {
       ctx.putImageData(rectBaseRef.current, 0, 0);
+      if (rectMaskBaseRef.current) maskCtx.putImageData(rectMaskBaseRef.current, 0, 0);
       const x = Math.min(rectStartRef.current.x, point.x);
       const y = Math.min(rectStartRef.current.y, point.y);
       const width = Math.abs(point.x - rectStartRef.current.x);
       const height = Math.abs(point.y - rectStartRef.current.y);
-      ctx.fillStyle = 'rgba(239, 68, 68, 0.22)';
-      ctx.strokeStyle = 'rgba(248, 113, 113, 0.98)';
+      ctx.strokeStyle = '#ef4444';
       ctx.lineWidth = 2;
-      ctx.fillRect(x, y, width, height);
       ctx.strokeRect(x, y, width, height);
+      maskCtx.fillStyle = '#fff';
+      maskCtx.fillRect(x, y, width, height);
     } else {
       drawBrush(point, lastPointRef.current || point);
       lastPointRef.current = point;
@@ -324,24 +387,30 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     if (!drawingRef.current) return;
     const canvas = overlayRef.current;
     const ctx = canvas?.getContext('2d');
+    const selectionMask = selectionMaskRef.current;
+    const maskCtx = selectionMask?.getContext('2d');
     if (tool === 'rect' && canvas && ctx && rectStartRef.current) {
       const point = getCanvasPoint(event, canvas);
       ctx.putImageData(rectBaseRef.current || ctx.getImageData(0, 0, canvas.width, canvas.height), 0, 0);
+      if (selectionMask && maskCtx && rectMaskBaseRef.current) maskCtx.putImageData(rectMaskBaseRef.current, 0, 0);
       const x = Math.min(rectStartRef.current.x, point.x);
       const y = Math.min(rectStartRef.current.y, point.y);
       const width = Math.abs(point.x - rectStartRef.current.x);
       const height = Math.abs(point.y - rectStartRef.current.y);
-      ctx.fillStyle = 'rgba(239, 68, 68, 0.22)';
-      ctx.strokeStyle = 'rgba(248, 113, 113, 0.98)';
+      ctx.strokeStyle = '#ef4444';
       ctx.lineWidth = 2;
-      ctx.fillRect(x, y, width, height);
       ctx.strokeRect(x, y, width, height);
+      if (maskCtx) {
+        maskCtx.fillStyle = '#fff';
+        maskCtx.fillRect(x, y, width, height);
+      }
       setHasDrawing(width > 2 && height > 2);
     }
     drawingRef.current = false;
     lastPointRef.current = null;
     rectStartRef.current = null;
     rectBaseRef.current = null;
+    rectMaskBaseRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     if (canvas && ctx && !canvasHasDrawing(canvas)) setHasDrawing(false);
   };
@@ -349,9 +418,10 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const createAnchor = () => {
     const video = videoRef.current;
     const overlay = overlayRef.current;
+    const selectionMask = selectionMaskRef.current;
     const sourceCanvas = sourceCanvasRef.current;
     const maskCanvas = maskCanvasRef.current;
-    if (!video || !overlay || !sourceCanvas || !maskCanvas || !hasDrawing) return;
+    if (!video || !overlay || !selectionMask || !sourceCanvas || !maskCanvas || !hasDrawing) return;
     if (!videoSize.width || !videoSize.height || !duration) {
       setError('视频仍在加载，请稍后再添加当前帧。');
       return;
@@ -369,11 +439,11 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
       maskSmall.height = overlay.height;
       const maskSmallCtx = maskSmall.getContext('2d');
       if (!maskSmallCtx) return;
-      const overlayPixels = overlay.getContext('2d')?.getImageData(0, 0, overlay.width, overlay.height);
-      if (!overlayPixels) return;
+      const selectionPixels = selectionMask.getContext('2d')?.getImageData(0, 0, selectionMask.width, selectionMask.height);
+      if (!selectionPixels) return;
       const maskPixels = maskSmallCtx.createImageData(overlay.width, overlay.height);
-      for (let index = 0; index < overlayPixels.data.length; index += 4) {
-        const selected = overlayPixels.data[index + 3] > 0;
+      for (let index = 0; index < selectionPixels.data.length; index += 4) {
+        const selected = selectionPixels.data[index + 3] > 0;
         maskPixels.data[index] = selected ? 255 : 0;
         maskPixels.data[index + 1] = selected ? 255 : 0;
         maskPixels.data[index + 2] = selected ? 255 : 0;
@@ -449,12 +519,16 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     <button
       type="button"
       className={`flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors ${tool === value ? 'bg-[#4446CE] text-white' : isDark ? 'text-zinc-300 hover:bg-zinc-800' : 'text-gray-600 hover:bg-gray-100'}`}
-      onClick={() => setTool(value)}
+      onClick={() => { setTool(value); if (value === 'rect') setBrushHover(null); }}
       title={label}
     >
       {icon}<span>{label}</span>
     </button>
   );
+
+  const hoverSize = brushHover && overlayRef.current
+    ? Math.max(12, Math.min(64, brushSize * (overlayRef.current.getBoundingClientRect().width / Math.max(overlayRef.current.width, 1))))
+    : 0;
 
   return (
     <div
@@ -504,10 +578,18 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                 ref={overlayRef}
                 className="absolute inset-0 h-full w-full cursor-crosshair"
                 onPointerDown={handleDrawPointerDown}
+                onPointerEnter={updateBrushHover}
                 onPointerMove={handleDrawPointerMove}
                 onPointerUp={handleDrawPointerUp}
                 onPointerCancel={handleDrawPointerUp}
+                onPointerLeave={() => setBrushHover(null)}
               />
+              {brushHover && (tool === 'brush' || tool === 'eraser') && (
+                <div
+                  className={`pointer-events-none absolute rounded-full border-2 ${tool === 'eraser' ? 'border-zinc-100/90 bg-zinc-100/10 shadow-[0_0_0_1px_rgba(0,0,0,0.35),0_0_8px_rgba(255,255,255,0.45)]' : 'border-red-500 bg-red-500/5 shadow-[0_0_0_1px_rgba(127,29,29,0.35),0_0_8px_rgba(239,68,68,0.45)]'}`}
+                  style={{ left: brushHover.x, top: brushHover.y, width: hoverSize, height: hoverSize, transform: 'translate(-50%, -50%)' }}
+                />
+              )}
             </div>
             <div className="absolute bottom-3 left-1/2 flex w-[184px] -translate-x-1/2 items-center justify-center gap-5 rounded-2xl bg-black/60 px-4 py-2.5 text-white backdrop-blur-md">
               <button type="button" className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white/10" onClick={() => seekTo(currentTime - FRAME_STEP)} title="上一帧"><Icons.SkipBack size={16} /></button>
@@ -582,6 +664,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
         </div>
       </div>
       <canvas ref={sourceCanvasRef} className="hidden" />
+      <canvas ref={selectionMaskRef} className="hidden" />
       <canvas ref={maskCanvasRef} className="hidden" />
     </div>
   );
