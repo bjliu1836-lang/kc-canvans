@@ -567,15 +567,14 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
               allowExpand={true}
               referenceHint="关键帧变量会随提示词一起发送；可输入 @ 再次引用已添加的关键帧"
               expandedTitle="编辑视频修改指令"
+              showReferenceHint={false}
             />
-            <p className={`mt-2 text-[11px] ${mutedText}`}>关键帧用于定位对象，模型默认追踪同一对象并作用于整段视频；未添加的涂抹不会发送。</p>
           </div>
 
           {error && <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>}
         </div>
 
         <div className={`flex shrink-0 items-center justify-between border-t px-5 py-3 ${border}`}>
-          <span className={`text-[11px] ${mutedText}`}>发送内容：原视频 + 提示词 + 原始关键帧 + 蒙版</span>
           <button type="button" disabled={isSending || !prompt.trim() || references.length === 0} className="flex h-10 items-center gap-2 rounded-xl bg-[#4446CE] px-4 text-sm font-semibold text-white shadow-lg shadow-[#4446CE]/20 transition-all hover:bg-[#5b5de0] disabled:cursor-not-allowed disabled:opacity-40" onClick={submit}>
             {isSending ? <Icons.Loader2 size={16} className="animate-spin" /> : <Icons.ArrowUp size={18} />}
             <span>{isSending ? '发送中' : '发送编辑请求'}</span>

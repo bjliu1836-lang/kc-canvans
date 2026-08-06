@@ -54,6 +54,7 @@ interface VideoReferencePromptEditorProps {
     headerContent?: React.ReactNode;
     referenceHint?: string;
     expandedTitle?: string;
+    showReferenceHint?: boolean;
 }
 
 interface ExtractedEditorState {
@@ -126,6 +127,7 @@ export const VideoReferencePromptEditor: React.FC<VideoReferencePromptEditorProp
     headerContent,
     referenceHint,
     expandedTitle = '编辑视频提示词',
+    showReferenceHint = true,
 }) => {
     const editorRef = useRef<HTMLDivElement>(null);
     const lastRenderedSignatureRef = useRef('');
@@ -442,7 +444,7 @@ export const VideoReferencePromptEditor: React.FC<VideoReferencePromptEditorProp
                         document.execCommand('insertText', false, event.clipboardData.getData('text/plain'));
                     }}
                 />
-                {allowedTypes.size > 0 && (
+                {allowedTypes.size > 0 && showReferenceHint && (
                     <div className={`mt-1 text-[10px] ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>
                         {referenceHint || `输入 @ 引用当前节点已连接的${mode === 'image' ? '图片' : '图片、视频或音频'}`}
                     </div>
