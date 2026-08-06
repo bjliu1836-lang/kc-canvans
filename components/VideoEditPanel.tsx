@@ -14,6 +14,7 @@ interface VideoEditPanelProps {
 
 type EditTool = 'brush' | 'rect' | 'eraser';
 type HistoryEntry = { image: ImageData; mask: ImageData; hasDrawing: boolean };
+type TimelineThumbnail = { time: number; url: string };
 
 const MAX_WORK_SIZE = 1280;
 const FRAME_STEP = 1 / 24;
@@ -23,6 +24,60 @@ const formatTimecode = (seconds: number) => {
   const minutes = Math.floor(safe / 60);
   const remaining = safe - minutes * 60;
   return `${String(minutes).padStart(2, '0')}:${remaining.toFixed(3).padStart(6, '0')}`;
+};
+
+const formatTimelineTime = (seconds: number) => {
+  const safe = Math.max(0, seconds || 0);
+  const minutes = Math.floor(safe / 60);
+  const wholeSeconds = Math.floor(safe % 60);
+  return `${String(minutes).padStart(2, '0')}:${String(wholeSeconds).padStart(2, '0')}`;
+};
+
+const waitForMediaEvent = (target: EventTarget, eventName: string) => new Promise<void>((resolve, reject) => {
+  const cleanup = () => {
+    target.removeEventListener(eventName, handleSuccess);
+    target.removeEventListener('error', handleError);
+  };
+  const handleSuccess = () => {
+    cleanup();
+    resolve();
+  };
+  const handleError = () => {
+    cleanup();
+    reject(new Error(`Failed while waiting for ${eventName}`));
+  };
+  target.addEventListener(eventName, handleSuccess, { once: true });
+  target.addEventListener('error', handleError, { once: true });
+});
+
+const seekVideoForThumbnail = async (video: HTMLVideoElement, time: number) => {
+  if (Math.abs(video.currentTime - time) < 0.01 && video.readyState >= 2) return;
+  video.currentTime = time;
+  await waitForMediaEvent(video, 'seeked');
+};
+
+const drawVideoCover = (
+  ctx: CanvasRenderingContext2D,
+  video: HTMLVideoElement,
+  width: number,
+  height: number,
+) => {
+  const videoRatio = video.videoWidth / video.videoHeight;
+  const targetRatio = width / height;
+  let sx = 0;
+  let sy = 0;
+  let sw = video.videoWidth;
+  let sh = video.videoHeight;
+
+  if (videoRatio > targetRatio) {
+    sw = video.videoHeight * targetRatio;
+    sx = (video.videoWidth - sw) / 2;
+  } else {
+    sh = video.videoWidth / targetRatio;
+    sy = (video.videoHeight - sh) / 2;
+  }
+
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, width, height);
 };
 
 const getWorkingSize = (width: number, height: number) => {
@@ -77,6 +132,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const [brushSize, setBrushSize] = useState(28);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isTimelineDragging, setIsTimelineDragging] = useState(false);
+  const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([]);
   const [hasDrawing, setHasDrawing] = useState(false);
   const [brushHover, setBrushHover] = useState<{ x: number; y: number } | null>(null);
   const [historyVersion, setHistoryVersion] = useState(0);
@@ -100,6 +156,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     setBrushSize(28);
     setIsPlaying(false);
     setIsTimelineDragging(false);
+    setTimelineThumbnails([]);
     setHasDrawing(false);
     setBrushHover(null);
     setHistoryVersion(value => value + 1);
@@ -119,6 +176,60 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   useEffect(() => {
     if (isOpen) resetEditor();
   }, [isOpen, videoSrc, resetEditor]);
+
+  useEffect(() => {
+    if (!isOpen || !videoSrc) return;
+    let cancelled = false;
+    let thumbnailVideo: HTMLVideoElement | null = null;
+
+    const generateTimelineThumbnails = async () => {
+      try {
+        const video = document.createElement('video');
+        thumbnailVideo = video;
+        video.crossOrigin = 'anonymous';
+        video.muted = true;
+        video.preload = 'auto';
+        video.playsInline = true;
+        video.src = videoSrc;
+
+        if (video.readyState < 1) await waitForMediaEvent(video, 'loadedmetadata');
+        if (video.readyState < 2) await waitForMediaEvent(video, 'loadeddata');
+
+        const total = Number.isFinite(video.duration) ? video.duration : 0;
+        const count = Math.max(6, Math.min(15, Math.ceil(total || 1) + 1));
+        const finalSampleTime = Math.max(0, total - 0.05);
+        const canvas = document.createElement('canvas');
+        canvas.width = 96;
+        canvas.height = 54;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const nextThumbnails: TimelineThumbnail[] = [];
+        for (let index = 0; index < count; index += 1) {
+          if (cancelled) return;
+          const time = count > 1 ? finalSampleTime * index / (count - 1) : 0;
+          await seekVideoForThumbnail(video, time);
+          drawVideoCover(ctx, video, canvas.width, canvas.height);
+          nextThumbnails.push({ time, url: canvas.toDataURL('image/jpeg', 0.72) });
+        }
+
+        if (!cancelled) setTimelineThumbnails(nextThumbnails);
+      } catch {
+        if (!cancelled) setTimelineThumbnails([]);
+      }
+    };
+
+    setTimelineThumbnails([]);
+    generateTimelineThumbnails();
+    return () => {
+      cancelled = true;
+      if (thumbnailVideo) {
+        thumbnailVideo.pause();
+        thumbnailVideo.removeAttribute('src');
+        thumbnailVideo.load();
+      }
+    };
+  }, [isOpen, videoSrc]);
 
   useEffect(() => {
     const canvas = overlayRef.current;
@@ -526,9 +637,12 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     </button>
   );
 
-  const hoverSize = brushHover && overlayRef.current
-    ? Math.max(12, Math.min(64, brushSize * (overlayRef.current.getBoundingClientRect().width / Math.max(overlayRef.current.width, 1))))
-    : 0;
+  const cursorIconSize = Math.round(20 + (brushSize - 8) / 72 * 12);
+  const timelineTickCount = Math.max(1, Math.min(14, Math.floor(duration || 14)));
+  const timelineTicks = Array.from({ length: timelineTickCount + 1 }, (_, index) => ({
+    key: index,
+    label: formatTimelineTime(duration > 0 ? duration * index / timelineTickCount : index),
+  }));
 
   return (
     <div
@@ -576,7 +690,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
               />
               <canvas
                 ref={overlayRef}
-                className="absolute inset-0 h-full w-full cursor-crosshair"
+                className={`absolute inset-0 h-full w-full ${tool === 'rect' ? 'cursor-crosshair' : 'cursor-none'}`}
                 onPointerDown={handleDrawPointerDown}
                 onPointerEnter={updateBrushHover}
                 onPointerMove={handleDrawPointerMove}
@@ -586,9 +700,27 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
               />
               {brushHover && (tool === 'brush' || tool === 'eraser') && (
                 <div
-                  className={`pointer-events-none absolute rounded-full border-2 ${tool === 'eraser' ? 'border-zinc-100/90 bg-zinc-100/10 shadow-[0_0_0_1px_rgba(0,0,0,0.35),0_0_8px_rgba(255,255,255,0.45)]' : 'border-red-500 bg-red-500/5 shadow-[0_0_0_1px_rgba(127,29,29,0.35),0_0_8px_rgba(239,68,68,0.45)]'}`}
-                  style={{ left: brushHover.x, top: brushHover.y, width: hoverSize, height: hoverSize, transform: 'translate(-50%, -50%)' }}
-                />
+                  className="pointer-events-none absolute z-30"
+                  style={{ left: brushHover.x, top: brushHover.y }}
+                >
+                  {tool === 'brush' ? (
+                    <Icons.Paintbrush
+                      size={cursorIconSize}
+                      strokeWidth={2.4}
+                      className="text-red-500 drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]"
+                      fill="rgba(239,68,68,0.22)"
+                      style={{ transform: 'translate(-18%, -82%) rotate(-10deg)' }}
+                    />
+                  ) : (
+                    <Icons.Eraser
+                      size={cursorIconSize}
+                      strokeWidth={2.4}
+                      className="text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]"
+                      fill="rgba(63,63,70,0.92)"
+                      style={{ transform: 'translate(-18%, -82%) rotate(-28deg)' }}
+                    />
+                  )}
+                </div>
               )}
             </div>
             <div className="absolute bottom-3 left-1/2 flex w-[184px] -translate-x-1/2 items-center justify-center gap-5 rounded-2xl bg-black/60 px-4 py-2.5 text-white backdrop-blur-md">
@@ -600,16 +732,44 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
             </div>
           </div>
 
-          <div
-            ref={timelineRef}
-            className={`relative mt-3 h-7 cursor-pointer touch-none rounded-full border ${isDark ? 'border-zinc-700 bg-zinc-900' : 'border-gray-200 bg-gray-100'}`}
-            onPointerDown={handleTimelinePointerDown}
-            onPointerMove={handleTimelinePointerMove}
-            onPointerUp={handleTimelinePointerUp}
-            onPointerCancel={handleTimelinePointerUp}
-          >
-            <div className="absolute inset-y-0 left-0 rounded-full bg-[#4446CE]/80" style={{ width: `${timelineProgress}%` }} />
-            <div className="absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-[#4446CE] shadow" style={{ left: `${timelineProgress}%` }} />
+          <div className={`mt-3 rounded-xl border px-4 pb-3 pt-2.5 ${isDark ? 'border-zinc-700 bg-zinc-900/80' : 'border-gray-200 bg-white'}`}>
+            <div className={`flex justify-between text-[10px] font-medium tabular-nums ${mutedText}`}>
+              {timelineTicks.map(tick => <span key={tick.key}>{tick.label}</span>)}
+            </div>
+            <div
+              ref={timelineRef}
+              className="relative mt-1 h-[72px] cursor-pointer touch-none select-none"
+              onPointerDown={handleTimelinePointerDown}
+              onPointerMove={handleTimelinePointerMove}
+              onPointerUp={handleTimelinePointerUp}
+              onPointerCancel={handleTimelinePointerUp}
+            >
+              <div className="absolute inset-x-0 top-0 flex justify-between">
+                {timelineTicks.map(tick => (
+                  <div key={tick.key} className={`h-3 w-px ${isDark ? 'bg-zinc-500' : 'bg-zinc-400/70'}`} />
+                ))}
+              </div>
+              <div className="absolute inset-x-0 top-2 flex justify-between">
+                {Array.from({ length: Math.max(20, timelineTickCount * 8) }).map((_, index) => (
+                  <div key={index} className={`h-1.5 w-px ${isDark ? 'bg-zinc-700' : 'bg-zinc-300/80'}`} />
+                ))}
+              </div>
+              <div
+                className={`absolute top-0 z-20 h-[66px] w-0.5 rounded-full ${isDark ? 'bg-white' : 'bg-black'}`}
+                style={{ left: `calc(${timelineProgress}% - 1px)` }}
+              >
+                <span className={`absolute -left-[3px] -top-1 h-2.5 w-2.5 rounded-full ${isDark ? 'bg-white' : 'bg-black'}`} />
+              </div>
+              <div className="absolute inset-x-0 bottom-0 flex h-10 items-center gap-1 overflow-hidden rounded-lg">
+                {timelineThumbnails.length > 0 ? timelineThumbnails.map(thumbnail => (
+                  <div key={`${thumbnail.time}-${thumbnail.url}`} className={`h-10 flex-1 overflow-hidden rounded-md ring-1 ${isDark ? 'bg-zinc-800 ring-zinc-700' : 'bg-zinc-200 ring-white'}`}>
+                    <img src={thumbnail.url} className="h-full w-full object-cover" alt="" draggable={false} />
+                  </div>
+                )) : Array.from({ length: 12 }).map((_, index) => (
+                  <div key={index} className={`h-10 flex-1 rounded-md ${isDark ? 'bg-zinc-800' : 'bg-zinc-200'}`} />
+                ))}
+              </div>
+            </div>
           </div>
 
           <div className={`mt-3 flex flex-wrap items-center gap-1.5 rounded-xl border p-2 ${isDark ? 'border-zinc-800 bg-[#202124]' : 'border-gray-200 bg-gray-50'} ${border}`}>
@@ -650,17 +810,22 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
               referenceHint="关键帧变量会随提示词一起发送；可输入 @ 再次引用已添加的关键帧"
               expandedTitle="编辑视频修改指令"
               showReferenceHint={false}
+              bottomRightAction={(
+                <button
+                  type="button"
+                  disabled={isSending || !prompt.trim() || references.length === 0}
+                  className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#4446CE] text-white shadow-lg shadow-[#4446CE]/25 transition-all hover:bg-[#5b5de0] active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+                  onClick={submit}
+                  title={isSending ? '发送中' : '发送编辑请求'}
+                  aria-label={isSending ? '发送中' : '发送编辑请求'}
+                >
+                  {isSending ? <Icons.Loader2 size={16} className="animate-spin" /> : <Icons.ArrowUp size={18} />}
+                </button>
+              )}
             />
           </div>
 
           {error && <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>}
-        </div>
-
-        <div className={`flex shrink-0 items-center justify-between border-t px-5 py-3 ${border}`}>
-          <button type="button" disabled={isSending || !prompt.trim() || references.length === 0} className="flex h-10 items-center gap-2 rounded-xl bg-[#4446CE] px-4 text-sm font-semibold text-white shadow-lg shadow-[#4446CE]/20 transition-all hover:bg-[#5b5de0] disabled:cursor-not-allowed disabled:opacity-40" onClick={submit}>
-            {isSending ? <Icons.Loader2 size={16} className="animate-spin" /> : <Icons.ArrowUp size={18} />}
-            <span>{isSending ? '发送中' : '发送编辑请求'}</span>
-          </button>
         </div>
       </div>
       <canvas ref={sourceCanvasRef} className="hidden" />

@@ -55,6 +55,7 @@ interface VideoReferencePromptEditorProps {
     referenceHint?: string;
     expandedTitle?: string;
     showReferenceHint?: boolean;
+    bottomRightAction?: React.ReactNode;
 }
 
 interface ExtractedEditorState {
@@ -128,6 +129,7 @@ export const VideoReferencePromptEditor: React.FC<VideoReferencePromptEditorProp
     referenceHint,
     expandedTitle = '编辑视频提示词',
     showReferenceHint = true,
+    bottomRightAction,
 }) => {
     const editorRef = useRef<HTMLDivElement>(null);
     const lastRenderedSignatureRef = useRef('');
@@ -374,7 +376,7 @@ export const VideoReferencePromptEditor: React.FC<VideoReferencePromptEditorProp
 
     return (
         <div className={`relative cursor-default select-text ${allowExpand ? '' : 'h-full'}`}>
-            <div className={`${allowExpand ? 'min-h-[126px]' : 'h-full min-h-[420px]'} cursor-text select-text rounded-[14px] border px-3.5 py-3 transition-all focus-within:border-[#4446CE]/80 focus-within:ring-2 focus-within:ring-[#4446CE]/15 ${border}`}>
+            <div className={`relative ${allowExpand ? 'min-h-[126px]' : 'h-full min-h-[420px]'} cursor-text select-text rounded-[14px] border px-3.5 py-3 transition-all focus-within:border-[#4446CE]/80 focus-within:ring-2 focus-within:ring-[#4446CE]/15 ${border}`}>
                 {allowExpand && (
                     <button
                         type="button"
@@ -395,7 +397,7 @@ export const VideoReferencePromptEditor: React.FC<VideoReferencePromptEditorProp
                     role="textbox"
                     aria-multiline="true"
                     data-placeholder={placeholder}
-                    className={`${allowExpand ? 'min-h-[68px]' : 'min-h-[330px]'} cursor-text select-text whitespace-pre-wrap break-words bg-transparent pr-7 text-sm leading-8 outline-none empty:before:pointer-events-none empty:before:text-zinc-500 empty:before:content-[attr(data-placeholder)]`}
+                    className={`${allowExpand ? 'min-h-[68px]' : 'min-h-[330px]'} ${bottomRightAction ? 'pb-10 pr-14' : 'pr-7'} cursor-text select-text whitespace-pre-wrap break-words bg-transparent text-sm leading-8 outline-none empty:before:pointer-events-none empty:before:text-zinc-500 empty:before:content-[attr(data-placeholder)]`}
                     onInput={commitEditorState}
                     onKeyDown={event => {
                         event.stopPropagation();
@@ -447,6 +449,11 @@ export const VideoReferencePromptEditor: React.FC<VideoReferencePromptEditorProp
                 {allowedTypes.size > 0 && showReferenceHint && (
                     <div className={`mt-1 text-[10px] ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>
                         {referenceHint || `输入 @ 引用当前节点已连接的${mode === 'image' ? '图片' : '图片、视频或音频'}`}
+                    </div>
+                )}
+                {bottomRightAction && (
+                    <div className="absolute bottom-3 right-3 z-20 cursor-default">
+                        {bottomRightAction}
                     </div>
                 )}
             </div>
@@ -529,6 +536,10 @@ export const VideoReferencePromptEditor: React.FC<VideoReferencePromptEditorProp
                                 onPreviewReference={onPreviewReference}
                                 allowExpand={false}
                                 headerContent={headerContent}
+                                referenceHint={referenceHint}
+                                expandedTitle={expandedTitle}
+                                showReferenceHint={showReferenceHint}
+                                bottomRightAction={bottomRightAction}
                             />
                         </div>
                     </div>

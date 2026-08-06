@@ -11,7 +11,7 @@ import {
   Eye, EyeOff, RotateCcw, Info, Mic, ArrowUp, Minus, Map, Coins, Star,
   Music, Volume2, Languages,
   Clapperboard as Clapperboard2, GalleryVerticalEnd, Eraser, Move3d, Subtitles, TrendingUp, Library, ChevronDown,
-  Box, VolumeX, Lightbulb, SkipBack, SkipForward, Palette, ShieldCheck
+  Box, VolumeX, Lightbulb, SkipBack, SkipForward, Palette, ShieldCheck, Paintbrush
 } from 'lucide-react';
 
 export const Icons = {
@@ -24,5 +24,5 @@ export const Icons = {
   Frame, Images, Blend, Edit3, RefreshCw, Eye, EyeOff, RotateCcw, Info, Mic, ArrowUp, Minus, Map, Coins, Star,
   Music, Volume2, Languages,
   GalleryVerticalEnd, Eraser, Move3d, Subtitles, TrendingUp, Library, ChevronDown,
-  Box, VolumeX, Lightbulb, SkipBack, SkipForward, Palette, ShieldCheck
+  Box, VolumeX, Lightbulb, SkipBack, SkipForward, Palette, ShieldCheck, Paintbrush
 };
