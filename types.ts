@@ -13,6 +13,53 @@ export enum NodeType {
 
 export type VideoGenerationMode = 'text' | 'image' | 'start_end' | 'omni';
 
+export type GenerationKind = 'image' | 'video' | 'audio' | 'text';
+
+export type GenerationTaskStatus =
+  | 'submitting'
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'timed_out'
+  | 'needs_check';
+
+export interface GenerationInputSnapshot {
+  nodeType: NodeType;
+  prompt?: string;
+  model?: string;
+  aspectRatio?: string;
+  resolution?: string;
+  duration?: string;
+  count?: number;
+  videoMode?: VideoGenerationMode;
+  inputImageCount?: number;
+  inputMedia?: Array<Pick<InputMedia, 'id' | 'sourceNodeId' | 'type' | 'title'>>;
+  voiceId?: string;
+  voiceSpeed?: number;
+  voicePitch?: number;
+  voiceVolume?: number;
+}
+
+export interface GenerationTaskState {
+  operationId: string;
+  kind: GenerationKind;
+  status: GenerationTaskStatus;
+  provider?: string;
+  providerTaskIds?: string[];
+  providerStatus?: string;
+  progress?: number;
+  providerTaskStatuses?: Record<string, string>;
+  providerTaskProgress?: Record<string, number>;
+  inputSnapshot: GenerationInputSnapshot;
+  startedAt: number;
+  updatedAt: number;
+  errorMessage?: string;
+  errorDetail?: string;
+}
+
+export type ArtifactSource = 'provider' | 'mock' | 'local' | 'unknown';
+
 export type InputMediaType = 'image' | 'video' | 'audio' | 'text';
 
 export interface VideoPromptReference {
@@ -81,9 +128,13 @@ export interface NodeData {
   audioSrc?: string; // Result (Active Selection)
   directorDeskInstanceId?: string; // Scoped 3D director desk scene id
   directorDeskLastCaptureUrl?: string; // Latest capture returned from the embedded director desk
+  directorDeskCaptureMetadata?: DirectorDeskCaptureMetadata; // Camera snapshot recorded with a director desk capture
   outputArtifacts?: string[]; // History/Batch results
   imageVersions?: ImageVersionSnapshot[]; // Image history with generation parameters
   textVersions?: TextVersionSnapshot[]; // Text history with generation/upload metadata
+  artifactSources?: Record<string, ArtifactSource>; // Source marker for generated/uploaded outputs
+  resultSource?: ArtifactSource; // Source marker for the currently selected output
+  generationTask?: GenerationTaskState; // Local task state for refresh/recovery of async generation
   favoriteArtifacts?: string[]; // User-favorited node materials
   isLoading?: boolean;
   errorMessage?: string;
@@ -138,6 +189,32 @@ export interface NodeData {
 
   // UI State
   activeToolbarItem?: string;
+}
+
+/**
+ * A semantic canvas group. Member nodes deliberately keep their world
+ * coordinates so existing links, minimap, and node tools need no translation.
+ */
+export interface NodeGroup {
+  id: string;
+  title: string;
+  memberIds: string[];
+  layout: 'manual' | 'grid';
+  createdAt: number;
+}
+
+export interface DirectorDeskCaptureMetadata {
+  metadataVersion: 1;
+  mode: 'director' | 'camera';
+  cameraId: string | null;
+  cameraName?: string;
+  fov: number;
+  position: [number, number, number];
+  target: [number, number, number];
+  aspectRatio?: string;
+  viewDirection?: [number, number, number];
+  targetMode?: 'manual' | 'object';
+  targetObjectId?: string | null;
 }
 
 export interface PromptTemplate {
@@ -250,7 +327,7 @@ export interface CanvasTransform {
   k: number; // Scale
 }
 
-export type DragMode = 'NONE' | 'PAN' | 'DRAG_NODE' | 'SELECT' | 'CONNECT' | 'RESIZE_NODE';
+export type DragMode = 'NONE' | 'PAN' | 'DRAG_NODE' | 'DRAG_GROUP' | 'SELECT' | 'CONNECT' | 'RESIZE_NODE';
 
 export interface Point {
   x: number;

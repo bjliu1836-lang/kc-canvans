@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Icons } from '../Icons';
-import { NodeData, Connection, CanvasTransform } from '../../types';
+import { NodeData, NodeGroup, Connection, CanvasTransform } from '../../types';
 
 interface ExportImportModalProps {
     isOpen: boolean;
@@ -10,8 +10,9 @@ interface ExportImportModalProps {
     onProjectNameChange: (name: string) => void;
     nodes: NodeData[];
     connections: Connection[];
+    groups: NodeGroup[];
     transform: CanvasTransform;
-    onImport: (data: { nodes: NodeData[], connections: Connection[], transform?: CanvasTransform, projectName?: string }) => void;
+    onImport: (data: { nodes: NodeData[], connections: Connection[], groups?: NodeGroup[], transform?: CanvasTransform, projectName?: string }) => void;
 }
 
 type TabType = 'export' | 'import';
@@ -25,6 +26,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
     onProjectNameChange,
     nodes,
     connections,
+    groups,
     transform,
     onImport
 }) => {
@@ -62,6 +64,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
                 exportedAt: new Date().toISOString(),
                 nodes,
                 connections,
+                groups,
                 transform
             };
             
@@ -198,6 +201,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
                     onImport({
                         nodes: data.nodes,
                         connections: data.connections,
+                        groups: data.groups,
                         transform: data.transform,
                         projectName: data.projectName
                     });

@@ -2,11 +2,11 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import Sidebar from './components/Sidebar';
 import { AssetSelectionModal } from './components/AssetSelectionModal';
-import { AssetLibraryItem, AssetLibraryType, AddToAssetPanelState, ImageVersionSnapshot, InputMedia, MultiAngleOptions, NodeData, Connection, CanvasTransform, Point, DragMode, NodeType, ProjectCanvasItem, ShotClip, TextVersionSnapshot, VideoEditRequest } from './types';
+import { AssetLibraryItem, AssetLibraryType, AddToAssetPanelState, ArtifactSource, DirectorDeskCaptureMetadata, GenerationInputSnapshot, GenerationKind, GenerationTaskState, GenerationTaskStatus, ImageVersionSnapshot, InputMedia, MultiAngleOptions, NodeData, NodeGroup, Connection, CanvasTransform, Point, DragMode, NodeType, ProjectCanvasItem, ShotClip, TextVersionSnapshot, VideoEditRequest } from './types';
 import BaseNode from './components/Nodes/BaseNode';
 import { NodeContent } from './components/Nodes/NodeContent';
 import { Icons } from './components/Icons';
-import { analyzeConnectedMedia, analyzeScriptAssets, generateCreativeDescription, generateImage, generateVideo, generateMultiAngleImages } from './services/geminiService';
+import { analyzeConnectedMedia, analyzeScriptAssets, generateAudioWithMetadata, generateCreativeDescription, generateImageWithMetadata, generateVideo, generateMultiAngleImages, resumeVideoTask, type VideoTaskStatusUpdate } from './services/geminiService';
 import { storageService } from './services/storageService';
 import { ThemeSwitcher } from './components/ThemeSwitcher';
 import { StorageModal } from './components/Settings/StorageModal';
@@ -18,6 +18,7 @@ import { VideoEditPanel } from './components/VideoEditPanel';
 import { LoginScreen } from './components/LoginScreen';
 import { authService } from './services/authService';
 import { getVideoModelCapability, inferVideoMode, resolveVideoMode } from './services/mode/video/capabilities';
+import { getErrorDetail } from './services/errorUtils';
 
 const DEFAULT_NODE_WIDTH = 320;
 const DEFAULT_NODE_HEIGHT = 240; 
@@ -38,11 +39,131 @@ type DirectorDeskSession = {
 type DirectorDeskCapture = {
     dataUrl?: unknown;
     fileName?: unknown;
+    metadata?: unknown;
+    meta?: unknown;
+    prompt?: unknown;
+};
+
+const DIRECTOR_DESK_CAPTURE_METADATA_VERSION = 1 as const;
+const DIRECTOR_DESK_CAPTURE_ASPECT_PATTERN = /^(?:auto|\d+(?:\.\d+)?:\d+(?:\.\d+)?)$/;
+
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+    Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+);
+
+const normalizeFiniteTuple = (value: unknown): [number, number, number] | null => {
+    if (!Array.isArray(value) || value.length !== 3 || !value.every(item => typeof item === 'number' && Number.isFinite(item))) {
+        return null;
+    }
+    return value as [number, number, number];
+};
+
+const normalizeDirectorDeskCaptureMetadata = (value: unknown): DirectorDeskCaptureMetadata | undefined => {
+    if (!isRecord(value)) return undefined;
+    const metadataVersion = value.metadataVersion ?? value.version;
+    if (metadataVersion !== DIRECTOR_DESK_CAPTURE_METADATA_VERSION) return undefined;
+
+    const mode = value.mode === 'director' || value.mode === 'camera' ? value.mode : null;
+    const cameraId = value.cameraId === null || typeof value.cameraId === 'string' ? value.cameraId : null;
+    const fov = typeof value.fov === 'number' && Number.isFinite(value.fov) && value.fov >= 10 && value.fov <= 120
+        ? value.fov
+        : null;
+    const position = normalizeFiniteTuple(value.position);
+    const target = normalizeFiniteTuple(value.target);
+    if (!mode || fov === null || !position || !target) return undefined;
+
+    const metadata: DirectorDeskCaptureMetadata = {
+        metadataVersion: DIRECTOR_DESK_CAPTURE_METADATA_VERSION,
+        mode,
+        cameraId,
+        fov,
+        position: [...position],
+        target: [...target],
+    };
+    if (typeof value.cameraName === 'string' && value.cameraName.trim()) {
+        metadata.cameraName = value.cameraName.trim().slice(0, 120);
+    }
+    if (typeof value.aspectRatio === 'string' && DIRECTOR_DESK_CAPTURE_ASPECT_PATTERN.test(value.aspectRatio.trim())) {
+        metadata.aspectRatio = value.aspectRatio.trim();
+    }
+    const viewDirection = normalizeFiniteTuple(value.viewDirection);
+    if (viewDirection) metadata.viewDirection = [...viewDirection];
+    if (value.targetMode === 'manual' || value.targetMode === 'object') {
+        metadata.targetMode = value.targetMode;
+    }
+    if (value.targetObjectId === null || typeof value.targetObjectId === 'string') {
+        metadata.targetObjectId = value.targetObjectId;
+    }
+    return metadata;
+};
+
+const formatDirectorDeskPromptNumber = (value: number) => Number(value.toFixed(1)).toString();
+
+const buildDirectorDeskCapturePrompt = (metadata: DirectorDeskCaptureMetadata) => {
+    const direction = metadata.viewDirection || [
+        metadata.target[0] - metadata.position[0],
+        metadata.target[1] - metadata.position[1],
+        metadata.target[2] - metadata.position[2],
+    ];
+    const directionLength = Math.hypot(...direction);
+    const orientation = directionLength > 0.000001
+        ? {
+            yaw: Math.atan2(direction[0], direction[2]) * 180 / Math.PI,
+            pitch: Math.atan2(direction[1], Math.hypot(direction[0], direction[2])) * 180 / Math.PI,
+        }
+        : null;
+    const parts = [
+        '3D导演台镜头参考',
+        metadata.aspectRatio && metadata.aspectRatio !== 'auto' ? `画幅 ${metadata.aspectRatio}` : null,
+        `视野角 FOV ${formatDirectorDeskPromptNumber(metadata.fov)}°`,
+        orientation
+            ? `相机朝向：水平 ${formatDirectorDeskPromptNumber(orientation.yaw)}°，俯仰 ${formatDirectorDeskPromptNumber(orientation.pitch)}°`
+            : null,
+        '保持当前构图与主体关系',
+    ].filter((part): part is string => Boolean(part));
+    return `${parts.join('，')}。`;
 };
 type CanvasHistoryEntry =
-    | { type: 'delete'; label: string; nodes: NodeData[]; connections: Connection[] }
-    | { type: 'create'; label: string; nodes: NodeData[]; connections: Connection[] }
-    | { type: 'upload-update'; label: string; beforeNodes: NodeData[] };
+    | { type: 'delete'; label: string; nodes: NodeData[]; connections: Connection[]; groups?: NodeGroup[] }
+    | { type: 'create'; label: string; nodes: NodeData[]; connections: Connection[]; groups?: NodeGroup[] }
+    | { type: 'upload-update'; label: string; beforeNodes: NodeData[] }
+    | { type: 'group-update'; label: string; beforeNodes: NodeData[]; beforeGroups: NodeGroup[] };
+
+type CanvasBounds = { x: number; y: number; width: number; height: number };
+
+const GROUP_PADDING = { top: 56, right: 32, bottom: 32, left: 32 };
+
+const getNodesBounds = (items: NodeData[]): CanvasBounds | null => {
+    if (!items.length) return null;
+    const minX = Math.min(...items.map(node => node.x));
+    const minY = Math.min(...items.map(node => node.y));
+    const maxX = Math.max(...items.map(node => node.x + node.width));
+    const maxY = Math.max(...items.map(node => node.y + node.height));
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+};
+
+const getGroupBounds = (group: NodeGroup, allNodes: NodeData[]): CanvasBounds | null => {
+    const contentBounds = getNodesBounds(allNodes.filter(node => group.memberIds.includes(node.id)));
+    if (!contentBounds) return null;
+    return {
+        x: contentBounds.x - GROUP_PADDING.left,
+        y: contentBounds.y - GROUP_PADDING.top,
+        width: contentBounds.width + GROUP_PADDING.left + GROUP_PADDING.right,
+        height: contentBounds.height + GROUP_PADDING.top + GROUP_PADDING.bottom,
+    };
+};
+
+const normalizeNodeGroups = (candidateGroups: NodeGroup[], allNodes: NodeData[]) => {
+    const existingIds = new Set(allNodes.map(node => node.id));
+    const assigned = new Set<string>();
+    return candidateGroups.reduce<NodeGroup[]>((result, group) => {
+        const memberIds = Array.from(new Set(group.memberIds)).filter(id => existingIds.has(id) && !assigned.has(id));
+        if (memberIds.length < 2) return result;
+        memberIds.forEach(id => assigned.add(id));
+        result.push({ ...group, title: group.title || '未命名分组', memberIds, layout: group.layout === 'grid' ? 'grid' : 'manual' });
+        return result;
+    }, []);
+};
 
 const createDemoAssetPreview = (label: string, accent: string, background: string) => {
     const svg = `
@@ -261,6 +382,7 @@ type SubCanvasState = {
     nodes: NodeData[];
     connections: Connection[];
     transform: CanvasTransform;
+    groups: NodeGroup[];
 };
 
 const normalizeProjectSummary = (project: ProjectDashboardItem): ProjectDashboardItem => ({
@@ -491,6 +613,72 @@ const getTextNodeOutput = (node: NodeData): string => {
     return node.optimizedPrompt || node.prompt || '';
 };
 
+type GenerationScope = {
+    projectId: string;
+    canvasId: string;
+    nodeId: string;
+    operationId: string;
+};
+
+const RECOVERABLE_GENERATION_STATUSES: GenerationTaskStatus[] = ['submitting', 'queued', 'running', 'timed_out'];
+
+const generationScopeKey = (scope: Pick<GenerationScope, 'projectId' | 'canvasId' | 'nodeId' | 'operationId'>) =>
+    `${scope.projectId}:${scope.canvasId}:${scope.nodeId}:${scope.operationId}`;
+
+const generationTargetKey = (scope: Pick<GenerationScope, 'projectId' | 'canvasId' | 'nodeId'>) =>
+    `${scope.projectId}:${scope.canvasId}:${scope.nodeId}`;
+
+const getGenerationKind = (node: NodeData): GenerationKind => {
+    if (node.type === NodeType.TEXT_TO_IMAGE) return 'image';
+    if (node.type === NodeType.TEXT_TO_AUDIO) return 'audio';
+    if (node.type === NodeType.CREATIVE_DESC) return 'text';
+    return 'video';
+};
+
+const createGenerationOperationId = () => `op_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
+const getChineseGenerationError = (error: unknown, hasProviderTaskId = false): string => {
+    const detail = getErrorDetail(error).toLowerCase();
+    if (detail.includes('mimo_api_key') || detail.includes('api key') || detail.includes('api_key')) return '未配置模型服务，暂时无法生成';
+    if (detail.includes('video_api_not_configured')) return '未配置视频模型服务，暂时无法生成';
+    if (detail.includes('media_upload') || detail.includes('not public url') || detail.includes('公网图片')) return '输入素材暂不可访问，请检查素材链接';
+    if (detail.includes('timeout') || detail.includes('timed out')) {
+        return hasProviderTaskId ? '生成查询超时，刷新后可继续查询' : '提交超时，未拿到任务编号，请核对后再生成';
+    }
+    if (detail.includes('task_failed') || detail.includes('generation failed')) return '供应商生成失败，请查看原始报错';
+    if (detail.includes('no_') || detail.includes('empty_response') || detail.includes('未返回结果')) return '模型未返回结果，请查看原始报错';
+    return '生成失败，请查看原始报错';
+};
+
+const toGenerationInputSnapshot = (
+    node: NodeData,
+    inputImages: string[],
+    inputMedia: InputMedia[],
+    videoMode?: NodeData['videoMode'],
+): GenerationInputSnapshot => ({
+    nodeType: node.type,
+    prompt: node.prompt || '',
+    model: node.model,
+    aspectRatio: node.aspectRatio,
+    resolution: node.resolution,
+    duration: node.duration,
+    count: node.count || 1,
+    videoMode,
+    inputImageCount: inputImages.filter(Boolean).length,
+    // Keep only references and labels. Local/blob/base64 media stay in the canvas snapshot,
+    // while the recovery record remains small enough for localStorage.
+    inputMedia: inputMedia.map(item => ({
+        id: item.id,
+        sourceNodeId: item.sourceNodeId,
+        type: item.type,
+        title: item.title,
+    })),
+    voiceId: node.voiceId,
+    voiceSpeed: node.voiceSpeed,
+    voicePitch: node.voicePitch,
+    voiceVolume: node.voiceVolume,
+});
+
 // Helper for resizing imported media constraints
 const calculateImportDimensions = (naturalWidth: number, naturalHeight: number) => {
     const ratio = naturalWidth / naturalHeight;
@@ -544,8 +732,29 @@ const CanvasWithSidebar: React.FC = () => {
   const [pendingSubCanvasName, setPendingSubCanvasName] = useState('');
   const [nodes, setNodes] = useState<NodeData[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
+  const [groups, setGroups] = useState<NodeGroup[]>([]);
   const [transform, setTransform] = useState<CanvasTransform>({ x: 0, y: 0, k: 1 });
+  const nodesRef = useRef<NodeData[]>(nodes);
+  const workspaceRef = useRef<{ projectId: string | null; canvasId: string }>({ projectId: currentProject?.id || null, canvasId: activeSubCanvasId });
+  const generationBindingByNodeRef = useRef<Map<string, GenerationScope>>(new Map());
+  const generationNodeLocksRef = useRef<Set<string>>(new Set());
+  const activeGenerationKeysRef = useRef<Set<string>>(new Set());
+  const recoveryStartedKeysRef = useRef<Set<string>>(new Set());
+  const invalidatedGenerationKeysRef = useRef<Set<string>>(new Set());
+  const sessionStartedAtRef = useRef(Date.now());
+  nodesRef.current = nodes;
+  workspaceRef.current = { projectId: currentProject?.id || null, canvasId: activeSubCanvasId };
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const selectedNodeBounds = useMemo(
+      () => getNodesBounds(nodes.filter(node => selectedNodeIds.has(node.id))),
+      [nodes, selectedNodeIds],
+  );
+  const groupBoundsById = useMemo(() => new Map(
+      groups.map(group => [group.id, getGroupBounds(group, nodes)] as const).filter((entry): entry is readonly [string, CanvasBounds] => Boolean(entry[1])),
+  ), [groups, nodes]);
+  const selectedGroup = groups.find(group => group.id === selectedGroupId) || null;
   const [dragMode, setDragMode] = useState<DragMode | 'RESIZE_NODE' | 'SELECT'>('NONE');
   const dragModeRef = useRef(dragMode);
   const blockedSubCanvasStorageKeysRef = useRef<Set<string>>(new Set());
@@ -561,15 +770,20 @@ const CanvasWithSidebar: React.FC = () => {
       nodes: [],
       connections: [],
       transform: { x: 0, y: 0, k: 1 },
+      groups: [],
   });
 
   const loadSubCanvasState = (state?: Partial<SubCanvasState>) => {
       const fallback = getEmptySubCanvasState();
       clearCanvasHistory();
-      setNodes(Array.isArray(state?.nodes) ? state.nodes.map(normalizeTextNodeContent) : fallback.nodes);
+      const nextNodes = Array.isArray(state?.nodes) ? state.nodes.map(normalizeTextNodeContent) : fallback.nodes;
+      setNodes(nextNodes);
       setConnections(Array.isArray(state?.connections) ? state.connections : fallback.connections);
       setTransform(state?.transform || fallback.transform);
+      setGroups(normalizeNodeGroups(Array.isArray(state?.groups) ? state.groups : [], nextNodes));
       setSelectedNodeIds(new Set());
+      setSelectedGroupId(null);
+      setEditingGroupId(null);
       setSelectedConnectionId(null);
       setSelectionBox(null);
       setContextMenu(null);
@@ -631,11 +845,12 @@ const CanvasWithSidebar: React.FC = () => {
       const activeId = nextOverrides.activeId || activeSubCanvasId;
       const states = {
           ...currentStates,
-          [activeSubCanvasId]: {
-              nodes,
-              connections,
-              transform,
-          },
+           [activeSubCanvasId]: {
+               nodes,
+               connections,
+               transform,
+               groups,
+           },
           ...(nextOverrides.states || {}),
       };
       return { canvases, activeId, states };
@@ -645,6 +860,85 @@ const CanvasWithSidebar: React.FC = () => {
       if (!currentProject) return;
       const snapshot = getCurrentSubCanvasWorkspace(overrides);
       if (snapshot) writeSubCanvasWorkspace(currentProject.id, snapshot);
+  };
+
+  const persistScopedGenerationNodes = (scope: GenerationScope, nextNodes: NodeData[]) => {
+      if (workspaceRef.current.projectId !== scope.projectId || workspaceRef.current.canvasId !== scope.canvasId) return;
+      const previous = readSubCanvasWorkspace(scope.projectId);
+      const baseCanvases = previous?.canvases || subCanvases;
+      const nextCanvases = baseCanvases.map(canvas => canvas.id === scope.canvasId
+          ? { ...canvas, nodeCount: nextNodes.length, lastSavedAt: '刚刚' }
+          : canvas
+      );
+      writeSubCanvasWorkspace(scope.projectId, {
+          canvases: nextCanvases,
+          activeId: previous?.activeId || scope.canvasId,
+          states: {
+              ...(previous?.states || {}),
+              [scope.canvasId]: { nodes: nextNodes, connections, transform, groups },
+          },
+      });
+  };
+
+  // A callback may arrive after the user switched canvases. Keep task state in
+  // the original canvas snapshot without writing into the newly visible canvas.
+  // The operation id check also prevents an old callback from reviving a node
+  // after the user deleted it or started a newer operation for that node.
+  const persistGenerationTaskToSnapshot = (scope: GenerationScope, updates: Partial<GenerationTaskState>) => {
+      const key = generationScopeKey(scope);
+      if (invalidatedGenerationKeysRef.current.has(key)) return false;
+      const previous = readSubCanvasWorkspace(scope.projectId);
+      const scopedState = previous?.states?.[scope.canvasId];
+      const target = scopedState?.nodes.find(node => node.id === scope.nodeId);
+      if (!previous || !scopedState || !target?.generationTask || target.generationTask.operationId !== scope.operationId) return false;
+
+      const nextTask: GenerationTaskState = {
+          ...target.generationTask,
+          ...updates,
+          updatedAt: Date.now(),
+      };
+      const nextNodes = scopedState.nodes.map(node => node.id === scope.nodeId
+          ? { ...node, generationTask: nextTask }
+          : node
+      );
+      return writeSubCanvasWorkspace(scope.projectId, {
+          ...previous,
+          states: {
+              ...previous.states,
+              [scope.canvasId]: { ...scopedState, nodes: nextNodes },
+          },
+      });
+  };
+
+  const isGenerationScopeCurrent = (scope: GenerationScope) => {
+      const key = generationScopeKey(scope);
+      if (invalidatedGenerationKeysRef.current.has(key)) return false;
+      if (workspaceRef.current.projectId !== scope.projectId || workspaceRef.current.canvasId !== scope.canvasId) return false;
+      const target = nodesRef.current.find(node => node.id === scope.nodeId);
+      return target?.generationTask?.operationId === scope.operationId;
+  };
+
+  const updateGenerationNode = (scope: GenerationScope, updates: Partial<NodeData>) => {
+      if (!isGenerationScopeCurrent(scope)) return false;
+      const nextNodes = nodesRef.current.map(node => node.id === scope.nodeId ? { ...node, ...updates } : node);
+      nodesRef.current = nextNodes;
+      setNodes(nextNodes);
+      persistScopedGenerationNodes(scope, nextNodes);
+      return true;
+  };
+
+  const invalidateGenerationForNode = (nodeId: string) => {
+      const bindingKey = generationTargetKey({
+          projectId: workspaceRef.current.projectId || '',
+          canvasId: workspaceRef.current.canvasId,
+          nodeId,
+      });
+      const binding = generationBindingByNodeRef.current.get(bindingKey);
+      if (!binding) return;
+      invalidatedGenerationKeysRef.current.add(generationScopeKey(binding));
+      activeGenerationKeysRef.current.delete(generationScopeKey(binding));
+      generationNodeLocksRef.current.delete(bindingKey);
+      generationBindingByNodeRef.current.delete(bindingKey);
   };
 
   useEffect(() => {
@@ -671,7 +965,7 @@ const CanvasWithSidebar: React.FC = () => {
       canvases: [defaultCanvas],
       activeId: defaultCanvas.id,
       states: {
-        [defaultCanvas.id]: { nodes, connections, transform },
+          [defaultCanvas.id]: { nodes, connections, transform, groups: [] },
       },
     });
   }, [currentProject?.id]);
@@ -686,11 +980,11 @@ const CanvasWithSidebar: React.FC = () => {
       persistCurrentSubCanvasWorkspace({ canvases: nextCanvases });
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [currentProject?.id, activeSubCanvasId, subCanvases, nodes, connections, transform]);
+  }, [currentProject?.id, activeSubCanvasId, subCanvases, nodes, connections, transform, groups]);
 
   const handleSwitchSubCanvas = (canvasId: string) => {
-    if (canvasId === activeSubCanvasId || !currentProject) return;
-    const nextCanvases = subCanvases.map(canvas => canvas.id === activeSubCanvasId
+      if (canvasId === activeSubCanvasId || !currentProject) return;
+      const nextCanvases = subCanvases.map(canvas => canvas.id === activeSubCanvasId
       ? { ...canvas, nodeCount: nodes.length, lastSavedAt: '刚刚' }
       : canvas
     );
@@ -750,8 +1044,8 @@ const CanvasWithSidebar: React.FC = () => {
       activeId: newCanvas.id,
       states: {
         ...(previous?.states || {}),
-        [activeSubCanvasId]: { nodes, connections, transform },
-        [newCanvas.id]: { nodes: [], connections: [], transform: { x: 0, y: 0, k: 1 } },
+        [activeSubCanvasId]: { nodes, connections, transform, groups },
+        [newCanvas.id]: { nodes: [], connections: [], transform: { x: 0, y: 0, k: 1 }, groups: [] },
       },
     });
     setSubCanvases(nextCanvases);
@@ -900,12 +1194,15 @@ const CanvasWithSidebar: React.FC = () => {
       worldY: number 
   } | null>(null);
 
-  const [internalClipboard, setInternalClipboard] = useState<{ nodes: NodeData[], connections: Connection[] } | null>(null);
+  const [internalClipboard, setInternalClipboard] = useState<{ nodes: NodeData[], connections: Connection[], groups: NodeGroup[] } | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const dragStartRef = useRef<{ x: number, y: number, w?: number, h?: number, nodeId?: string }>({ x: 0, y: 0 });
   const initialTransformRef = useRef<CanvasTransform>({ x: 0, y: 0, k: 1 });
   const initialNodePositionsRef = useRef<{id: string, x: number, y: number}[]>([]);
+  const initialGroupNodesRef = useRef<NodeData[]>([]);
+  const initialSelectionRef = useRef<Set<string>>(new Set());
+  const activeDragGroupRef = useRef<string | null>(null);
   const connectionStartRef = useRef<{ nodeId: string, type: 'source' | 'target' } | null>(null);
   const [tempConnection, setTempConnection] = useState<Point | null>(null);
   const lastMousePosRef = useRef<Point>({ x: 0, y: 0 }); 
@@ -928,10 +1225,12 @@ const CanvasWithSidebar: React.FC = () => {
   const spacePressed = useRef(false);
 
   const recordCanvasHistory = useCallback((entry: CanvasHistoryEntry) => {
-      const isEmpty =
-          (entry.type === 'delete' || entry.type === 'create')
-              ? entry.nodes.length === 0 && entry.connections.length === 0
-              : entry.beforeNodes.length === 0;
+       const isEmpty =
+           (entry.type === 'delete' || entry.type === 'create')
+               ? entry.nodes.length === 0 && entry.connections.length === 0
+               : entry.type === 'group-update'
+                   ? entry.beforeNodes.length === 0 && entry.beforeGroups.length === 0
+                   : entry.beforeNodes.length === 0;
       if (isEmpty) return;
       canvasHistoryRef.current = [...canvasHistoryRef.current.slice(-49), entry];
       setCanvasHistoryCount(canvasHistoryRef.current.length);
@@ -951,15 +1250,16 @@ const CanvasWithSidebar: React.FC = () => {
               const existingIds = new Set(prev.map(connection => connection.id));
               return [...prev, ...entry.connections.filter(connection => !existingIds.has(connection.id))];
           });
-          if (restoredNodeIds.size > 0) {
+           if (restoredNodeIds.size > 0) {
               setDeletedNodes(prev => prev.filter(node => !restoredNodeIds.has(node.id)));
               setSelectedNodeIds(restoredNodeIds);
               setSelectedConnectionId(null);
           } else if (entry.connections.length > 0) {
               setSelectedNodeIds(new Set());
               setSelectedConnectionId(entry.connections[0].id);
-          }
-      } else if (entry.type === 'create') {
+           }
+           if (entry.groups) setGroups(entry.groups);
+       } else if (entry.type === 'create') {
           const createdNodeIds = new Set(entry.nodes.map(node => node.id));
           const createdConnectionIds = new Set(entry.connections.map(connection => connection.id));
           setConnections(prev => prev.filter(connection =>
@@ -967,28 +1267,46 @@ const CanvasWithSidebar: React.FC = () => {
               && !createdNodeIds.has(connection.sourceId)
               && !createdNodeIds.has(connection.targetId)
           ));
-          setNodes(prev => prev.filter(node => !createdNodeIds.has(node.id)));
+           setNodes(prev => prev.filter(node => !createdNodeIds.has(node.id)));
+           if (entry.groups?.length) {
+               const createdGroupIds = new Set(entry.groups.map(group => group.id));
+               setGroups(prev => prev.filter(group => !createdGroupIds.has(group.id)));
+           }
           setSelectedNodeIds(new Set());
           setSelectedConnectionId(null);
-      } else if (entry.type === 'upload-update') {
+       } else if (entry.type === 'upload-update') {
           const beforeById = new Map(entry.beforeNodes.map(node => [node.id, node]));
           setNodes(prev => prev.map(node => beforeById.get(node.id) || node));
           setSelectedNodeIds(new Set(entry.beforeNodes.map(node => node.id)));
-          setSelectedConnectionId(null);
+           setSelectedConnectionId(null);
+       } else if (entry.type === 'group-update') {
+           const beforeById = new Map(entry.beforeNodes.map(node => [node.id, node]));
+           setNodes(prev => prev.map(node => beforeById.get(node.id) || node));
+           // `beforeNodes` is intentionally scoped to the changed members. Use
+           // the current complete node set when restoring groups, otherwise an
+           // unrelated group would be filtered out during undo.
+           setGroups(normalizeNodeGroups(entry.beforeGroups, nodesRef.current));
+           setSelectedNodeIds(new Set(entry.beforeNodes.map(node => node.id)));
+           setSelectedGroupId(null);
+           setEditingGroupId(null);
+           setSelectedConnectionId(null);
       }
       setContextMenu(null);
       setCanvasHistoryCount(canvasHistoryRef.current.length);
   }, []);
 
-  const addCreatedCanvasItems = useCallback((createdNodes: NodeData[], createdConnections: Connection[] = [], label = '新建节点') => {
+   const addCreatedCanvasItems = useCallback((createdNodes: NodeData[], createdConnections: Connection[] = [], label = '新建节点', createdGroups: NodeGroup[] = []) => {
       if (createdNodes.length > 0) {
           setNodes(prev => [...prev, ...createdNodes]);
       }
-      if (createdConnections.length > 0) {
-          setConnections(prev => [...prev, ...createdConnections]);
-      }
-      recordCanvasHistory({ type: 'create', label, nodes: createdNodes, connections: createdConnections });
-  }, [recordCanvasHistory]);
+       if (createdConnections.length > 0) {
+           setConnections(prev => [...prev, ...createdConnections]);
+       }
+       if (createdGroups.length > 0) {
+           setGroups(prev => normalizeNodeGroups([...prev, ...createdGroups], [...nodesRef.current, ...createdNodes]));
+       }
+       recordCanvasHistory({ type: 'create', label, nodes: createdNodes, connections: createdConnections, groups: createdGroups });
+   }, [recordCanvasHistory]);
 
   const screenToWorld = (x: number, y: number) => ({
     x: (x - transform.x) / transform.k,
@@ -1053,10 +1371,16 @@ const CanvasWithSidebar: React.FC = () => {
       if (!sourceNode) return;
 
       const validCaptures = captures
-          .map((capture, index) => ({
-              dataUrl: typeof capture.dataUrl === 'string' ? capture.dataUrl : '',
-              fileName: typeof capture.fileName === 'string' ? capture.fileName : `导演台截图_${index + 1}.png`,
-          }))
+          .map((capture, index) => {
+              const metadata = normalizeDirectorDeskCaptureMetadata(capture.metadata ?? capture.meta);
+              const prompt = typeof capture.prompt === 'string' ? capture.prompt.trim().slice(0, 2000) : '';
+              return {
+                  dataUrl: typeof capture.dataUrl === 'string' ? capture.dataUrl : '',
+                  fileName: typeof capture.fileName === 'string' ? capture.fileName : `导演台截图_${index + 1}.png`,
+                  metadata,
+                  prompt: prompt || (metadata ? buildDirectorDeskCapturePrompt(metadata) : ''),
+              };
+          })
           .filter(capture => capture.dataUrl.startsWith('data:image/'));
 
       if (validCaptures.length === 0) return;
@@ -1078,9 +1402,10 @@ const CanvasWithSidebar: React.FC = () => {
               model: 'Seedream 5.0',
               resolution: '1k',
               count: 1,
-              prompt: '',
+              prompt: capture.prompt,
               outputArtifacts: [capture.dataUrl],
               source: 'canvas',
+              ...(capture.metadata ? { directorDeskCaptureMetadata: capture.metadata } : {}),
           };
       }));
 
@@ -1110,6 +1435,10 @@ const CanvasWithSidebar: React.FC = () => {
           }
 
           if (event.data?.type === 'storyai:director-desk-captures-sent') {
+              const payloadInstanceId = typeof event.data?.payload?.instanceId === 'string'
+                  ? event.data.payload.instanceId.trim()
+                  : '';
+              if (payloadInstanceId && payloadInstanceId !== directorDeskSession.instanceId) return;
               const captures = Array.isArray(event.data?.payload?.captures) ? event.data.payload.captures : [];
               void createDirectorDeskCaptureNodes(captures);
           }
@@ -1163,17 +1492,20 @@ const CanvasWithSidebar: React.FC = () => {
       if (selectedNodeIds.size === 0) return;
       
       const selectedNodes = nodes.filter(n => selectedNodeIds.has(n.id));
-      const selectedConnections = connections.filter(c => 
-          selectedNodeIds.has(c.sourceId) && selectedNodeIds.has(c.targetId)
-      );
-      
-      setInternalClipboard({ nodes: selectedNodes, connections: selectedConnections });
+       const selectedConnections = connections.filter(c =>
+           selectedNodeIds.has(c.sourceId) && selectedNodeIds.has(c.targetId)
+       );
+
+       const copiedGroups = groups
+           .filter(group => group.memberIds.every(memberId => selectedNodeIds.has(memberId)))
+           .map(group => ({ ...group, memberIds: [...group.memberIds] }));
+       setInternalClipboard({ nodes: selectedNodes, connections: selectedConnections, groups: copiedGroups });
   };
 
   const performPaste = (targetPos: Point) => {
       if (!internalClipboard || internalClipboard.nodes.length === 0) return;
 
-      const { nodes: clipboardNodes, connections: clipboardConnections } = internalClipboard;
+       const { nodes: clipboardNodes, connections: clipboardConnections, groups: clipboardGroups } = internalClipboard;
       
       let minX = Infinity, minY = Infinity;
       clipboardNodes.forEach(n => {
@@ -1199,13 +1531,23 @@ const CanvasWithSidebar: React.FC = () => {
           });
       });
 
-      const newConnections: Connection[] = clipboardConnections.map(c => ({
+       const newConnections: Connection[] = clipboardConnections.map(c => ({
           id: generateId(),
           sourceId: idMap.get(c.sourceId)!,
           targetId: idMap.get(c.targetId)!
-      }));
+       }));
 
-      addCreatedCanvasItems(newNodes, newConnections, '新建节点');
+       const newGroups = clipboardGroups
+           .map(group => ({
+               ...group,
+               id: `group_${Date.now()}_${generateId()}`,
+               title: group.title.endsWith('(副本)') ? group.title : `${group.title} (副本)`,
+               memberIds: group.memberIds.map(memberId => idMap.get(memberId)).filter((memberId): memberId is string => Boolean(memberId)),
+               createdAt: Date.now(),
+           }))
+           .filter(group => group.memberIds.length >= 2);
+
+       addCreatedCanvasItems(newNodes, newConnections, '复制节点', newGroups);
       setSelectedNodeIds(new Set(newNodes.map(n => n.id)));
   };
 
@@ -1712,6 +2054,129 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
     return () => document.removeEventListener('paste', handlePaste);
   }, [handlePaste]);
 
+  const createNodeGroup = useCallback(() => {
+      const memberIds = Array.from(selectedNodeIds);
+      if (memberIds.length < 2) {
+          window.alert('请先选择至少两个节点再打组。');
+          return;
+      }
+      const beforeGroups = groups;
+      const beforeNodes = nodes.filter(node => selectedNodeIds.has(node.id));
+      const id = `group_${Date.now()}_${generateId()}`;
+      const nextGroup: NodeGroup = {
+          id,
+          title: `分组 ${groups.length + 1}`,
+          memberIds,
+          layout: 'manual',
+          createdAt: Date.now(),
+      };
+      recordCanvasHistory({ type: 'group-update', label: '打组', beforeNodes, beforeGroups });
+      // A node has at most one semantic group. Re-grouping selected nodes removes
+      // them from their prior group and automatically drops undersized groups.
+      setGroups(normalizeNodeGroups([...groups.map(group => ({
+          ...group,
+          memberIds: group.memberIds.filter(memberId => !selectedNodeIds.has(memberId)),
+      })), nextGroup], nodes));
+      setSelectedGroupId(id);
+      setEditingGroupId(null);
+  }, [groups, nodes, recordCanvasHistory, selectedNodeIds]);
+
+  const ungroupNodeGroup = useCallback((groupId = selectedGroupId) => {
+      if (!groupId) return;
+      const group = groups.find(item => item.id === groupId);
+      if (!group) return;
+      recordCanvasHistory({
+          type: 'group-update',
+          label: '解组',
+          beforeNodes: nodes.filter(node => group.memberIds.includes(node.id)),
+          beforeGroups: groups,
+      });
+      setGroups(groups.filter(item => item.id !== groupId));
+      setSelectedNodeIds(new Set(group.memberIds));
+      setSelectedGroupId(null);
+      setEditingGroupId(null);
+  }, [groups, nodes, recordCanvasHistory, selectedGroupId]);
+
+  const arrangeNodeGroup = useCallback((groupId = selectedGroupId) => {
+      if (!groupId) return;
+      const group = groups.find(item => item.id === groupId);
+      if (!group) return;
+      const groupNodes = nodes.filter(node => group.memberIds.includes(node.id));
+      const bounds = getNodesBounds(groupNodes);
+      if (!bounds || groupNodes.length < 2) return;
+
+      const originalIndex = new Map(nodes.map((node, index) => [node.id, index]));
+      const sorted = [...groupNodes].sort((a, b) => (a.y - b.y) || (a.x - b.x) || ((originalIndex.get(a.id) || 0) - (originalIndex.get(b.id) || 0)));
+      const aspect = bounds.width / Math.max(bounds.height, 1);
+      const columns = Math.max(1, Math.min(4, Math.round(Math.sqrt(sorted.length * Math.max(0.65, Math.min(aspect, 1.8))))));
+      const rows = Math.ceil(sorted.length / columns);
+      const columnWidths = Array.from({ length: columns }, () => 0);
+      const rowHeights = Array.from({ length: rows }, () => 0);
+      sorted.forEach((node, index) => {
+          columnWidths[index % columns] = Math.max(columnWidths[index % columns], node.width);
+          rowHeights[Math.floor(index / columns)] = Math.max(rowHeights[Math.floor(index / columns)], node.height);
+      });
+      const gapX = 48;
+      const gapY = 48;
+      const columnX = columnWidths.reduce<number[]>((positions, width, index) => {
+          positions.push(index === 0 ? bounds.x : positions[index - 1] + columnWidths[index - 1] + gapX);
+          return positions;
+      }, []);
+      const rowY = rowHeights.reduce<number[]>((positions, height, index) => {
+          positions.push(index === 0 ? bounds.y : positions[index - 1] + rowHeights[index - 1] + gapY);
+          return positions;
+      }, []);
+      const positionById = new Map(sorted.map((node, index) => {
+          const col = index % columns;
+          const row = Math.floor(index / columns);
+          return [node.id, {
+              x: columnX[col] + (columnWidths[col] - node.width) / 2,
+              y: rowY[row] + (rowHeights[row] - node.height) / 2,
+          }] as const;
+      }));
+      recordCanvasHistory({ type: 'group-update', label: '整理分组', beforeNodes: groupNodes, beforeGroups: groups });
+      setNodes(previous => previous.map(node => {
+          const position = positionById.get(node.id);
+          return position ? { ...node, ...position } : node;
+      }));
+      setGroups(previous => previous.map(item => item.id === groupId ? { ...item, layout: 'grid' } : item));
+  }, [groups, nodes, recordCanvasHistory, selectedGroupId]);
+
+  const downloadNodeCollection = useCallback(async (nodeIds: Iterable<string>, label: string) => {
+      const ids = new Set(nodeIds);
+      const entries = nodes
+          .filter(node => ids.has(node.id))
+          .map(node => {
+              const url = node.videoSrc || node.audioSrc || node.imageSrc;
+              const type = node.videoSrc ? 'video' : node.audioSrc ? 'audio' : 'image';
+              const extension = node.videoSrc ? 'mp4' : node.audioSrc ? 'mp3' : 'png';
+              return url ? { url, type, extension, title: node.title } : null;
+          })
+          .filter((entry): entry is { url: string; type: string; extension: string; title: string } => Boolean(entry));
+      const seenUrls = new Set<string>();
+      const uniqueEntries = entries.filter(entry => !seenUrls.has(entry.url) && (seenUrls.add(entry.url), true));
+      if (!uniqueEntries.length) {
+          window.alert(`「${label}」内没有可下载的当前内容。`);
+          return;
+      }
+      let succeeded = 0;
+      let failed = 0;
+      for (let index = 0; index < uniqueEntries.length; index += 1) {
+          const entry = uniqueEntries[index];
+          const filename = `${String(index + 1).padStart(2, '0')}_${sanitizeExportName(entry.title)}_${entry.type}.${entry.extension}`;
+          try {
+              const response = await fetch(entry.url);
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              await saveLocalExportBlob(await response.blob(), filename);
+              succeeded += 1;
+          } catch (error) {
+              console.error('Batch download failed:', entry.url, error);
+              failed += 1;
+          }
+      }
+      window.alert(failed ? `「${label}」已下载 ${succeeded} 项，${failed} 项下载失败。` : `「${label}」已下载 ${succeeded} 项。`);
+  }, [nodes]);
+
   const executeDeleteCanvasItems = useCallback((nodeIds: Set<string>, connectionIds: Set<string>) => {
       const nodesToDelete = nodes.filter(node => nodeIds.has(node.id));
       const connectionsToDelete = connections.filter(connection =>
@@ -1721,21 +2186,33 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       );
       if (nodesToDelete.length === 0 && connectionsToDelete.length === 0) return;
 
-      recordCanvasHistory({ type: 'delete', label: '删除', nodes: nodesToDelete, connections: connectionsToDelete });
+      nodesToDelete.forEach(node => invalidateGenerationForNode(node.id));
+
+       recordCanvasHistory({ type: 'delete', label: '删除', nodes: nodesToDelete, connections: connectionsToDelete, groups });
       const withContent = nodesToDelete.filter(node => node.imageSrc || node.videoSrc || node.audioSrc);
       if (withContent.length > 0) {
           setDeletedNodes(prev => [...prev, ...withContent]);
       }
-      if (nodeIds.size > 0) {
-          setNodes(prev => prev.filter(node => !nodeIds.has(node.id)));
-      }
+       if (nodeIds.size > 0) {
+          const nextNodes = nodes.filter(node => !nodeIds.has(node.id));
+          nodesRef.current = nextNodes;
+           setNodes(nextNodes);
+           setGroups(previous => normalizeNodeGroups(previous.map(group => ({
+               ...group,
+               memberIds: group.memberIds.filter(memberId => !nodeIds.has(memberId)),
+           })), nextNodes));
+           if (selectedGroupId && groups.some(group => group.id === selectedGroupId && group.memberIds.some(memberId => nodeIds.has(memberId)))) {
+               setSelectedGroupId(null);
+               setEditingGroupId(null);
+           }
+       }
       if (connectionsToDelete.length > 0) {
           const deletedConnectionIds = new Set(connectionsToDelete.map(connection => connection.id));
           setConnections(prev => prev.filter(connection => !deletedConnectionIds.has(connection.id)));
       }
       setSelectedNodeIds(new Set());
       setSelectedConnectionId(null);
-  }, [connections, nodes, recordCanvasHistory]);
+   }, [connections, groups, nodes, recordCanvasHistory, invalidateGenerationForNode, selectedGroupId]);
 
   const deleteCanvasItems = useCallback((nodeIds: Set<string>, connectionIds: Set<string>) => {
       if (nodeIds.size > 0) {
@@ -1766,7 +2243,17 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
             || target.tagName === 'SELECT'
             || target.isContentEditable
             || Boolean(target.closest('[contenteditable="true"], [role="textbox"]'));
-        if (!isInput) {
+         if (!isInput) {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
+                e.preventDefault();
+                if (e.shiftKey) {
+                    const inferredGroup = selectedGroupId || groups.find(group => group.memberIds.every(id => selectedNodeIds.has(id)))?.id;
+                    ungroupNodeGroup(inferredGroup);
+                } else {
+                    createNodeGroup();
+                }
+                return;
+            }
             if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
                 e.preventDefault();
                 undoLastCanvasAction();
@@ -1789,6 +2276,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
         }
         
         if (e.key === 'Escape') {
+            if (editingGroupId) setEditingGroupId(null);
             if (pendingDeleteRequest) setPendingDeleteRequest(null);
             if (previewMedia) setPreviewMedia(null);
             if (previewText) setPreviewText(null);
@@ -1808,7 +2296,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
         window.removeEventListener('keydown', handleKeyDown);
         window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedNodeIds, selectedConnectionId, pendingDeleteRequest, previewMedia, previewText, contextMenu, quickAddMenu, directorDeskSession, showNewWorkflowDialog, isStorageOpen, isExportImportOpen, handleAlign, deleteCanvasItems, undoLastCanvasAction]);
+  }, [selectedNodeIds, selectedGroupId, editingGroupId, groups, selectedConnectionId, pendingDeleteRequest, previewMedia, previewText, contextMenu, quickAddMenu, directorDeskSession, showNewWorkflowDialog, isStorageOpen, isExportImportOpen, handleAlign, createNodeGroup, ungroupNodeGroup, deleteCanvasItems, undoLastCanvasAction]);
 
   useEffect(() => {
     // Load storage directory name for the top-right indicator
@@ -1851,7 +2339,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       setIsStorageOpen(true);
   };
 
-  const handleImportWorkflow = (data: { nodes: NodeData[], connections: Connection[], transform?: CanvasTransform, projectName?: string }) => {
+  const handleImportWorkflow = (data: { nodes: NodeData[], connections: Connection[], groups?: NodeGroup[], transform?: CanvasTransform, projectName?: string }) => {
       // 保存当前有内容的节点到历史
       const withContent = nodes.filter(n => n.imageSrc || n.videoSrc);
       if (withContent.length > 0) setDeletedNodes(prev => [...prev, ...withContent]);
@@ -1859,6 +2347,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       clearCanvasHistory();
       setNodes(data.nodes);
       setConnections(data.connections);
+      setGroups(normalizeNodeGroups(data.groups || [], data.nodes));
       if (data.transform) setTransform(data.transform);
       if (data.projectName) setProjectName(data.projectName);
       setSelectedNodeIds(new Set());
@@ -1972,9 +2461,162 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       };
   };
 
+  const releaseGeneration = (scope: GenerationScope) => {
+      const key = generationScopeKey(scope);
+      activeGenerationKeysRef.current.delete(key);
+      const bindingKey = generationTargetKey(scope);
+      const currentBinding = generationBindingByNodeRef.current.get(bindingKey);
+      if (currentBinding?.operationId === scope.operationId) {
+          generationBindingByNodeRef.current.delete(bindingKey);
+          generationNodeLocksRef.current.delete(bindingKey);
+      }
+  };
+
+  const setGenerationTask = (scope: GenerationScope, updates: Partial<GenerationTaskState>) => {
+      const target = nodesRef.current.find(node => node.id === scope.nodeId);
+      if (isGenerationScopeCurrent(scope) && target?.generationTask) {
+          return updateGenerationNode(scope, {
+              generationTask: {
+                  ...target.generationTask,
+                  ...updates,
+                  updatedAt: Date.now(),
+              },
+          });
+      }
+      // Once the scope is off-screen, update only its persisted snapshot. A
+      // same-canvas mismatch is treated as stale and cannot fall back to an
+      // older localStorage copy.
+      if (workspaceRef.current.projectId === scope.projectId && workspaceRef.current.canvasId === scope.canvasId) return false;
+      return persistGenerationTaskToSnapshot(scope, updates);
+  };
+
+  const applyGeneratedResults = (
+      scope: GenerationScope,
+      initialNode: NodeData,
+      results: string[],
+      source: ArtifactSource,
+      creditEstimate: number,
+  ) => {
+      if (!results.length) return false;
+      const buildResultUpdates = (current: NodeData): Partial<NodeData> | null => {
+          if (!current.generationTask) return null;
+          const kind = current.generationTask.kind;
+          const currentSrc = kind === 'image' ? current.imageSrc : kind === 'video' ? current.videoSrc : current.audioSrc;
+          const initialSrc = kind === 'image' ? initialNode.imageSrc : kind === 'video' ? initialNode.videoSrc : initialNode.audioSrc;
+          const preserveSelection = Boolean(currentSrc && currentSrc !== initialSrc);
+          const newArtifacts = mergeArtifactVersions(results, currentSrc, current.outputArtifacts || []);
+          const artifactSources = { ...(current.artifactSources || {}) };
+          results.forEach(url => { artifactSources[url] = source; });
+          const task: GenerationTaskState = {
+              ...current.generationTask,
+              status: 'succeeded',
+              providerStatus: current.generationTask.providerStatus || 'completed',
+              updatedAt: Date.now(),
+              errorMessage: undefined,
+              errorDetail: undefined,
+          };
+          const updates: Partial<NodeData> = {
+              isLoading: false,
+              errorMessage: undefined,
+              outputArtifacts: newArtifacts,
+              artifactSources,
+              generationTask: task,
+              creditEstimate,
+              creditStatus: 'confirmed',
+          };
+
+          if (!preserveSelection) {
+              updates.resultSource = source;
+              if (kind === 'image') updates.imageSrc = results[0];
+              if (kind === 'video') updates.videoSrc = results[0];
+              if (kind === 'audio') updates.audioSrc = results[0];
+          }
+
+          if (kind === 'image') {
+              const generatedAt = Date.now();
+              const batchId = `${scope.nodeId}-${generatedAt}`;
+              const generatedVersions = results.map((url, index) => createImageVersionSnapshot(
+                  url,
+                  initialNode,
+                  generatedAt + index,
+                  { batchId, batchUrls: [...results], batchIndex: index }
+              ));
+              updates.imageVersions = mergeImageVersionSnapshots(
+                  newArtifacts,
+                  generatedVersions,
+                  current.imageVersions,
+                  initialNode,
+              );
+          }
+
+          // If the user selected/uploaded another candidate while the request was away,
+          // keep that current value and only add the fresh results to its history.
+          if (preserveSelection && currentSrc) {
+              updates.resultSource = current.resultSource || current.artifactSources?.[currentSrc] || 'unknown';
+          }
+          return updates;
+      };
+
+      if (isGenerationScopeCurrent(scope)) {
+          const current = nodesRef.current.find(node => node.id === scope.nodeId);
+          const updates = current ? buildResultUpdates(current) : null;
+          return updates ? updateGenerationNode(scope, updates) : false;
+      }
+
+      // A completed provider task can resolve while its canvas is hidden. Write
+      // the complete result to that canvas snapshot so returning to it does not
+      // show a succeeded task with missing media.
+      if (workspaceRef.current.projectId === scope.projectId && workspaceRef.current.canvasId === scope.canvasId) return false;
+      if (invalidatedGenerationKeysRef.current.has(generationScopeKey(scope))) return false;
+      const previous = readSubCanvasWorkspace(scope.projectId);
+      const scopedState = previous?.states?.[scope.canvasId];
+      const persistedNode = scopedState?.nodes.find(node => node.id === scope.nodeId);
+      if (!previous || !scopedState || !persistedNode?.generationTask || persistedNode.generationTask.operationId !== scope.operationId) return false;
+      const updates = buildResultUpdates(persistedNode);
+      if (!updates) return false;
+      const nextNodes = scopedState.nodes.map(node => node.id === scope.nodeId ? { ...node, ...updates } : node);
+      return writeSubCanvasWorkspace(scope.projectId, {
+          ...previous,
+          states: {
+              ...previous.states,
+              [scope.canvasId]: { ...scopedState, nodes: nextNodes },
+          },
+      });
+  };
+
+  const markGenerationFailure = (scope: GenerationScope, error: unknown, creditEstimate: number) => {
+      const target = nodesRef.current.find(node => node.id === scope.nodeId);
+      if (!target?.generationTask || !isGenerationScopeCurrent(scope)) return false;
+      const taskIds = target.generationTask.providerTaskIds || [];
+      const detail = getErrorDetail(error);
+      const isTimeout = /timeout|timed out/i.test(detail);
+      const status: GenerationTaskStatus = isTimeout
+          ? (taskIds.length > 0 ? 'timed_out' : 'needs_check')
+          : 'failed';
+      const message = getChineseGenerationError(error, taskIds.length > 0);
+      const updated = updateGenerationNode(scope, {
+          isLoading: false,
+          errorMessage: message,
+          generationTask: {
+              ...target.generationTask,
+              status,
+              errorMessage: message,
+              errorDetail: detail,
+              updatedAt: Date.now(),
+          },
+          creditEstimate,
+          creditStatus: 'refunded',
+      });
+      if (updated) alert(message);
+      return updated;
+  };
+
   const handleGenerate = async (nodeId: string) => {
-    const node = nodes.find(n => n.id === nodeId);
-    if (!node) return;
+    const node = nodesRef.current.find(n => n.id === nodeId);
+    if (!node || !currentProject?.id || !activeSubCanvasId) return;
+    const generationTarget = { projectId: currentProject.id, canvasId: activeSubCanvasId, nodeId };
+    const generationTargetKeyValue = generationTargetKey(generationTarget);
+    if (node.isLoading || generationNodeLocksRef.current.has(generationTargetKeyValue)) return;
 
     const connectedMedia = getInputMedia(node.id);
     const connectedImages = connectedMedia.filter(item => item.type === 'image');
@@ -2024,163 +2666,305 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
     }
 
     const creditEstimate = node.creditEstimate || getEstimatedCredits(node);
-    updateNodeData(nodeId, {
+    const inputs = getInputImages(node.id);
+    const operationId = createGenerationOperationId();
+    const scope: GenerationScope = {
+        projectId: currentProject.id,
+        canvasId: activeSubCanvasId,
+        nodeId,
+        operationId,
+    };
+    const existingBinding = generationBindingByNodeRef.current.get(generationTargetKeyValue);
+    if (existingBinding) invalidatedGenerationKeysRef.current.add(generationScopeKey(existingBinding));
+    const kind = getGenerationKind(node);
+    const task: GenerationTaskState = {
+        operationId,
+        kind,
+        status: 'submitting',
+        inputSnapshot: toGenerationInputSnapshot(node, inputs, isVideoNode ? selectedVideoMedia : connectedMedia, isVideoNode ? videoMode : undefined),
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+    };
+    generationBindingByNodeRef.current.set(generationTargetKeyValue, scope);
+    generationNodeLocksRef.current.add(generationTargetKeyValue);
+    activeGenerationKeysRef.current.add(generationScopeKey(scope));
+    recoveryStartedKeysRef.current.add(generationScopeKey(scope));
+    const startedNodes = nodesRef.current.map(candidate => candidate.id === nodeId ? {
+        ...candidate,
         isLoading: true,
         errorMessage: undefined,
         auditFailureReason: undefined,
         auditErrorDetail: undefined,
+        generationTask: task,
         creditEstimate,
-        creditStatus: 'reserved',
-    });
-
-    const inputs = getInputImages(node.id);
+        creditStatus: 'reserved' as const,
+    } : candidate);
+    nodesRef.current = startedNodes;
+    setNodes(startedNodes);
+    persistScopedGenerationNodes(scope, startedNodes);
 
     // Frontend-only Seedance 2.0 audit gate. It blocks the real request only when the
     // designated prototype image is present, then marks the exact source image node.
-    if (isVideoNode && (node.model === 'Seedance 2.0' || node.model === 'Seedance 2.0 Fast')) {
-        const auditMedia = (videoMode === 'start_end' ? connectedImages : selectedVideoMedia)
-            .filter((item): item is InputMedia => item.type === 'image' && Boolean(item.sourceNodeId));
-        const uniqueAuditMedia = Array.from(new Map(
-            auditMedia.map(item => [item.sourceNodeId as string, item]),
-        ).values());
-
-        if (uniqueAuditMedia.length > 0) {
-            const auditNodeIds = new Set(uniqueAuditMedia.map(item => item.sourceNodeId as string));
-            setNodes(prev => prev.map(candidate => auditNodeIds.has(candidate.id) ? {
-                ...candidate,
-                auditStatus: 'auditing',
-                auditFailureReason: undefined,
-                auditErrorDetail: undefined,
-            } : candidate));
-
-            await new Promise(resolve => window.setTimeout(resolve, 650));
-            const auditResults = await Promise.all(uniqueAuditMedia.map(async item => {
-                const sourceNode = nodes.find(candidate => candidate.id === item.sourceNodeId);
-                return {
-                    nodeId: item.sourceNodeId as string,
-                    failed: await isMockRejectedAuditImage(item, sourceNode),
-                };
-            }));
-            const failedNodeIds = new Set(auditResults.filter(result => result.failed).map(result => result.nodeId));
-
-            setNodes(prev => prev.map(candidate => {
-                if (!auditNodeIds.has(candidate.id)) return candidate;
-                if (failedNodeIds.has(candidate.id)) {
-                    return {
-                        ...candidate,
-                        auditStatus: 'failed',
-                        auditFailureReason: MOCK_AUDIT_REASON,
-                        auditErrorDetail: MOCK_AUDIT_ERROR_DETAIL,
-                    };
-                }
-                return {
-                    ...candidate,
-                    auditStatus: 'passed',
-                    auditFailureReason: undefined,
-                    auditErrorDetail: undefined,
-                };
-            }));
-
-            if (failedNodeIds.size > 0) {
-                updateNodeData(nodeId, {
-                    isLoading: false,
-                    errorMessage: undefined,
-                    auditFailureReason: MOCK_AUDIT_REASON,
-                    auditErrorDetail: MOCK_AUDIT_ERROR_DETAIL,
-                    creditEstimate,
-                    creditStatus: 'refunded',
-                });
-                setAuditFailureNotice({ count: failedNodeIds.size });
-                return;
-            }
-        }
-    }
-
-    // Debug: Log input images for troubleshooting
-    console.log(`[Generation] Node: ${node.title} (${node.type}), Input Images:`, inputs.length > 0 ? inputs.map(i => i.substring(0, 50) + '...') : 'None');
-
     try {
-      if (node.type === NodeType.CREATIVE_DESC) {
-        const res = await generateCreativeDescription(node.prompt || '', node.model === 'TEXT_TO_VIDEO' ? 'VIDEO' : 'IMAGE', node.model);
-        updateNodeData(nodeId, {
-            textContent: res,
-            optimizedPrompt: res,
-            textVersions: mergeTextVersionSnapshots(
-                createTextVersionSnapshot(res, node, 'generate'),
-                node.textVersions
-            ),
-            isLoading: false,
-            creditEstimate,
-            creditStatus: 'confirmed'
-        });
-      } else {
-          let results: string[] = [];
-          
-          // Image generation
-          if (node.type === NodeType.TEXT_TO_IMAGE) {
-            results = await generateImage(
-                node.prompt || '', node.aspectRatio, node.model, node.resolution, node.count || 1, inputs, false
-            );
-          }
-          // Unified video generation: model capability + selected mode determine inputs.
-          else if (isVideoNode) {
-            const selectedImages = videoMode === 'start_end'
-                ? connectedImages.map(item => item.url)
-                : selectedVideoMedia.filter(item => item.type === 'image').map(item => item.url);
-            const orderedInputs = videoMode === 'start_end' && node.swapFrames && selectedImages.length >= 2
-                ? [selectedImages[1], selectedImages[0], ...selectedImages.slice(2)]
-                : selectedImages;
-            results = await generateVideo(
-                node.prompt || '',
-                orderedInputs,
-                node.aspectRatio,
-                node.model,
-                node.resolution,
-                node.duration,
-                node.count || 1,
-                false,
-                { mode: videoMode, inputMedia: selectedVideoMedia },
-            );
-          }
+      if (isVideoNode && (node.model === 'Seedance 2.0' || node.model === 'Seedance 2.0 Fast')) {
+          const auditMedia = (videoMode === 'start_end' ? connectedImages : selectedVideoMedia)
+              .filter((item): item is InputMedia => item.type === 'image' && Boolean(item.sourceNodeId));
+          const uniqueAuditMedia = Array.from(new Map<string, InputMedia>(
+              auditMedia.map(item => [item.sourceNodeId as string, item] as const),
+          ).values());
 
-          if (results.length > 0) {
-              const newArtifacts = mergeArtifactVersions(results, node.imageSrc || node.videoSrc, node.outputArtifacts || []);
-              
-              const updates: Partial<NodeData> = { isLoading: false, errorMessage: undefined, outputArtifacts: newArtifacts, creditEstimate, creditStatus: 'confirmed' };
-              
-              // Set output based on node type
-              if (node.type === NodeType.TEXT_TO_IMAGE) {
-                  updates.imageSrc = results[0];
-                  const generatedAt = Date.now();
-                  const batchId = `${nodeId}-${generatedAt}`;
-                  const batchUrls = [...results];
-                  const generatedVersions = results.map((url, index) => createImageVersionSnapshot(
-                      url,
-                      node,
-                      generatedAt + index,
-                      { batchId, batchUrls, batchIndex: index }
-                  ));
-                  updates.imageVersions = mergeImageVersionSnapshots(
-                      newArtifacts,
-                      generatedVersions,
-                      node.imageVersions,
-                      node
-                  );
-              } else if (isVideoNode) {
-                  updates.videoSrc = results[0];
+          if (uniqueAuditMedia.length > 0) {
+              const auditNodeIds = new Set(uniqueAuditMedia.map(item => item.sourceNodeId as string));
+              const auditingNodes = nodesRef.current.map(candidate => auditNodeIds.has(candidate.id) ? {
+                  ...candidate,
+                  auditStatus: 'auditing',
+                  auditFailureReason: undefined,
+                  auditErrorDetail: undefined,
+              } : candidate);
+              nodesRef.current = auditingNodes;
+              setNodes(auditingNodes);
+
+              await new Promise(resolve => window.setTimeout(resolve, 650));
+              const auditResults = await Promise.all(uniqueAuditMedia.map(async item => {
+                  const sourceNode = nodesRef.current.find(candidate => candidate.id === item.sourceNodeId);
+                  return {
+                      nodeId: item.sourceNodeId as string,
+                      failed: await isMockRejectedAuditImage(item, sourceNode),
+                  };
+              }));
+              const failedNodeIds = new Set(auditResults.filter(result => result.failed).map(result => result.nodeId));
+
+              const auditedNodes = nodesRef.current.map(candidate => {
+                  if (!auditNodeIds.has(candidate.id)) return candidate;
+                  if (failedNodeIds.has(candidate.id)) {
+                      return {
+                          ...candidate,
+                          auditStatus: 'failed',
+                          auditFailureReason: MOCK_AUDIT_REASON,
+                          auditErrorDetail: MOCK_AUDIT_ERROR_DETAIL,
+                      };
+                  }
+                  return {
+                      ...candidate,
+                      auditStatus: 'passed',
+                      auditFailureReason: undefined,
+                      auditErrorDetail: undefined,
+                  };
+              });
+              nodesRef.current = auditedNodes;
+              setNodes(auditedNodes);
+
+              if (failedNodeIds.size > 0) {
+                  updateGenerationNode(scope, {
+                      isLoading: false,
+                      errorMessage: undefined,
+                      auditFailureReason: MOCK_AUDIT_REASON,
+                      auditErrorDetail: MOCK_AUDIT_ERROR_DETAIL,
+                      generationTask: {
+                          ...task,
+                          status: 'failed',
+                          errorMessage: '审核未通过',
+                          errorDetail: MOCK_AUDIT_ERROR_DETAIL,
+                          updatedAt: Date.now(),
+                      },
+                      creditEstimate,
+                      creditStatus: 'refunded',
+                  });
+                  setAuditFailureNotice({ count: failedNodeIds.size });
+                  return;
               }
-              
-              updateNodeData(nodeId, updates);
-          } else {
-              throw new Error("未返回结果");
           }
       }
-    } catch (e) {
-      console.error(e);
-      alert(`生成失败: ${(e as Error).message}`);
-      updateNodeData(nodeId, { isLoading: false, errorMessage: (e as Error).message, creditEstimate, creditStatus: 'refunded' });
+
+      // Debug: Log input images for troubleshooting
+      console.log(`[Generation] Node: ${node.title} (${node.type}), Input Images:`, inputs.length > 0 ? inputs.map(i => i.substring(0, 50) + '...') : 'None');
+
+      if (node.type === NodeType.CREATIVE_DESC) {
+          const res = await generateCreativeDescription(node.prompt || '', node.model === 'TEXT_TO_VIDEO' ? 'VIDEO' : 'IMAGE', node.model);
+          if (isGenerationScopeCurrent(scope)) {
+              const current = nodesRef.current.find(candidate => candidate.id === nodeId);
+              updateGenerationNode(scope, {
+                  textContent: res,
+                  optimizedPrompt: res,
+                  textVersions: mergeTextVersionSnapshots(
+                      createTextVersionSnapshot(res, node, 'generate'),
+                      current?.textVersions || node.textVersions,
+                  ),
+                  isLoading: false,
+                  generationTask: { ...task, status: 'succeeded', updatedAt: Date.now() },
+                  creditEstimate,
+                  creditStatus: 'confirmed',
+              });
+          }
+      } else if (node.type === NodeType.TEXT_TO_IMAGE) {
+          const result = await generateImageWithMetadata(
+              node.prompt || '', node.aspectRatio, node.model, node.resolution, node.count || 1, inputs, false,
+          );
+          if (!applyGeneratedResults(scope, node, result.urls, result.mock ? 'mock' : 'provider', creditEstimate)) {
+              if (!isGenerationScopeCurrent(scope)) return;
+              throw new Error('未返回结果');
+          }
+      } else if (node.type === NodeType.TEXT_TO_AUDIO) {
+          const result = await generateAudioWithMetadata(
+              node.prompt || '',
+              node.model,
+              node.voiceId,
+              node.voiceSpeed || 1,
+              node.voicePitch || 0,
+              node.voiceVolume || 1,
+          );
+          if (!applyGeneratedResults(scope, node, result.urls, result.mock ? 'mock' : 'provider', creditEstimate)) {
+              if (!isGenerationScopeCurrent(scope)) return;
+              throw new Error('未返回结果');
+          }
+      } else if (isVideoNode) {
+          const selectedImages = videoMode === 'start_end'
+              ? connectedImages.map(item => item.url)
+              : selectedVideoMedia.filter(item => item.type === 'image').map(item => item.url);
+          const orderedInputs = videoMode === 'start_end' && node.swapFrames && selectedImages.length >= 2
+              ? [selectedImages[1], selectedImages[0], ...selectedImages.slice(2)]
+              : selectedImages;
+          const results = await generateVideo(
+              node.prompt || '',
+              orderedInputs,
+              node.aspectRatio,
+              node.model,
+              node.resolution,
+              node.duration,
+              node.count || 1,
+              false,
+              {
+                  mode: videoMode,
+                  inputMedia: selectedVideoMedia,
+                  onTaskCreated: (taskIds, provider) => {
+                      const current = nodesRef.current.find(candidate => candidate.id === nodeId);
+                      setGenerationTask(scope, {
+                          status: 'queued',
+                          provider: provider || current?.generationTask?.provider,
+                          providerTaskIds: taskIds,
+                          providerTaskStatuses: {},
+                          providerTaskProgress: {},
+                      });
+                  },
+                  onStatus: (update: VideoTaskStatusUpdate) => {
+                      const current = nodesRef.current.find(candidate => candidate.id === nodeId);
+                      const statuses = { ...(current?.generationTask?.providerTaskStatuses || {}), [update.taskId]: update.status };
+                      const progresses = { ...(current?.generationTask?.providerTaskProgress || {}) };
+                      if (update.progress !== undefined) progresses[update.taskId] = update.progress;
+                      setGenerationTask(scope, {
+                          status: update.status === 'timed_out' ? 'timed_out' : update.status === 'failed' ? 'failed' : 'running',
+                          providerStatus: update.providerStatus,
+                          progress: update.progress,
+                          providerTaskStatuses: statuses,
+                          providerTaskProgress: progresses,
+                          errorDetail: update.errorDetail || current?.generationTask?.errorDetail,
+                      });
+                  },
+              },
+          );
+          if (!applyGeneratedResults(scope, node, results, 'provider', creditEstimate)) {
+              if (!isGenerationScopeCurrent(scope)) return;
+              throw new Error('未返回结果');
+          }
+      } else {
+          throw new Error('未返回结果');
+      }
+    } catch (error) {
+      console.error(error);
+      markGenerationFailure(scope, error, creditEstimate);
+    } finally {
+      releaseGeneration(scope);
     }
   };
+
+  const recoverVideoGeneration = (scope: GenerationScope, task: GenerationTaskState) => {
+      const taskIds = Array.from(new Set(task.providerTaskIds || [])).filter(Boolean);
+      if (!taskIds.length || !isGenerationScopeCurrent(scope)) return;
+      const key = generationScopeKey(scope);
+      activeGenerationKeysRef.current.add(key);
+      generationNodeLocksRef.current.add(generationTargetKey(scope));
+      recoveryStartedKeysRef.current.add(key);
+      updateGenerationNode(scope, {
+          isLoading: true,
+          errorMessage: undefined,
+          generationTask: {
+              ...task,
+              status: 'running',
+              errorMessage: undefined,
+              updatedAt: Date.now(),
+          },
+      });
+      const target = nodesRef.current.find(node => node.id === scope.nodeId);
+      if (!target) {
+          releaseGeneration(scope);
+          return;
+      }
+      const snapshotNode: NodeData = {
+          ...target,
+          prompt: task.inputSnapshot.prompt ?? target.prompt,
+          model: task.inputSnapshot.model ?? target.model,
+          aspectRatio: task.inputSnapshot.aspectRatio ?? target.aspectRatio,
+          resolution: task.inputSnapshot.resolution ?? target.resolution,
+          duration: task.inputSnapshot.duration ?? target.duration,
+          count: task.inputSnapshot.count ?? target.count,
+          videoMode: task.inputSnapshot.videoMode ?? target.videoMode,
+      };
+      Promise.all(taskIds.map(taskId => resumeVideoTask(taskId, (update: VideoTaskStatusUpdate) => {
+          const current = nodesRef.current.find(node => node.id === scope.nodeId);
+          const statuses = { ...(current?.generationTask?.providerTaskStatuses || {}), [update.taskId]: update.status };
+          const progresses = { ...(current?.generationTask?.providerTaskProgress || {}) };
+          if (update.progress !== undefined) progresses[update.taskId] = update.progress;
+          setGenerationTask(scope, {
+              status: update.status === 'timed_out' ? 'timed_out' : update.status === 'failed' ? 'failed' : 'running',
+              providerStatus: update.providerStatus,
+              progress: update.progress,
+              providerTaskStatuses: statuses,
+              providerTaskProgress: progresses,
+              errorDetail: update.errorDetail || current?.generationTask?.errorDetail,
+          });
+      }))).then(results => {
+          applyGeneratedResults(scope, snapshotNode, results, 'provider', target.creditEstimate || getEstimatedCredits(target));
+      }).catch(error => {
+          markGenerationFailure(scope, error, target.creditEstimate || getEstimatedCredits(target));
+      }).finally(() => {
+          releaseGeneration(scope);
+      });
+  };
+
+  useEffect(() => {
+      if (!currentProject?.id || !activeSubCanvasId) return;
+      nodes.forEach(node => {
+          const task = node.generationTask;
+          if (!task || task.kind !== 'video' || !RECOVERABLE_GENERATION_STATUSES.includes(task.status)) return;
+          const scope: GenerationScope = {
+              projectId: currentProject.id,
+              canvasId: activeSubCanvasId,
+              nodeId: node.id,
+              operationId: task.operationId,
+          };
+          const key = generationScopeKey(scope);
+          const taskIds = Array.from(new Set(task.providerTaskIds || [])).filter(Boolean);
+          if (activeGenerationKeysRef.current.has(key) || recoveryStartedKeysRef.current.has(key)) return;
+          if (!taskIds.length) {
+              if (task.status === 'submitting' && task.startedAt < sessionStartedAtRef.current) {
+                  updateGenerationNode(scope, {
+                      isLoading: false,
+                      errorMessage: '提交未确认，未拿到任务编号，请核对后再生成',
+                      generationTask: {
+                          ...task,
+                          status: 'needs_check',
+                          errorMessage: '提交未确认，未拿到任务编号，请核对后再生成',
+                          errorDetail: task.errorDetail || '刷新时未发现供应商任务编号，未自动重建请求',
+                          updatedAt: Date.now(),
+                      },
+                  });
+              }
+              return;
+          }
+          recoveryStartedKeysRef.current.add(key);
+          recoverVideoGeneration(scope, task);
+      });
+  }, [currentProject?.id, activeSubCanvasId, nodes]);
 
   const handleAnalyzeMedia = async (nodeId: string) => {
       const node = nodes.find(n => n.id === nodeId);
@@ -2409,6 +3193,9 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
   };
 
   const handleSetImageVersion = (nodeId: string, version: ImageVersionSnapshot) => {
+      const source = nodesRef.current.find(node => node.id === nodeId);
+      if (!source) return;
+      invalidateGenerationForNode(nodeId);
       const { width, height } = getNodeSizeForAspectRatio(version.aspectRatio);
       updateNodeData(nodeId, {
           imageSrc: version.url,
@@ -2420,6 +3207,19 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           promptOptimize: version.promptOptimize,
           width,
           height,
+          resultSource: source.artifactSources?.[version.url] || 'unknown',
+          generationTask: undefined,
+      });
+  };
+
+  const handleSetVideoVersion = (nodeId: string, src: string) => {
+      const source = nodesRef.current.find(node => node.id === nodeId);
+      if (!source) return;
+      invalidateGenerationForNode(nodeId);
+      updateNodeData(nodeId, {
+          videoSrc: src,
+          resultSource: source.artifactSources?.[src] || 'unknown',
+          generationTask: undefined,
       });
   };
 
@@ -2454,6 +3254,8 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           count: version.count,
           model: version.model,
           promptOptimize: version.promptOptimize,
+          resultSource: source.artifactSources?.[version.url] || 'unknown',
+          artifactSources: source.artifactSources,
           source: 'canvas',
           projectId: source.projectId || currentProject?.id || DEMO_PROJECT_META.id,
           canvasId: source.canvasId,
@@ -2486,6 +3288,8 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           y,
           videoSrc: src,
           outputArtifacts: [src],
+          resultSource: source.artifactSources?.[src] || 'unknown',
+          artifactSources: source.artifactSources,
           isStackOpen: false,
           isLoading: false,
           auditStatus: undefined,
@@ -3010,10 +3814,11 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
               hour: '2-digit',
               minute: '2-digit',
           });
-          const projectSnapshot = {
-              nodes: snapshotNodes,
-              connections,
-              transform,
+           const projectSnapshot = {
+               nodes: snapshotNodes,
+               connections,
+               transform,
+               groups,
               projectName,
               deletedNodes,
               savedAt,
@@ -3040,8 +3845,9 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       const withContent = nodes.filter(n => n.imageSrc || n.videoSrc);
       if (withContent.length > 0) setDeletedNodes(prev => [...prev, ...withContent]);
       clearCanvasHistory();
-      setNodes([]);
-      setConnections([]);
+       setNodes([]);
+       setConnections([]);
+       setGroups([]);
       setTransform({ x: 0, y: 0, k: 1 });
       setProjectName(nextProjectName);
       setSelectedNodeIds(new Set());
@@ -3056,8 +3862,9 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           const saved = localStorage.getItem(`${KC_PROJECT_STORAGE_PREFIX}${project.id}`);
           if (saved) {
               const data = JSON.parse(saved);
-              setNodes(Array.isArray(data.nodes) ? data.nodes : []);
-              setConnections(Array.isArray(data.connections) ? data.connections : []);
+               setNodes(Array.isArray(data.nodes) ? data.nodes : []);
+               setConnections(Array.isArray(data.connections) ? data.connections : []);
+               setGroups(normalizeNodeGroups(Array.isArray(data.groups) ? data.groups : [], Array.isArray(data.nodes) ? data.nodes : []));
               setDeletedNodes(Array.isArray(data.deletedNodes) ? data.deletedNodes : []);
               setTransform(data.transform || { x: 0, y: 0, k: 1 });
               setProjectName(data.projectName || project.canvasName);
@@ -3067,8 +3874,9 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           console.error(error);
       }
       if (!loaded) {
-          setNodes([]);
-          setConnections([]);
+           setNodes([]);
+           setConnections([]);
+           setGroups([]);
           setDeletedNodes([]);
           setTransform({ x: 0, y: 0, k: 1 });
           setProjectName(project.canvasName);
@@ -3151,6 +3959,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
             if (data.nodes && data.connections) {
                 setNodes(data.nodes);
                 setConnections(data.connections);
+                setGroups(normalizeNodeGroups(Array.isArray(data.groups) ? data.groups : [], data.nodes));
                 if (data.transform) setTransform(data.transform);
                 if (data.projectName) setProjectName(data.projectName);
             }
@@ -3808,10 +4617,13 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       e.preventDefault(); return;
     }
     if (e.target === containerRef.current && e.button === 0) {
-        setDragMode('SELECT');
-        dragStartRef.current = { x: e.clientX, y: e.clientY };
-        setSelectionBox({ x: 0, y: 0, w: 0, h: 0 }); 
-        if (!e.shiftKey) setSelectedNodeIds(new Set());
+      setDragMode('SELECT');
+      dragStartRef.current = { x: e.clientX, y: e.clientY };
+      setSelectionBox({ x: 0, y: 0, w: 0, h: 0 });
+      initialSelectionRef.current = e.shiftKey ? new Set(selectedNodeIds) : new Set();
+      if (!e.shiftKey) setSelectedNodeIds(new Set());
+      setSelectedGroupId(null);
+      setEditingGroupId(null);
     }
   };
 
@@ -3821,14 +4633,43 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
     if (quickAddMenu) setQuickAddMenu(null);
     if (selectedConnectionId) setSelectedConnectionId(null);
     if (e.button === 0) {
-        setDragMode('DRAG_NODE');
+      setDragMode('DRAG_NODE');
         dragStartRef.current = { x: e.clientX, y: e.clientY };
         const isAlreadySelected = selectedNodeIds.has(id);
         let newSelection = new Set(selectedNodeIds);
         if (e.shiftKey) { isAlreadySelected ? newSelection.delete(id) : newSelection.add(id); } else { if (!isAlreadySelected) { newSelection.clear(); newSelection.add(id); } }
-        setSelectedNodeIds(newSelection);
-        initialNodePositionsRef.current = nodes.map(n => ({ id: n.id, x: n.x, y: n.y }));
+      setSelectedNodeIds(newSelection);
+      setSelectedGroupId(null);
+      initialNodePositionsRef.current = nodes.map(n => ({ id: n.id, x: n.x, y: n.y }));
     }
+  };
+
+  const handleGroupMouseDown = (e: React.MouseEvent, groupId: string) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const group = groups.find(item => item.id === groupId);
+      if (!group) return;
+      setDragMode('DRAG_GROUP');
+      activeDragGroupRef.current = groupId;
+      dragStartRef.current = { x: e.clientX, y: e.clientY };
+      initialNodePositionsRef.current = nodes
+          .filter(node => group.memberIds.includes(node.id))
+          .map(node => ({ id: node.id, x: node.x, y: node.y }));
+      initialGroupNodesRef.current = nodes.filter(node => group.memberIds.includes(node.id));
+      setSelectedNodeIds(new Set(group.memberIds));
+      setSelectedGroupId(groupId);
+      setSelectedConnectionId(null);
+  };
+
+  const handleGroupDoubleClick = (e: React.MouseEvent, groupId: string) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const group = groups.find(item => item.id === groupId);
+      if (!group) return;
+      setSelectedGroupId(groupId);
+      setEditingGroupId(groupId);
+      setSelectedNodeIds(new Set());
   };
 
   const handleNodeDoubleClick = (e: React.MouseEvent, id: string) => {
@@ -3891,6 +4732,15 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       const dx = (e.clientX - dragStartRef.current.x) / transform.k;
       const dy = (e.clientY - dragStartRef.current.y) / transform.k;
       setNodes(prev => prev.map(n => { if (selectedNodeIds.has(n.id)) { const initial = initialNodePositionsRef.current.find(init => init.id === n.id); if (initial) return { ...n, x: initial.x + dx, y: initial.y + dy }; } return n; }));
+    } else if (dragMode === 'DRAG_GROUP') {
+      const dx = (e.clientX - dragStartRef.current.x) / transform.k;
+      const dy = (e.clientY - dragStartRef.current.y) / transform.k;
+      const memberIds = new Set(initialNodePositionsRef.current.map(item => item.id));
+      setNodes(prev => prev.map(node => {
+          if (!memberIds.has(node.id)) return node;
+          const initial = initialNodePositionsRef.current.find(item => item.id === node.id);
+          return initial ? { ...node, x: initial.x + dx, y: initial.y + dy } : node;
+      }));
     } else if (dragMode === 'SELECT') {
         const x = Math.min(dragStartRef.current.x, e.clientX);
         const y = Math.min(dragStartRef.current.y, e.clientY);
@@ -3900,7 +4750,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
         const worldStartX = (x - containerRef.current!.getBoundingClientRect().left - transform.x) / transform.k;
         const worldStartY = (y - containerRef.current!.getBoundingClientRect().top - transform.y) / transform.k;
         const worldWidth = w / transform.k; const worldHeight = h / transform.k;
-        const newSelection = new Set<string>();
+        const newSelection = new Set(initialSelectionRef.current);
         nodes.forEach(n => { if (n.x < worldStartX + worldWidth && n.x + n.width > worldStartX && n.y < worldStartY + worldHeight && n.y + n.height > worldStartY) newSelection.add(n.id); });
         setSelectedNodeIds(newSelection);
     } else if (dragMode === 'CONNECT') {
@@ -3940,7 +4790,23 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
          const direction = connectionStartRef.current.type === 'source' ? 'forward' : 'backward';
          setQuickAddMenu({ sourceId: connectionStartRef.current.nodeId, x: e.clientX, y: e.clientY, worldX: world.x, worldY: world.y, direction });
     }
-    if (dragMode !== 'NONE') { setDragMode('NONE'); setTempConnection(null); connectionStartRef.current = null; setSuggestedNodes([]); setSelectionBox(null); }
+    if (dragMode === 'DRAG_GROUP' && activeDragGroupRef.current && initialGroupNodesRef.current.length > 0) {
+      recordCanvasHistory({
+        type: 'group-update',
+        label: '移动分组',
+        beforeNodes: initialGroupNodesRef.current,
+        beforeGroups: groups,
+      });
+    }
+    if (dragMode !== 'NONE') {
+      setDragMode('NONE');
+      setTempConnection(null);
+      connectionStartRef.current = null;
+      setSuggestedNodes([]);
+      setSelectionBox(null);
+      activeDragGroupRef.current = null;
+      initialGroupNodesRef.current = [];
+    }
   };
 
   const nodeHasMedia = (node: NodeData): boolean =>
@@ -4847,8 +5713,27 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
   }
 
   if (!currentProject) {
-      return renderProjectDashboardV2();
+       return renderProjectDashboardV2();
   }
+
+  const activeSelectionBounds = selectedGroup
+      ? groupBoundsById.get(selectedGroup.id) || null
+      : selectedNodeBounds;
+  const canvasRect = containerRef.current?.getBoundingClientRect();
+  const selectionFrameStyle = activeSelectionBounds && canvasRect ? {
+      left: canvasRect.left + transform.x + activeSelectionBounds.x * transform.k,
+      top: canvasRect.top + transform.y + activeSelectionBounds.y * transform.k,
+      width: activeSelectionBounds.width * transform.k,
+      height: activeSelectionBounds.height * transform.k,
+  } : null;
+  const toolbarPosition = activeSelectionBounds && canvasRect ? (() => {
+      const centerX = canvasRect.left + transform.x + (activeSelectionBounds.x + activeSelectionBounds.width / 2) * transform.k;
+      const estimatedHalfWidth = selectedGroup ? 170 : 118;
+      return {
+          left: Math.max(canvasRect.left + estimatedHalfWidth + 8, Math.min(centerX, canvasRect.right - estimatedHalfWidth - 8)),
+          top: Math.max(canvasRect.top + 8, canvasRect.top + transform.y + activeSelectionBounds.y * transform.k - 44),
+      };
+  })() : null;
 
   return (
     <div className="w-full h-screen overflow-hidden flex relative font-sans text-gray-800">
@@ -4952,6 +5837,33 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                     '--panel-inverse-scale': 1 / Math.max(transform.k, 0.1),
                 } as React.CSSProperties}
             >
+                {/* Persistent group backdrops live in world coordinates; nodes keep
+                    their existing world coordinates above them. */}
+                {groups.map(group => {
+                    const bounds = groupBoundsById.get(group.id);
+                    if (!bounds) return null;
+                    const isSelected = selectedGroupId === group.id;
+                    const isEditing = editingGroupId === group.id;
+                    return (
+                        <React.Fragment key={group.id}>
+                            <div
+                                className={`absolute rounded-2xl border transition-colors ${isSelected ? 'border-[#4446CE] bg-[#4446CE]/[0.08]' : (isDark ? 'border-zinc-700/80 bg-zinc-900/20' : 'border-[#C8CAFF] bg-[#EEF0FF]/45')}`}
+                                style={{ left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height, zIndex: 2, pointerEvents: 'none' }}
+                            />
+                            <div
+                                className={`absolute left-3 top-3 flex h-9 max-w-[calc(100%-24px)] items-center gap-2 rounded-lg border px-3 text-xs font-semibold shadow-sm ${isSelected ? 'border-[#4446CE]/45 bg-[#4446CE] text-white' : (isDark ? 'border-zinc-700 bg-zinc-900 text-zinc-200' : 'border-[#C8CAFF] bg-white text-[#3739B0]')}`}
+                                style={{ left: bounds.x, top: bounds.y, zIndex: 60, pointerEvents: 'auto', cursor: 'grab' }}
+                                onMouseDown={(event) => handleGroupMouseDown(event, group.id)}
+                                onDoubleClick={(event) => handleGroupDoubleClick(event, group.id)}
+                                title="拖动整体移动；双击进入组内编辑"
+                            >
+                                <span className="truncate">{group.title}</span>
+                                <span className={`shrink-0 text-[10px] font-medium ${isSelected ? 'text-white/70' : 'text-current opacity-55'}`}>{group.memberIds.length} 个节点</span>
+                                {isEditing && <span className="shrink-0 rounded bg-white/20 px-1.5 py-0.5 text-[9px]">组内编辑</span>}
+                            </div>
+                        </React.Fragment>
+                    );
+                })}
                 {/* Connection Lines - Rendered as absolute positioned divs with SVG */}
                 {connections.map(conn => {
                     const source = nodes.find(n => n.id === conn.sourceId);
@@ -5203,9 +6115,10 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                             inputMedia={getInputMedia(node.id)}
                             onPreviewReference={handlePreviewReference}
                             onMaximize={handleMaximize}
-                            onPreviewMedia={handleHistoryPreview}
-                            onSetImageVersion={handleSetImageVersion}
-                            onUseImageVersion={handleUseImageVersion}
+                             onPreviewMedia={handleHistoryPreview}
+                             onSetImageVersion={handleSetImageVersion}
+                             onSetVideoVersion={handleSetVideoVersion}
+                             onUseImageVersion={handleUseImageVersion}
                             onUseVideoVersion={handleUseVideoVersion}
                             onDownload={handleDownload}
                             onUpload={triggerReplaceImage}
@@ -5246,6 +6159,64 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
             )}
             {dragMode === 'SELECT' && selectionBox && (
                 <div className="fixed border border-[#4446CE]/50 bg-[#4446CE]/10 pointer-events-none z-50" style={{ left: containerRef.current!.getBoundingClientRect().left + selectionBox.x, top: containerRef.current!.getBoundingClientRect().top + selectionBox.y, width: selectionBox.w, height: selectionBox.h }}/>
+            )}
+            {!selectedGroup && selectionFrameStyle && selectedNodeIds.size > 0 && dragMode !== 'SELECT' && (
+                <div
+                    className="fixed z-[70] pointer-events-none border-2 border-[#4446CE] rounded-md bg-[#4446CE]/[0.035]"
+                    style={selectionFrameStyle}
+                />
+            )}
+            {toolbarPosition && (selectedGroup || selectedNodeIds.size > 0) && dragMode !== 'SELECT' && (
+                <div
+                    className={`fixed z-[120] flex items-center gap-1 rounded-xl border px-1.5 py-1 shadow-xl backdrop-blur-xl ${isDark ? 'border-zinc-700 bg-zinc-900/95 text-zinc-100' : 'border-gray-200 bg-white/95 text-gray-700'}`}
+                    style={{ left: toolbarPosition.left, top: toolbarPosition.top, transform: 'translateX(-50%)' }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                >
+                    {selectedGroup ? (
+                        <>
+                            <button
+                                type="button"
+                                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-100'}`}
+                                onClick={() => arrangeNodeGroup(selectedGroup.id)}
+                                title="按当前位置的阅读顺序整理为宫格"
+                            >
+                                <Icons.LayoutGrid size={14} /> 整理
+                            </button>
+                            <button
+                                type="button"
+                                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-100'}`}
+                                onClick={() => downloadNodeCollection(selectedGroup.memberIds, selectedGroup.title)}
+                            >
+                                <Icons.Download size={14} /> 批量下载
+                            </button>
+                            <button
+                                type="button"
+                                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${isDark ? 'hover:bg-red-500/15 hover:text-red-300' : 'hover:bg-red-50 hover:text-red-600'}`}
+                                onClick={() => ungroupNodeGroup(selectedGroup.id)}
+                            >
+                                <Icons.X size={14} /> 解组
+                            </button>
+                        </>
+                    ) : (
+                        <>
+                            <button
+                                type="button"
+                                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-100'}`}
+                                onClick={() => downloadNodeCollection(selectedNodeIds, '所选节点')}
+                            >
+                                <Icons.Download size={14} /> 批量下载
+                            </button>
+                            <button
+                                type="button"
+                                disabled={selectedNodeIds.size < 2}
+                                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${selectedNodeIds.size < 2 ? 'cursor-not-allowed opacity-40' : (isDark ? 'hover:bg-[#4446CE]/25 hover:text-[#C7C8FF]' : 'hover:bg-[#F0F1FF] hover:text-[#3739B0]')}`}
+                                onClick={createNodeGroup}
+                            >
+                                <Icons.Folder size={14} /> 打组
+                            </button>
+                        </>
+                    )}
+                </div>
             )}
             
             {/* Top Left Project Name */}
