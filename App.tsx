@@ -4809,6 +4809,29 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
     }
   };
 
+  // A group drag can end outside the canvas element. Keep the drag state
+  // scoped to the actual pointer gesture so releasing over the viewport or
+  // another UI surface immediately returns the canvas to its normal mode.
+  useEffect(() => {
+    if (dragMode !== 'DRAG_GROUP') return;
+    const handleWindowMouseUp = () => {
+      if (activeDragGroupRef.current && initialGroupNodesRef.current.length > 0) {
+        recordCanvasHistory({
+          type: 'group-update',
+          label: '移动分组',
+          beforeNodes: initialGroupNodesRef.current,
+          beforeGroups: groups,
+        });
+      }
+      setDragMode('NONE');
+      setTempConnection(null);
+      activeDragGroupRef.current = null;
+      initialGroupNodesRef.current = [];
+    };
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    return () => window.removeEventListener('mouseup', handleWindowMouseUp);
+  }, [dragMode, groups, recordCanvasHistory]);
+
   const nodeHasMedia = (node: NodeData): boolean =>
       !!(node.imageSrc || node.videoSrc || node.audioSrc || (node.outputArtifacts && node.outputArtifacts.length > 0));
 
