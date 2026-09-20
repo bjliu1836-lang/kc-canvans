@@ -4637,7 +4637,18 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
         dragStartRef.current = { x: e.clientX, y: e.clientY };
         const isAlreadySelected = selectedNodeIds.has(id);
         let newSelection = new Set(selectedNodeIds);
-        if (e.shiftKey) { isAlreadySelected ? newSelection.delete(id) : newSelection.add(id); } else { if (!isAlreadySelected) { newSelection.clear(); newSelection.add(id); } }
+        if (e.shiftKey) {
+          isAlreadySelected ? newSelection.delete(id) : newSelection.add(id);
+        } else if (selectedGroupId) {
+          // A group drag selects all members so the group can be moved. Once
+          // the user clicks a child node, return to normal canvas semantics:
+          // focus that node instead of keeping the whole group selected.
+          newSelection.clear();
+          newSelection.add(id);
+        } else if (!isAlreadySelected) {
+          newSelection.clear();
+          newSelection.add(id);
+        }
       setSelectedNodeIds(newSelection);
       setSelectedGroupId(null);
       initialNodePositionsRef.current = nodes.map(n => ({ id: n.id, x: n.x, y: n.y }));
