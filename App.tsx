@@ -5848,7 +5848,8 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                         <React.Fragment key={group.id}>
                             <div
                                 className={`absolute rounded-2xl border transition-colors ${isSelected ? 'border-[#4446CE] bg-[#4446CE]/[0.08]' : (isDark ? 'border-zinc-700/80 bg-zinc-900/20' : 'border-[#C8CAFF] bg-[#EEF0FF]/45')}`}
-                                style={{ left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height, zIndex: 2, pointerEvents: 'none' }}
+                                style={{ left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height, zIndex: 2, pointerEvents: 'auto', cursor: 'grab' }}
+                                onMouseDown={(event) => handleGroupMouseDown(event, group.id)}
                             />
                             <div
                                 className={`absolute left-3 top-3 flex h-9 max-w-[calc(100%-24px)] items-center gap-2 rounded-lg border px-3 text-xs font-semibold shadow-sm ${isSelected ? 'border-[#4446CE]/45 bg-[#4446CE] text-white' : (isDark ? 'border-zinc-700 bg-zinc-900 text-zinc-200' : 'border-[#C8CAFF] bg-white text-[#3739B0]')}`}
