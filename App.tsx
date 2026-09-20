@@ -6160,13 +6160,13 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
             {dragMode === 'SELECT' && selectionBox && (
                 <div className="fixed border border-[#4446CE]/50 bg-[#4446CE]/10 pointer-events-none z-50" style={{ left: containerRef.current!.getBoundingClientRect().left + selectionBox.x, top: containerRef.current!.getBoundingClientRect().top + selectionBox.y, width: selectionBox.w, height: selectionBox.h }}/>
             )}
-            {!selectedGroup && selectionFrameStyle && selectedNodeIds.size > 0 && dragMode !== 'SELECT' && (
+            {!selectedGroup && selectionFrameStyle && selectedNodeIds.size > 1 && dragMode !== 'SELECT' && (
                 <div
                     className="fixed z-[70] pointer-events-none border-2 border-[#4446CE] rounded-md bg-[#4446CE]/[0.035]"
                     style={selectionFrameStyle}
                 />
             )}
-            {toolbarPosition && (selectedGroup || selectedNodeIds.size > 0) && dragMode !== 'SELECT' && (
+            {toolbarPosition && (selectedGroup || (!selectedGroup && selectedNodeIds.size > 1)) && dragMode !== 'SELECT' && (
                 <div
                     className={`fixed z-[120] flex items-center gap-1 rounded-xl border px-1.5 py-1 shadow-xl backdrop-blur-xl ${isDark ? 'border-zinc-700 bg-zinc-900/95 text-zinc-100' : 'border-gray-200 bg-white/95 text-gray-700'}`}
                     style={{ left: toolbarPosition.left, top: toolbarPosition.top, transform: 'translateX(-50%)' }}
