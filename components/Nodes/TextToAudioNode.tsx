@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { InputMedia, NodeData } from '../../types';
 import { Icons } from '../Icons';
 import { getVisibleModels, MODEL_REGISTRY } from '../../services/geminiService';
-import { LocalCustomDropdown, LocalEditableTitle, LocalInputThumbnails, LocalPromptTextarea } from './Shared/LocalNodeComponents';
+import { GenerationFailureNotice, LocalCustomDropdown, LocalEditableTitle, LocalInputThumbnails, LocalPromptTextarea, MockResultBadge } from './Shared/LocalNodeComponents';
 
 interface TextToAudioNodeProps {
   data: NodeData;
@@ -39,6 +39,9 @@ export const TextToAudioNode: React.FC<TextToAudioNodeProps> = ({
   const [audioModels, setAudioModels] = useState<string[]>([]);
   const isSelectedAndStable = selected && showControls && !isSelecting;
   const hasResult = Boolean(data.audioSrc) && !data.isLoading;
+  const hasGenerationError = Boolean(data.errorMessage || data.generationTask?.errorMessage || data.generationTask?.status === 'needs_check');
+  const generationErrorMessage = data.errorMessage || data.generationTask?.errorMessage || '提交未确认，未拿到任务编号，请核对后再生成';
+  const generationErrorDetail = data.generationTask?.errorDetail || data.errorMessage;
   const prompt = data.prompt || '';
   const charCount = prompt.length;
   const versionPanelRef = useRef<HTMLDivElement>(null);
@@ -100,6 +103,7 @@ export const TextToAudioNode: React.FC<TextToAudioNodeProps> = ({
       <div className={`relative h-full w-full overflow-hidden rounded-xl border-[3px] ${nodeBorder} ${isDark ? 'bg-[#222]' : 'bg-white'} shadow-xl transition-colors`}>
         {hasResult ? (
           <div className="flex h-full flex-col justify-center gap-5 px-6">
+            {data.resultSource === 'mock' && <MockResultBadge isDark={isDark} className="left-4 top-4" />}
             <div className="flex min-w-0 items-center gap-3">
               <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl ${isDark ? 'bg-[#4446CE]/20 text-[#C7C8FF]' : 'bg-[#F0F1FF] text-[#4446CE]'}`}>
                 <Icons.Volume2 size={23} />
@@ -129,16 +133,32 @@ export const TextToAudioNode: React.FC<TextToAudioNodeProps> = ({
           </div>
         ) : (
           <div className={`flex h-full flex-col justify-center px-10 ${mutedText}`}>
-            <div className={`absolute left-1/2 top-1/2 h-14 w-14 -translate-x-1/2 -translate-y-1/2 rounded-2xl flex items-center justify-center ${isDark ? 'bg-zinc-800/50 text-zinc-500' : 'bg-gray-100 text-gray-400'}`}>
-              <Icons.Music size={26} className="opacity-60" />
-            </div>
-            <div className="relative z-10 mt-24 text-sm">
-              <div className="mb-3">尝试:</div>
-              <div className={`inline-flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-800'}`}>
-                <Icons.Volume2 size={15} />
-                <span>音频生成</span>
+            {hasGenerationError ? (
+              <div className="flex flex-col items-center justify-center text-center">
+                <div className={`flex h-14 w-14 items-center justify-center rounded-2xl ${isDark ? 'bg-red-500/10 text-red-300' : 'bg-red-50 text-red-600'}`}>
+                  <Icons.AlertTriangle size={26} />
+                </div>
+                <span className={`mt-3 text-sm font-semibold ${isDark ? 'text-red-200' : 'text-red-600'}`}>生成失败</span>
+                <GenerationFailureNotice
+                  message={generationErrorMessage}
+                  detail={generationErrorDetail}
+                  isDark={isDark}
+                />
               </div>
-            </div>
+            ) : (
+              <>
+                <div className={`absolute left-1/2 top-1/2 h-14 w-14 -translate-x-1/2 -translate-y-1/2 rounded-2xl flex items-center justify-center ${isDark ? 'bg-zinc-800/50 text-zinc-500' : 'bg-gray-100 text-gray-400'}`}>
+                  <Icons.Music size={26} className="opacity-60" />
+                </div>
+                <div className="relative z-10 mt-24 text-sm">
+                  <div className="mb-3">尝试:</div>
+                  <div className={`inline-flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-800'}`}>
+                    <Icons.Volume2 size={15} />
+                    <span>音频生成</span>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -184,7 +204,12 @@ export const TextToAudioNode: React.FC<TextToAudioNodeProps> = ({
                           className={`h-6 rounded-md px-2 text-[10px] font-semibold ${isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-200'}`}
                           onClick={(event) => {
                             event.stopPropagation();
-                            updateData(data.id, { audioSrc: src, isStackOpen: false });
+                            updateData(data.id, {
+                              audioSrc: src,
+                              resultSource: data.artifactSources?.[src] || 'unknown',
+                              generationTask: undefined,
+                              isStackOpen: false,
+                            });
                           }}
                         >
                           设为当前

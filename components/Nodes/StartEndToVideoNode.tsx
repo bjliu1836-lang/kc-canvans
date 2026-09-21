@@ -5,7 +5,7 @@ import { Icons } from '../Icons';
 import { getModelConfig, MODEL_REGISTRY, getVisibleModels } from '../../services/geminiService';
 import { VIDEO_HANDLERS } from '../../services/mode/video/configurations';
 import { getVideoConstraints, getAutoCorrectedVideoSettings } from '../../services/mode/video/rules';
-import { LocalEditableTitle, LocalCustomDropdown, LocalMediaStack, LocalPromptTextarea } from './Shared/LocalNodeComponents';
+import { GenerationFailureNotice, LocalEditableTitle, LocalCustomDropdown, LocalMediaStack, LocalPromptTextarea } from './Shared/LocalNodeComponents';
 
 interface StartEndToVideoNodeProps {
   data: NodeData;
@@ -18,6 +18,7 @@ interface StartEndToVideoNodeProps {
   onPreviewReference?: (item: InputMedia) => void;
   onMaximize?: (id: string) => void;
   onPreviewMedia?: (url: string, type: 'image' | 'video') => void;
+  onSetVideoVersion?: (nodeId: string, src: string) => void;
   onUseVideoVersion?: (nodeId: string, src: string) => void;
   onDownload?: (id: string) => void;
   onUpload?: (id: string) => void;
@@ -31,7 +32,7 @@ interface StartEndToVideoNodeProps {
 }
 
 export const StartEndToVideoNode: React.FC<StartEndToVideoNodeProps> = ({
-    data, updateData, onGenerate, selected, showControls, inputs = [], inputMedia = [], onPreviewReference, onMaximize, onPreviewMedia, onUseVideoVersion, onDownload, onUpload, onSaveResult, onToggleFavoriteArtifact, isArtifactFavorited, onAddToAssetLibrary, isDark = true, isSelecting, canvasScale = 1
+    data, updateData, onGenerate, selected, showControls, inputs = [], inputMedia = [], onPreviewReference, onMaximize, onPreviewMedia, onSetVideoVersion, onUseVideoVersion, onDownload, onUpload, onSaveResult, onToggleFavoriteArtifact, isArtifactFavorited, onAddToAssetLibrary, isDark = true, isSelecting, canvasScale = 1
 }) => {
     const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
     const [progress, setProgress] = useState(0);
@@ -171,6 +172,9 @@ export const StartEndToVideoNode: React.FC<StartEndToVideoNodeProps> = ({
     const emptyStateTextColor = isDark ? 'text-zinc-500' : 'text-gray-400';
     const warningColor = isDark ? 'text-amber-400' : 'text-amber-600';
     const hasResult = !!data.videoSrc && !data.isLoading;
+    const hasGenerationError = Boolean(data.errorMessage || data.generationTask?.errorMessage || data.generationTask?.status === 'needs_check');
+    const generationErrorMessage = data.errorMessage || data.generationTask?.errorMessage || '提交未确认，未拿到任务编号，请核对后再生成';
+    const generationErrorDetail = data.generationTask?.errorDetail || data.errorMessage;
 
     // Custom input thumbnails for start/end frames
     const renderFrameThumbnails = () => {
@@ -244,6 +248,7 @@ export const StartEndToVideoNode: React.FC<StartEndToVideoNodeProps> = ({
                          onToggleFavorite={(src, type) => onToggleFavoriteArtifact?.(data.id, src, type)}
                          isFavorite={(src) => isArtifactFavorited?.(data.id, src) || false}
                          onPreviewMedia={onPreviewMedia}
+                         onSetVideoVersion={onSetVideoVersion}
                          onUseVideoVersion={onUseVideoVersion}
                      />
                      
@@ -287,6 +292,12 @@ export const StartEndToVideoNode: React.FC<StartEndToVideoNodeProps> = ({
                             <Icons.AlertCircle size={12} />
                             需要连接首帧和尾帧图片
                         </span>
+                    ) : hasGenerationError ? (
+                        <GenerationFailureNotice
+                            message={generationErrorMessage}
+                            detail={generationErrorDetail}
+                            isDark={isDark}
+                        />
                     ) : (
                         <span className="text-xs opacity-40 mt-1">选中节点开始创作</span>
                     )}

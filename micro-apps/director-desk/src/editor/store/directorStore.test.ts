@@ -973,6 +973,37 @@ it("appends camera captures with sequential camera-shot names", () => {
   expect(camera.lastCaptureUrl).toBe("data:image/png;base64,c");
 });
 
+it("keeps capture-time camera metadata with the screenshot", () => {
+  useDirectorStore.setState(createInitialDirectorState());
+
+  useDirectorStore.getState().addCameraCaptures("cam_1", [{
+    dataUrl: "data:image/png;base64,with-meta",
+    metadata: {
+      metadataVersion: 1,
+      mode: "camera",
+      cameraId: "cam_1",
+      fov: 38,
+      position: [3, 2, 8],
+      target: [0, 1, 0],
+      aspectRatio: "16:9",
+      viewDirection: [-0.3, -0.1, -0.95],
+      targetMode: "manual",
+    },
+  }]);
+
+  expect(useDirectorStore.getState().project.cameras[0]?.captures?.[0]).toMatchObject({
+    dataUrl: "data:image/png;base64,with-meta",
+    metadata: {
+      metadataVersion: 1,
+      fov: 38,
+      position: [3, 2, 8],
+      target: [0, 1, 0],
+      aspectRatio: "16:9",
+      viewDirection: [-0.3, -0.1, -0.95],
+    },
+  });
+});
+
 it("auto-persists the latest director scene snapshot after scene changes", () => {
   useDirectorStore.getState().setViewportAspectRatio("16:9");
   useDirectorStore.getState().setViewportRotateSensitivity(0.75);

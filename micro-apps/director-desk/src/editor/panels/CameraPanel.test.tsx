@@ -5,6 +5,7 @@ import { clearViewportCaptureHandler, setViewportCaptureHandler } from "../io/ca
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
 import { CameraPanel } from "./CameraPanel";
 import { getDirectorObjectFocusTarget } from "../schema/cameraTarget";
+import { clearDirectorDeskHostBridge, initDirectorDeskHostBridge } from "../io/hostBridge";
 
 function seedCameraCapture() {
   useDirectorStore.setState((state) => ({
@@ -91,6 +92,7 @@ beforeEach(() => {
 
 afterEach(() => {
   clearViewportCaptureHandler();
+  clearDirectorDeskHostBridge();
   vi.restoreAllMocks();
 });
 
@@ -379,6 +381,15 @@ it("captures the current camera preview from the properties tab and shows it in 
       index: 1,
       name: "机位01-截图01",
       dataUrl: "data:image/png;base64,camera-preview",
+      metadata: {
+        metadataVersion: 1,
+        mode: "camera",
+        cameraId: "cam_1",
+        cameraName: "机位01",
+        fov: 50,
+        position: [0, 2.2, 9],
+        target: [0, 1.2, 0],
+      },
     },
   ]);
   expect(await screen.findByAltText("机位01-截图01 缩略图")).toBeInTheDocument();
@@ -434,6 +445,81 @@ it("sends a single camera capture to the host canvas when the thumbnail action i
             fileName: "机位01-截图01.png",
           },
         ],
+      },
+    },
+    window.location.origin
+  );
+});
+
+it("sends the capture-time camera snapshot and an editable shot prompt", async () => {
+  const user = userEvent.setup();
+  const postMessage = vi.spyOn(window.parent, "postMessage").mockImplementation(() => undefined);
+  initDirectorDeskHostBridge();
+  window.dispatchEvent(new MessageEvent("message", {
+    data: {
+      type: "storyai:director-desk-session",
+      payload: { instanceId: "director-instance-a" },
+    },
+    origin: window.location.origin,
+  }));
+  useDirectorStore.setState((state) => ({
+    ...state,
+    project: {
+      ...state.project,
+      cameras: state.project.cameras.map((camera) => camera.id === "cam_1"
+        ? {
+            ...camera,
+            captures: [{
+              id: "cam_1-capture-01",
+              index: 1,
+              name: "机位01-截图01",
+              dataUrl: "data:image/png;base64,camera-preview",
+              metadata: {
+                metadataVersion: 1,
+                mode: "camera",
+                cameraId: "cam_1",
+                cameraName: "机位01",
+                fov: 50,
+                position: [0, 2.2, 9],
+                target: [0, 1.2, 0],
+                aspectRatio: "16:9",
+                viewDirection: [0, -0.1104, -0.9939],
+              },
+            }],
+          }
+        : camera),
+    },
+  }));
+
+  // The stored snapshot must remain stable even if the live camera changes later.
+  const currentCamera = useDirectorStore.getState().project.cameras[0]!;
+  useDirectorStore.getState().updateCamera("cam_1", {
+    fov: 90,
+    transform: {
+      ...currentCamera.transform,
+      position: [8, 4, 3],
+    },
+  });
+
+  render(<CameraPanel />);
+  await user.click(screen.getByRole("button", { name: "发送到画布 机位01-截图01" }));
+
+  expect(postMessage).toHaveBeenCalledWith(
+    {
+      type: "storyai:director-desk-captures-sent",
+      payload: {
+        instanceId: "director-instance-a",
+        captures: [{
+          dataUrl: "data:image/png;base64,camera-preview",
+          fileName: "机位01-截图01.png",
+          metadata: expect.objectContaining({
+            metadataVersion: 1,
+            fov: 50,
+            position: [0, 2.2, 9],
+            aspectRatio: "16:9",
+          }),
+          prompt: "3D导演台镜头参考，画幅 16:9，视野角 FOV 50°，相机朝向：水平 180°，俯仰 -6.3°，保持当前构图与主体关系。",
+        }],
       },
     },
     window.location.origin

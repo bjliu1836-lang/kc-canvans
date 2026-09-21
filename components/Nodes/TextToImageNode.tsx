@@ -4,7 +4,7 @@ import { ImageVersionSnapshot, InputMedia, MultiAngleOptions, NodeData } from '.
 import { Icons } from '../Icons';
 import { getModelConfig, MODEL_REGISTRY, getVisibleModels } from '../../services/geminiService';
 import { IMAGE_HANDLERS } from '../../services/mode/image/configurations';
-import { LocalEditableTitle, LocalCustomDropdown, LocalInputThumbnails, LocalMediaStack, LocalPromptTextarea } from './Shared/LocalNodeComponents';
+import { GenerationFailureNotice, LocalEditableTitle, LocalCustomDropdown, LocalInputThumbnails, LocalMediaStack, LocalPromptTextarea } from './Shared/LocalNodeComponents';
 
 interface TextToImageNodeProps {
   data: NodeData;
@@ -363,8 +363,12 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                              <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${isDark ? 'bg-red-500/10 text-red-300' : 'bg-red-50 text-red-600'}`}>
                                  <Icons.AlertTriangle size={28} />
                              </div>
-                             <span className={`text-sm font-semibold ${isDark ? 'text-red-200' : 'text-red-600'}`}>生成失败</span>
-                             <span className="max-w-[78%] text-center text-xs opacity-60 mt-2 line-clamp-2">{data.errorMessage}</span>
+                              <span className={`text-sm font-semibold ${isDark ? 'text-red-200' : 'text-red-600'}`}>生成失败</span>
+                              <GenerationFailureNotice
+                                  message={data.errorMessage || data.generationTask?.errorMessage}
+                                  detail={data.generationTask?.errorDetail || data.errorMessage}
+                                  isDark={isDark}
+                              />
                          </>
                      ) : (
                          <>

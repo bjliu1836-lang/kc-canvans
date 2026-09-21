@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { InputMedia, NodeData } from '../../types';
 import { Icons } from '../Icons';
-import { LocalEditableTitle, LocalInputThumbnails, LocalMediaStack } from './Shared/LocalNodeComponents';
+import { GenerationFailureNotice, LocalEditableTitle, LocalInputThumbnails, LocalMediaStack } from './Shared/LocalNodeComponents';
 import { VideoGenerationControls } from './Shared/VideoGenerationControls';
 import { inferVideoMode, resolveVideoMode } from '../../services/mode/video/capabilities';
 
@@ -18,6 +18,7 @@ interface TextToVideoNodeProps {
   onPreviewReference?: (item: InputMedia) => void;
   onMaximize?: (id: string) => void;
   onPreviewMedia?: (url: string, type: 'image' | 'video') => void;
+  onSetVideoVersion?: (nodeId: string, src: string) => void;
   onUseVideoVersion?: (nodeId: string, src: string) => void;
   onDownload?: (id: string) => void;
   onUpload?: (id: string) => void;
@@ -37,7 +38,7 @@ interface TextToVideoNodeProps {
 }
 
 export const TextToVideoNode: React.FC<TextToVideoNodeProps> = ({
-    data, updateData, onGenerate, selected, showControls, inputs = [], inputMedia = [], onPreviewReference, onMaximize, onPreviewMedia, onUseVideoVersion, onDownload, onUpload, onSaveResult, onExtractFrames, onExtractSingleFrame, onEditVideo, onRemoveSubtitles, onEnhanceVideo, onRemoveBGM, onToggleFavoriteArtifact, isArtifactFavorited, onAddToAssetLibrary, isDark = true, isSelecting, canvasScale = 1
+    data, updateData, onGenerate, selected, showControls, inputs = [], inputMedia = [], onPreviewReference, onMaximize, onPreviewMedia, onSetVideoVersion, onUseVideoVersion, onDownload, onUpload, onSaveResult, onExtractFrames, onExtractSingleFrame, onEditVideo, onRemoveSubtitles, onEnhanceVideo, onRemoveBGM, onToggleFavoriteArtifact, isArtifactFavorited, onAddToAssetLibrary, isDark = true, isSelecting, canvasScale = 1
 }) => {
     const [deferredInputs, setDeferredInputs] = useState(false);
     const [progress, setProgress] = useState(0);
@@ -77,6 +78,9 @@ export const TextToVideoNode: React.FC<TextToVideoNodeProps> = ({
         ? `第${data.episodeNo || '-'}集 / 第${data.sceneNo || '-'}场 / 分镜${String(data.shotNo || '-').padStart(2, '0')}`
         : '';
     const hasAuditError = Boolean(data.auditFailureReason || data.auditErrorDetail);
+    const hasGenerationError = Boolean(data.errorMessage || data.generationTask?.errorMessage || data.generationTask?.status === 'needs_check');
+    const generationErrorMessage = data.errorMessage || data.generationTask?.errorMessage || '提交未确认，未拿到任务编号，请核对后再生成';
+    const generationErrorDetail = data.generationTask?.errorDetail || data.errorMessage;
 
     const toggleAuditDetail = (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -133,6 +137,7 @@ export const TextToVideoNode: React.FC<TextToVideoNodeProps> = ({
                          onToggleFavorite={(src, type) => onToggleFavoriteArtifact?.(data.id, src, type)}
                          isFavorite={(src) => isArtifactFavorited?.(data.id, src) || false}
                          onPreviewMedia={onPreviewMedia}
+                         onSetVideoVersion={onSetVideoVersion}
                          onUseVideoVersion={onUseVideoVersion}
                      />
                      
@@ -216,6 +221,12 @@ export const TextToVideoNode: React.FC<TextToVideoNodeProps> = ({
                                 document.body,
                             )}
                         </>
+                    ) : hasGenerationError ? (
+                        <GenerationFailureNotice
+                            message={generationErrorMessage}
+                            detail={generationErrorDetail}
+                            isDark={isDark}
+                        />
                     ) : (
                         <span className="text-xs opacity-45 mt-1 px-8 text-center line-clamp-2">
                             {hasShotContext ? data.shotDescription : '选中节点开始创作'}

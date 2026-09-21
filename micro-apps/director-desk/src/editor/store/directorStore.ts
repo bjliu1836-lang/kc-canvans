@@ -7,6 +7,7 @@ import type {
   CharacterBodyType,
   DirectorAssetKind,
   DirectorCameraCapture,
+  DirectorCameraCaptureMetadata,
   DirectorAnimationAssetRef,
   DirectorAnimationClipRef,
   DirectorCameraMotionKeyframe,
@@ -96,6 +97,11 @@ export interface CameraShotSnapshot {
   fov: number;
   position: [number, number, number];
   target: [number, number, number];
+}
+
+export interface CameraCaptureInput {
+  dataUrl: string;
+  metadata?: DirectorCameraCaptureMetadata;
 }
 
 export interface CrowdCharactersInput {
@@ -222,7 +228,10 @@ export interface DirectorActions {
   updatePoseControl: (id: string, key: string, value: number) => void;
   updateCrowdPoseControl: (crowdId: string, key: string, value: number) => void;
   setActiveCamera: (cameraId: string) => void;
-  addCameraCaptures: (cameraId: string | null | undefined, dataUrls: string[]) => void;
+  addCameraCaptures: (
+    cameraId: string | null | undefined,
+    captures: Array<string | CameraCaptureInput>
+  ) => void;
   updateCamera: (
     cameraId: string,
     patch: Partial<DirectorCameraShot> & {
@@ -854,17 +863,31 @@ function formatCameraCaptureName(cameraName: string, captureIndex: number) {
   return `${cameraName}-截图${String(captureIndex).padStart(2, "0")}`;
 }
 
-function buildCameraCaptures(camera: DirectorCameraShot, dataUrls: string[]) {
+function cloneCameraCaptureMetadata(metadata: DirectorCameraCaptureMetadata) {
+  return {
+    ...metadata,
+    position: [...metadata.position] as [number, number, number],
+    target: [...metadata.target] as [number, number, number],
+    ...(metadata.viewDirection
+      ? { viewDirection: [...metadata.viewDirection] as [number, number, number] }
+      : {}),
+  };
+}
+
+function buildCameraCaptures(camera: DirectorCameraShot, captures: Array<string | CameraCaptureInput>) {
   const existingCaptures = camera.captures ?? [];
 
-  return dataUrls.map((dataUrl, indexOffset): DirectorCameraCapture => {
+  return captures.map((capture, indexOffset): DirectorCameraCapture => {
     const captureIndex = existingCaptures.length + indexOffset + 1;
+    const dataUrl = typeof capture === "string" ? capture : capture.dataUrl;
+    const metadata = typeof capture === "string" ? undefined : capture.metadata;
 
     return {
       id: `${camera.id}-capture-${String(captureIndex).padStart(2, "0")}`,
       index: captureIndex,
       name: formatCameraCaptureName(camera.name, captureIndex),
       dataUrl,
+      ...(metadata ? { metadata: cloneCameraCaptureMetadata(metadata) } : {}),
     };
   });
 }
@@ -2664,9 +2687,9 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
           cameraMotionPlaying: false,
         };
       }),
-    addCameraCaptures: (cameraId, dataUrls) =>
+    addCameraCaptures: (cameraId, captureInputs) =>
       commitMutation((state) => {
-        if (dataUrls.length === 0) return state;
+        if (captureInputs.length === 0) return state;
 
         const targetCameraId = cameraId ?? state.project.activeCameraId ?? state.project.cameras[0]?.id ?? null;
         if (!targetCameraId) return state;
@@ -2676,7 +2699,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
           if (camera.id !== targetCameraId) return camera;
 
           updated = true;
-          const nextCaptures = buildCameraCaptures(camera, dataUrls);
+          const nextCaptures = buildCameraCaptures(camera, captureInputs);
 
           return {
             ...camera,

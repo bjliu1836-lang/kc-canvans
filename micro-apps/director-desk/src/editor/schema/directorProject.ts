@@ -153,6 +153,24 @@ export interface DirectorCameraCapture {
   index: number;
   name: string;
   dataUrl: string;
+  /** Camera values captured at the same render moment as dataUrl. */
+  metadata?: DirectorCameraCaptureMetadata;
+}
+
+/** Versioned, bounded camera data that can travel with a returned screenshot. */
+export interface DirectorCameraCaptureMetadata {
+  metadataVersion?: 1;
+  mode: "director" | "camera";
+  cameraId: string | null;
+  cameraName?: string;
+  fov: number;
+  position: [number, number, number];
+  target: [number, number, number];
+  aspectRatio?: string;
+  /** Actual render direction, useful when target tracking resolves at runtime. */
+  viewDirection?: [number, number, number];
+  targetMode?: "manual" | "object";
+  targetObjectId?: string | null;
 }
 
 export type CameraMotionInterpolation = "linear" | "smooth";

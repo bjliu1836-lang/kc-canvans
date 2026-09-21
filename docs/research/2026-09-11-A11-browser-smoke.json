@@ -1,0 +1,33 @@
+{
+  "baseUrl": "http://127.0.0.1:3000/",
+  "checks": [
+    "authenticated project dashboard opened",
+    "created and opened 3D director desk node",
+    "changed camera controls FOV 50->73, X 0->2.5",
+    "captured 机位01-截图01 with metadata FOV=73, rendered position=[1.906192,1.559183,5.499171] from rig X=2.5",
+    "sent capture to canvas; persisted image node prompt=3D导演台镜头参考，视野角 FOV 73°，相机朝向：水平 -160.9°，俯仰 -5°，保持当前构图与主体关系。",
+    "image node prompt remains editable and persisted: 3D导演台镜头参考，视野角 FOV 73°，相机朝向：水平 -160.9°，俯仰 -5°，保持当前构图与主体关系。 浏览器编辑备注",
+    "stale instanceId message ignored by host",
+    "wrong source message ignored by host",
+    "legacy capture message without instanceId/metadata remains compatible",
+    "metadata survives JSON serialization and parse"
+  ],
+  "errors": [],
+  "instanceId": "director-desk-1789135935423",
+  "hostOrigin": "http://127.0.0.1:3000",
+  "imageNodeTitle": "机位01-截图01",
+  "prompt": "3D导演台镜头参考，视野角 FOV 73°，相机朝向：水平 -160.9°，俯仰 -5°，保持当前构图与主体关系。 浏览器编辑备注",
+  "metadata": {
+    "metadataVersion": 1,
+    "mode": "camera",
+    "cameraId": "cam_1",
+    "fov": 73,
+    "position": [1.906192, 1.559183, 5.499171],
+    "target": [0, 1.05, 0],
+    "cameraName": "机位01",
+    "aspectRatio": "auto",
+    "viewDirection": [-0.3262682782188888, -0.08715295243518406, -0.9412509620233662],
+    "targetMode": "manual",
+    "targetObjectId": null
+  }
+}

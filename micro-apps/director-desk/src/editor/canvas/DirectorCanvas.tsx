@@ -434,8 +434,11 @@ function CanvasCaptureBridge({
   activeCamera:
     | {
         id: string;
+        name: string;
         fov: number;
         target: [number, number, number];
+        targetMode: "manual" | "object";
+        targetObjectId?: string | null;
       }
     | undefined;
   bottomPadding: number;
@@ -473,6 +476,8 @@ function CanvasCaptureBridge({
         withViewportCaptureHelpersHidden(scene, () => {
           gl.render(scene, workingCamera);
         });
+        workingCamera.updateMatrixWorld();
+        const viewDirection = workingCamera.getWorldDirection(new Vector3());
         return {
           label,
           dataUrl: captureViewportCanvas(gl.domElement, viewportAspectRatio, bottomPadding, safeAreaInsets, {
@@ -480,11 +485,17 @@ function CanvasCaptureBridge({
             labels: getViewportCaptureLabels(),
           }),
           meta: buildScreenshotMeta({
+            metadataVersion: 1,
             mode: viewMode,
             cameraId: cameraId ?? (viewMode === "camera" ? activeCamera?.id ?? null : null),
+            cameraName: viewMode === "camera" ? activeCamera?.name : undefined,
             fov: workingCamera.fov,
             position: [workingCamera.position.x, workingCamera.position.y, workingCamera.position.z],
             target: [target.x, target.y, target.z],
+            aspectRatio: viewportAspectRatio,
+            viewDirection: [viewDirection.x, viewDirection.y, viewDirection.z],
+            targetMode: viewMode === "camera" ? activeCamera?.targetMode : undefined,
+            targetObjectId: viewMode === "camera" ? activeCamera?.targetObjectId ?? null : undefined,
           }),
         };
       };

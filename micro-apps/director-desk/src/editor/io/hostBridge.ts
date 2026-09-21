@@ -12,6 +12,7 @@ import { requestCleanFrameExport } from "./cleanFrameExport";
 import { requestReferenceVideoExport } from "./referenceVideoExport";
 import { getDirectorProjectFingerprint } from "./projectDocument";
 import { listDirectorPluginResults, submitDirectorPluginResult } from "./pluginResultRegistry";
+import type { DirectorCameraCaptureMetadata } from "../schema/directorProject";
 
 interface HostPanoramaPayload {
   edgeId?: unknown;
@@ -28,14 +29,20 @@ interface HostSessionPayload {
 export interface HostCaptureItemPayload {
   dataUrl?: unknown;
   fileName?: unknown;
+  metadata?: unknown;
+  /** Legacy alias accepted for captures produced by an older bridge. */
+  meta?: unknown;
+  prompt?: unknown;
 }
 
 export interface HostCaptureBatchPayload {
+  instanceId?: unknown;
   captures?: HostCaptureItemPayload[];
 }
 
 let initialized = false;
 let activeExtensionExportRequestId: string | null = null;
+let activeHostInstanceId: string | null = null;
 export const DIRECTOR_DESK_SESSION_OPENED_EVENT = "storyai:director-desk-session-opened";
 
 function normalizeString(value: unknown) {
@@ -121,6 +128,7 @@ function importHostPanorama(payload: HostPanoramaPayload) {
 function openHostSession(payload: HostSessionPayload) {
   const instanceId = normalizeString(payload.instanceId);
   const theme = normalizeTheme(payload.theme);
+  activeHostInstanceId = instanceId || null;
   if (theme) {
     applyDirectorDeskTheme(theme);
   }
@@ -251,6 +259,8 @@ export function postDirectorDeskCapturesToHost(
   captures: Array<{
     dataUrl: string;
     fileName?: string;
+    metadata?: DirectorCameraCaptureMetadata;
+    prompt?: string;
   }>
 ) {
   const normalizedCaptures = captures
@@ -260,12 +270,21 @@ export function postDirectorDeskCapturesToHost(
         return null;
       }
 
+      const metadata = capture.metadata;
+      const prompt = normalizeString(capture.prompt);
       return {
         dataUrl,
         fileName: normalizeString(capture.fileName) || `director-desk-capture-${index + 1}.png`,
+        ...(metadata ? { metadata } : {}),
+        ...(prompt ? { prompt } : {}),
       };
     })
-    .filter((capture): capture is { dataUrl: string; fileName: string } => Boolean(capture));
+    .filter((capture): capture is {
+      dataUrl: string;
+      fileName: string;
+      metadata?: DirectorCameraCaptureMetadata;
+      prompt?: string;
+    } => Boolean(capture));
 
   if (normalizedCaptures.length === 0) {
     return;
@@ -275,6 +294,7 @@ export function postDirectorDeskCapturesToHost(
     {
       type: "storyai:director-desk-captures-sent",
       payload: {
+        ...(activeHostInstanceId ? { instanceId: activeHostInstanceId } : {}),
         captures: normalizedCaptures,
       },
     },
@@ -319,5 +339,6 @@ export function clearDirectorDeskHostBridge() {
 
   initialized = false;
   activeExtensionExportRequestId = null;
+  activeHostInstanceId = null;
   window.removeEventListener("message", handleHostMessage);
 }

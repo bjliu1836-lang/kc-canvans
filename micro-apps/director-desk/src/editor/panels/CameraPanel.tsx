@@ -9,7 +9,7 @@ import {
   InspectorTextField,
 } from "./InspectorControls";
 import { requestViewportCapture } from "../io/captureBridge";
-import { downloadDataUrl } from "../io/screenshotExport";
+import { buildCameraShotPrompt, downloadDataUrl } from "../io/screenshotExport";
 import { postDirectorDeskCapturesToHost } from "../io/hostBridge";
 import { getDirectorObjectFocusTarget, isCameraFocusableObject } from "../schema/cameraTarget";
 import type { DirectorCameraCapture } from "../schema/directorProject";
@@ -165,25 +165,29 @@ export function CameraPanel() {
     setViewerScale((currentScale) => clampViewerScale(Number(updater(currentScale).toFixed(2))));
   }, [clampViewerScale]);
 
+  const getHostCapturePayload = useCallback((capture: DirectorCameraCapture, cameraName?: string) => ({
+    dataUrl: capture.dataUrl,
+    fileName: `${capture.name}.png`,
+    ...(capture.metadata
+      ? {
+          metadata: capture.metadata,
+          prompt: buildCameraShotPrompt({ ...capture.metadata, cameraName: cameraName ?? capture.metadata.cameraName }),
+        }
+      : {}),
+  }), []);
+
   const sendCaptureToCanvas = useCallback((capture: DirectorCameraCapture) => {
-    postDirectorDeskCapturesToHost([
-      {
-        dataUrl: capture.dataUrl,
-        fileName: `${capture.name}.png`,
-      },
-    ]);
-  }, []);
+    const captureCamera = cameras.find((item) => (item.captures ?? []).some((itemCapture) => itemCapture.id === capture.id));
+    postDirectorDeskCapturesToHost([getHostCapturePayload(capture, captureCamera?.name)]);
+  }, [cameras, getHostCapturePayload]);
 
   const sendAllCapturesToCanvas = useCallback(() => {
     postDirectorDeskCapturesToHost(
       cameraCaptureGroups.flatMap((group) =>
-        group.captures.map((capture) => ({
-          dataUrl: capture.dataUrl,
-          fileName: `${capture.name}.png`,
-        }))
+        group.captures.map((capture) => getHostCapturePayload(capture, group.camera.name))
       )
     );
-  }, [cameraCaptureGroups]);
+  }, [cameraCaptureGroups, getHostCapturePayload]);
 
   async function handleCameraCapture() {
     try {
@@ -195,7 +199,14 @@ export function CameraPanel() {
       });
       const preview = results[0];
       if (preview) {
-        addCameraCaptures(currentCamera.id, [preview.dataUrl]);
+        addCameraCaptures(currentCamera.id, [{
+          dataUrl: preview.dataUrl,
+          metadata: {
+            ...preview.meta,
+            metadataVersion: 1,
+            cameraName: preview.meta.cameraName ?? currentCamera.name,
+          },
+        }]);
       }
     } catch (error) {
       setCaptureError(error instanceof Error ? error.message : "机位截图失败");

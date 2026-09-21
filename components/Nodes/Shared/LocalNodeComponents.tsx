@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { Icons } from '../../Icons';
 import { ImageVersionSnapshot, InputMedia, NodeData, NodeType } from '../../../types';
+import { getErrorDetail } from '../../../services/errorUtils';
 
 // --- Local Components (Extracted) ---
 
@@ -407,7 +408,66 @@ export const safeDownload = async (src: string) => {
       document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(url);
     } catch (e) {
       const link = document.createElement('a'); link.href = src; link.download = `download_${Date.now()}`; link.target = "_blank"; document.body.appendChild(link); link.click(); document.body.removeChild(link);
+  }
+};
+
+const copyTextToClipboard = async (text: string) => {
+    if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
     }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+};
+
+export const MockResultBadge: React.FC<{ isDark?: boolean; className?: string }> = ({ isDark = true, className = '' }) => (
+    <span className={`pointer-events-none absolute left-3 top-3 z-[95] inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold shadow-lg backdrop-blur-md ${isDark ? 'border-amber-300/25 bg-amber-500/20 text-amber-100' : 'border-amber-300 bg-amber-50 text-amber-700'} ${className}`}>
+        模拟结果
+    </span>
+);
+
+export const GenerationFailureNotice: React.FC<{
+    message?: string;
+    detail?: string;
+    isDark?: boolean;
+}> = ({ message = '生成失败，请查看原始报错', detail, isDark = true }) => {
+    const [copied, setCopied] = useState(false);
+
+    const handleCopy = async (event: React.MouseEvent) => {
+        event.stopPropagation();
+        if (!detail) return;
+        try {
+            await copyTextToClipboard(getErrorDetail(detail));
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1400);
+        } catch (error) {
+            console.error('Failed to copy generation error', error);
+        }
+    };
+
+    return (
+        <div className="mt-2 flex max-w-[82%] flex-col items-center gap-1.5 text-center">
+            <span className={`line-clamp-2 text-xs leading-5 ${isDark ? 'text-red-200/80' : 'text-red-600/80'}`}>{message}</span>
+            {detail && (
+                <button
+                    type="button"
+                    className={`inline-flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-[10px] font-semibold transition-colors ${isDark ? 'border-zinc-700 bg-zinc-900/70 text-zinc-300 hover:border-zinc-500 hover:bg-zinc-800 hover:text-white' : 'border-gray-200 bg-white/80 text-gray-600 hover:bg-gray-100 hover:text-gray-900'}`}
+                    aria-label="复制错误详情"
+                    onClick={handleCopy}
+                >
+                    <Icons.Copy size={12} />
+                    {copied ? '已复制' : '复制错误详情'}
+                </button>
+            )}
+        </div>
+    );
 };
 
 export const LocalMediaStack: React.FC<{
@@ -421,10 +481,11 @@ export const LocalMediaStack: React.FC<{
     isFavorite?: (src: string) => boolean,
     onPreviewMedia?: (src: string, type: 'image' | 'video') => void,
     onSetImageVersion?: (nodeId: string, version: ImageVersionSnapshot) => void,
+    onSetVideoVersion?: (nodeId: string, src: string) => void,
     onUseImageVersion?: (nodeId: string, version: ImageVersionSnapshot) => void,
     onUseVideoVersion?: (nodeId: string, src: string) => void,
 }> = ({
-    data, updateData, currentSrc, isDark = true, selected, onPreviewMedia, onSetImageVersion, onUseImageVersion, onUseVideoVersion
+    data, updateData, currentSrc, isDark = true, selected, onPreviewMedia, onSetImageVersion, onSetVideoVersion, onUseImageVersion, onUseVideoVersion
 }) => {
     const stackRef = useRef<HTMLDivElement>(null);
     const [hoveredBatchKey, setHoveredBatchKey] = useState<string | null>(null);
@@ -518,6 +579,7 @@ export const LocalMediaStack: React.FC<{
                         draggable={false}
                     />
                 )}
+                {data.resultSource === 'mock' && <MockResultBadge isDark={isDark} />}
                 {imageShowBadge && (
                     <button
                         type="button"
@@ -608,17 +670,31 @@ export const LocalMediaStack: React.FC<{
                                             <span className="absolute left-3 top-3 z-20 rounded-full border border-white/15 bg-black/55 px-2.5 py-1 text-[11px] font-bold text-white backdrop-blur-md">
                                                 V{versionNumber}
                                             </span>
-                                            <button
-                                                type="button"
-                                                className="absolute right-3 bottom-3 z-30 h-8 rounded-lg bg-[#4446CE] px-3 text-[11px] font-semibold text-white shadow-lg hover:bg-[#5557DB]"
-                                                onClick={(event) => {
-                                                    event.stopPropagation();
-                                                    onUseImageVersion?.(data.id, withNaturalRatio(version));
-                                                    closeStack();
-                                                }}
-                                            >
-                                                复制并新建
-                                            </button>
+                                             <div className="absolute inset-x-3 bottom-3 z-30 flex items-center justify-end gap-2">
+                                                 <button
+                                                     type="button"
+                                                     className={`h-8 rounded-lg border px-3 text-[11px] font-semibold shadow-lg ${activeUrl === currentSrc ? 'cursor-default border-white/10 bg-black/45 text-white/55' : 'border-white/10 bg-black/55 text-white hover:bg-black/75'}`}
+                                                     disabled={activeUrl === currentSrc}
+                                                     onClick={(event) => {
+                                                         event.stopPropagation();
+                                                         onSetImageVersion?.(data.id, withNaturalRatio(version));
+                                                         closeStack();
+                                                     }}
+                                                 >
+                                                     设为当前
+                                                 </button>
+                                                 <button
+                                                     type="button"
+                                                     className="h-8 rounded-lg bg-[#4446CE] px-3 text-[11px] font-semibold text-white shadow-lg hover:bg-[#5557DB]"
+                                                     onClick={(event) => {
+                                                         event.stopPropagation();
+                                                         onUseImageVersion?.(data.id, withNaturalRatio(version));
+                                                         closeStack();
+                                                     }}
+                                                 >
+                                                     复制并新建
+                                                 </button>
+                                             </div>
                                             {hasMultipleImages && hoveredBatchKey === batch.key && (
                                                 <>
                                                     <button
@@ -666,6 +742,7 @@ export const LocalMediaStack: React.FC<{
         return (
             <>
                 {currentSrc && <VideoPreview src={currentSrc} isDark={isDark || false} />}
+                {data.resultSource === 'mock' && <MockResultBadge isDark={isDark} />}
                 {showBadge && (
                     <button
                         type="button"
@@ -734,17 +811,28 @@ export const LocalMediaStack: React.FC<{
                                                 <Icons.Play size={26} className="text-white/85 drop-shadow" fill="currentColor" />
                                             </div>
                                             <div className="absolute inset-x-3 bottom-3 flex items-center justify-end gap-2">
-                                                <button
-                                                    type="button"
-                                                    className="h-8 rounded-lg bg-[#4446CE] px-3.5 text-[11px] font-semibold text-white shadow-lg hover:bg-[#5557DB]"
-                                                    onClick={(event) => {
-                                                        event.stopPropagation();
-                                                        onUseVideoVersion?.(data.id, src);
-                                                        closeStack();
-                                                    }}
-                                                >
-                                                    复制并新建
-                                                </button>
+                                                 <button
+                                                     type="button"
+                                                     className="h-8 rounded-lg border border-white/10 bg-black/55 px-3 text-[11px] font-semibold text-white shadow-lg hover:bg-black/75"
+                                                     onClick={(event) => {
+                                                         event.stopPropagation();
+                                                         onSetVideoVersion?.(data.id, src);
+                                                         closeStack();
+                                                     }}
+                                                 >
+                                                     设为当前
+                                                 </button>
+                                                 <button
+                                                     type="button"
+                                                     className="h-8 rounded-lg bg-[#4446CE] px-3.5 text-[11px] font-semibold text-white shadow-lg hover:bg-[#5557DB]"
+                                                     onClick={(event) => {
+                                                         event.stopPropagation();
+                                                         onUseVideoVersion?.(data.id, src);
+                                                         closeStack();
+                                                     }}
+                                                 >
+                                                     复制并新建
+                                                 </button>
                                             </div>
                                         </div>
                                     </div>
@@ -804,6 +892,7 @@ export const LocalMediaStack: React.FC<{
            ) : (
                currentSrc && <img src={currentSrc} className={`w-full h-full object-contain pointer-events-none ${isDark ? 'bg-[#09090b]' : 'bg-gray-50'}`} alt="Generated" draggable={false} />
            )}
+           {data.resultSource === 'mock' && <MockResultBadge isDark={isDark} />}
            {showBadge && <div className="absolute left-1/2 top-2 z-30 flex -translate-x-1/2 cursor-pointer select-none items-center gap-1 rounded-full border border-white/10 bg-black/30 px-2 py-1 text-[10px] text-white shadow-lg backdrop-blur-md transition-colors hover:bg-black/50" onClick={(e) => { e.stopPropagation(); updateData(data.id, { isStackOpen: true }); }}><Icons.Layers size={10} className="text-[#8F91F4]"/><span className="font-bold">版本</span><span className="font-bold tabular-nums">{artifacts.length}</span><Icons.ChevronRight size={10} className="text-zinc-400" /></div>}
         </>
     );

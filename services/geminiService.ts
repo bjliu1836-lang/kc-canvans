@@ -9,6 +9,26 @@ import { apiFetch } from "./authService";
 export { MODEL_REGISTRY, getModelConfig, saveModelConfig, registerCustomModel, deleteModel, isCustomModel, getVisibleModels };
 export type { ModelConfig };
 
+export interface GenerationResult {
+  urls: string[];
+  mock: boolean;
+}
+
+export interface VideoTaskStatusUpdate {
+  taskId: string;
+  status: string;
+  progress?: number;
+  providerStatus?: string;
+  errorDetail?: string;
+}
+
+export interface VideoGenerationOptions {
+  mode?: VideoGenerationMode;
+  inputMedia?: InputMedia[];
+  onTaskCreated?: (taskIds: string[], provider?: string) => void;
+  onStatus?: (update: VideoTaskStatusUpdate) => void;
+}
+
 // --- Generators ---
 
 export const generateCreativeDescription = async (input: string, mode: 'IMAGE' | 'VIDEO', modelName?: string): Promise<string> => {
@@ -102,7 +122,7 @@ export const analyzeScriptAssets = async (script: string, modelName?: string): P
     return result.text || '';
 };
 
-export const generateImage = async (
+export const generateImageWithMetadata = async (
     prompt: string, 
     aspectRatio: string = "1:1", 
     modelName: string = "Seedream 5.0", 
@@ -110,24 +130,40 @@ export const generateImage = async (
     count: number = 1,
     inputImages: string[] = [],
     promptOptimize: boolean = false
-): Promise<string[]> => {
+): Promise<GenerationResult> => {
   try {
       const result = await apiFetch('/api/generate/image', {
         method: 'POST',
         body: JSON.stringify({ prompt, aspectRatio, modelName, resolution, count, inputImages, promptOptimize }),
       });
-      return result.urls || [];
+      return { urls: result.urls || [], mock: Boolean(result.mock) };
   } catch (e) {
       if (modelName === 'Seedream 5.0') {
           const total = Math.max(1, Math.min(count, 4));
           await new Promise(resolve => setTimeout(resolve, 650));
-          return Array.from({ length: total }, (_, index) =>
-              generateMockImage(prompt, aspectRatio, resolution, index, inputImages.length)
-          );
+          return {
+            urls: Array.from({ length: total }, (_, index) =>
+                generateMockImage(prompt, aspectRatio, resolution, index, inputImages.length)
+            ),
+            mock: true,
+          };
       }
       console.error(`Error generating image with ${modelName}`, e);
       throw e;
   }
+};
+
+export const generateImage = async (
+    prompt: string,
+    aspectRatio: string = "1:1",
+    modelName: string = "Seedream 5.0",
+    resolution: string = "1k",
+    count: number = 1,
+    inputImages: string[] = [],
+    promptOptimize: boolean = false
+): Promise<string[]> => {
+    const result = await generateImageWithMetadata(prompt, aspectRatio, modelName, resolution, count, inputImages, promptOptimize);
+    return result.urls;
 };
 
 const VIDEO_POLL_INTERVAL_MS = 6000;
@@ -174,29 +210,56 @@ const getVideoUrl = (result: any): string => {
     );
 };
 
-const pollVideoTask = async (taskId: string): Promise<string> => {
+type VideoPollOptions = {
+    initialPollDelayMs?: number;
+    onStatus?: (update: VideoTaskStatusUpdate) => void;
+};
+
+const normalizeProgress = (value: unknown): number | undefined => {
+    const progress = Number(value);
+    return Number.isFinite(progress) ? progress : undefined;
+};
+
+export const pollVideoTask = async (taskId: string, options: VideoPollOptions = {}): Promise<string> => {
     const deadline = Date.now() + VIDEO_POLL_TIMEOUT_MS;
     let lastError: unknown = null;
     let lastStatus = '';
     let lastProgress: unknown = null;
 
+    let firstPoll = true;
     while (Date.now() < deadline) {
-        await sleep(VIDEO_POLL_INTERVAL_MS);
+        const delay = firstPoll ? (options.initialPollDelayMs ?? VIDEO_POLL_INTERVAL_MS) : VIDEO_POLL_INTERVAL_MS;
+        firstPoll = false;
+        if (delay > 0) await sleep(delay);
 
         try {
             const result = await apiFetch(`/api/generate/video/poll?taskId=${encodeURIComponent(taskId)}`);
             const status = getVideoStatus(result);
             lastStatus = status || lastStatus;
             lastProgress = result?.progress ?? result?.data?.progress ?? result?.output?.progress ?? lastProgress;
+            options.onStatus?.({
+                taskId,
+                status: ['completed', 'succeeded', 'success', 'done'].includes(status)
+                    ? 'succeeded'
+                    : ['failed', 'failure', 'error', 'cancelled', 'canceled'].includes(status)
+                        ? 'failed'
+                        : 'running',
+                providerStatus: status || undefined,
+                progress: normalizeProgress(lastProgress),
+            });
 
             if (['completed', 'succeeded', 'success', 'done'].includes(status)) {
                 const url = getVideoUrl(result);
-                if (!url) throw new Error('AGNES_VIDEO_NO_URL_RETURNED');
+                if (!url) {
+                    options.onStatus?.({ taskId, status: 'failed', providerStatus: status, errorDetail: 'AGNES_VIDEO_NO_URL_RETURNED' });
+                    throw new Error('AGNES_VIDEO_NO_URL_RETURNED');
+                }
                 return url;
             }
 
             if (['failed', 'failure', 'error', 'cancelled', 'canceled'].includes(status)) {
                 const message = result?.error?.message || result?.message || result?.error || 'Unknown error';
+                options.onStatus?.({ taskId, status: 'failed', providerStatus: status, errorDetail: String(message) });
                 throw new Error(`AGNES_VIDEO_TASK_FAILED: ${message}`);
             }
         } catch (error: any) {
@@ -216,7 +279,18 @@ const pollVideoTask = async (taskId: string): Promise<string> => {
 
     const suffix = lastError instanceof Error ? ` (最后一次轮询: ${lastError.message})` : '';
     const statusSuffix = lastStatus ? `，最后状态: ${lastStatus}${lastProgress !== null ? ` ${lastProgress}%` : ''}` : '';
+    options.onStatus?.({
+        taskId,
+        status: 'timed_out',
+        providerStatus: lastStatus || undefined,
+        progress: normalizeProgress(lastProgress),
+        errorDetail: `AGNES_VIDEO_TIMEOUT${statusSuffix}${suffix}`,
+    });
     throw new Error(`AGNES_VIDEO_TIMEOUT${statusSuffix}${suffix}`);
+};
+
+export const resumeVideoTask = (taskId: string, onStatus?: (update: VideoTaskStatusUpdate) => void): Promise<string> => {
+    return pollVideoTask(taskId, { initialPollDelayMs: 0, onStatus });
 };
 
 export const generateVideo = async (
@@ -228,10 +302,7 @@ export const generateVideo = async (
     duration: string = "5s",
     count: number = 1,
     promptOptimize: boolean = false,
-    options?: {
-        mode?: VideoGenerationMode;
-        inputMedia?: InputMedia[];
-    }
+    options?: VideoGenerationOptions
 ): Promise<string[]> => {
     let realModelName = modelName;
     const isStartEndMode = options?.mode === 'start_end' || modelName.endsWith('_FL');
@@ -263,7 +334,9 @@ export const generateVideo = async (
         });
         if (Array.isArray(result.urls) && result.urls.length > 0) return result.urls;
         if (Array.isArray(result.taskIds) && result.taskIds.length > 0) {
-            return await Promise.all(result.taskIds.map((taskId: string) => pollVideoTask(taskId)));
+            const taskIds = result.taskIds.map((taskId: unknown) => String(taskId)).filter(Boolean);
+            options?.onTaskCreated?.(taskIds, result.provider);
+            return await Promise.all(taskIds.map((taskId: string) => pollVideoTask(taskId, { onStatus: options?.onStatus })));
         }
         return [];
     } catch (e) {
@@ -272,14 +345,14 @@ export const generateVideo = async (
     }
 };
 
-export const generateAudio = async (
+export const generateAudioWithMetadata = async (
     text: string,
     modelName: string = "Minimax-speech-2.8-hd",
     voiceId: string = "male-qn-qingse",
     speed: number = 1,
     pitch: number = 0,
     volume: number = 1
-): Promise<string[]> => {
+): Promise<GenerationResult> => {
     const result = await apiFetch('/api/generate/audio', {
         method: 'POST',
         body: JSON.stringify({
@@ -291,7 +364,19 @@ export const generateAudio = async (
             volume,
         }),
     });
-    return result.urls || [];
+    return { urls: result.urls || [], mock: Boolean(result.mock) };
+};
+
+export const generateAudio = async (
+    text: string,
+    modelName: string = "Minimax-speech-2.8-hd",
+    voiceId: string = "male-qn-qingse",
+    speed: number = 1,
+    pitch: number = 0,
+    volume: number = 1
+): Promise<string[]> => {
+    const result = await generateAudioWithMetadata(text, modelName, voiceId, speed, pitch, volume);
+    return result.urls;
 };
 
 export const generateMultiAngleImages = async (
