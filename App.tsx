@@ -131,7 +131,7 @@ type CanvasHistoryEntry =
 
 type CanvasBounds = { x: number; y: number; width: number; height: number };
 
-const GROUP_PADDING = { top: 56, right: 32, bottom: 32, left: 32 };
+const GROUP_PADDING = { top: 32, right: 32, bottom: 32, left: 32 };
 
 const GROUP_BACKGROUND_OPTIONS: Array<{
     value: GroupBackgroundColor;
@@ -181,7 +181,7 @@ const normalizeNodeGroups = (candidateGroups: NodeGroup[], allNodes: NodeData[])
         const memberIds = Array.from(new Set(group.memberIds)).filter(id => existingIds.has(id) && !assigned.has(id));
         if (memberIds.length < 2) return result;
         memberIds.forEach(id => assigned.add(id));
-        result.push({ ...group, title: group.title || '未命名分组', memberIds, layout: group.layout === 'grid' ? 'grid' : 'manual' });
+        result.push({ ...group, title: group.title?.trim() || '未命名分组', memberIds, layout: group.layout === 'grid' ? 'grid' : 'manual' });
         return result;
     }, []);
 };
@@ -768,6 +768,8 @@ const CanvasWithSidebar: React.FC = () => {
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [editingGroupTitleId, setEditingGroupTitleId] = useState<string | null>(null);
+  const [groupTitleDraft, setGroupTitleDraft] = useState('');
   const [isGroupColorPickerOpen, setIsGroupColorPickerOpen] = useState(false);
   const selectedNodeBounds = useMemo(
       () => getNodesBounds(nodes.filter(node => selectedNodeIds.has(node.id))),
@@ -784,9 +786,16 @@ const CanvasWithSidebar: React.FC = () => {
 
   const [dragMode, setDragMode] = useState<DragMode | 'RESIZE_NODE' | 'SELECT'>('NONE');
   const dragModeRef = useRef(dragMode);
+  const groupTitleInputRef = useRef<HTMLInputElement>(null);
   const blockedSubCanvasStorageKeysRef = useRef<Set<string>>(new Set());
   const canvasHistoryRef = useRef<CanvasHistoryEntry[]>([]);
   const [canvasHistoryCount, setCanvasHistoryCount] = useState(0);
+
+  useEffect(() => {
+      if (!editingGroupTitleId) return;
+      groupTitleInputRef.current?.focus();
+      groupTitleInputRef.current?.select();
+  }, [editingGroupTitleId]);
 
   const clearCanvasHistory = useCallback(() => {
       canvasHistoryRef.current = [];
@@ -811,6 +820,7 @@ const CanvasWithSidebar: React.FC = () => {
       setSelectedNodeIds(new Set());
       setSelectedGroupId(null);
       setEditingGroupId(null);
+      setEditingGroupTitleId(null);
       setSelectedConnectionId(null);
       setSelectionBox(null);
       setContextMenu(null);
@@ -1316,6 +1326,7 @@ const CanvasWithSidebar: React.FC = () => {
            setSelectedNodeIds(new Set(entry.beforeNodes.map(node => node.id)));
            setSelectedGroupId(null);
            setEditingGroupId(null);
+           setEditingGroupTitleId(null);
            setSelectedConnectionId(null);
       }
       setContextMenu(null);
@@ -2106,6 +2117,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       })), nextGroup], nodes));
       setSelectedGroupId(id);
       setEditingGroupId(null);
+      setEditingGroupTitleId(null);
   }, [groups, nodes, recordCanvasHistory, selectedNodeIds]);
 
   const ungroupNodeGroup = useCallback((groupId = selectedGroupId) => {
@@ -2122,6 +2134,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       setSelectedNodeIds(new Set(group.memberIds));
       setSelectedGroupId(null);
       setEditingGroupId(null);
+      setEditingGroupTitleId(null);
   }, [groups, nodes, recordCanvasHistory, selectedGroupId]);
 
   const arrangeNodeGroup = useCallback((groupId = selectedGroupId) => {
@@ -2185,6 +2198,37 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       setIsGroupColorPickerOpen(false);
   }, [groups, recordCanvasHistory]);
 
+  const updateNodeGroupTitle = useCallback((groupId: string, value: string) => {
+      const group = groups.find(item => item.id === groupId);
+      if (!group) return;
+      const title = value.trim() || group.title.trim() || '未命名分组';
+      if (title !== group.title) {
+          recordCanvasHistory({
+              type: 'group-update',
+              label: '修改分组名称',
+              beforeNodes: [],
+              beforeGroups: groups,
+          });
+          setGroups(previous => previous.map(item => item.id === groupId ? { ...item, title } : item));
+      }
+      setEditingGroupTitleId(current => current === groupId ? null : current);
+  }, [groups, recordCanvasHistory]);
+
+  const beginGroupTitleEdit = useCallback((groupId: string) => {
+      const group = groups.find(item => item.id === groupId);
+      if (!group) return;
+      setSelectedGroupId(groupId);
+      setSelectedNodeIds(new Set());
+      setSelectedConnectionId(null);
+      setGroupTitleDraft(group.title);
+      setEditingGroupTitleId(groupId);
+  }, [groups]);
+
+  const cancelGroupTitleEdit = useCallback((groupId: string) => {
+      setEditingGroupTitleId(current => current === groupId ? null : current);
+      setGroupTitleDraft('');
+  }, []);
+
   const downloadNodeCollection = useCallback(async (nodeIds: Iterable<string>, label: string) => {
       const ids = new Set(nodeIds);
       const entries = nodes
@@ -2247,6 +2291,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
            if (selectedGroupId && groups.some(group => group.id === selectedGroupId && group.memberIds.some(memberId => nodeIds.has(memberId)))) {
                setSelectedGroupId(null);
                setEditingGroupId(null);
+               setEditingGroupTitleId(null);
            }
        }
       if (connectionsToDelete.length > 0) {
@@ -2320,6 +2365,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
         
         if (e.key === 'Escape') {
             if (editingGroupId) setEditingGroupId(null);
+            if (editingGroupTitleId) cancelGroupTitleEdit(editingGroupTitleId);
             if (pendingDeleteRequest) setPendingDeleteRequest(null);
             if (previewMedia) setPreviewMedia(null);
             if (previewText) setPreviewText(null);
@@ -2339,7 +2385,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
         window.removeEventListener('keydown', handleKeyDown);
         window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedNodeIds, selectedGroupId, editingGroupId, groups, selectedConnectionId, pendingDeleteRequest, previewMedia, previewText, contextMenu, quickAddMenu, directorDeskSession, showNewWorkflowDialog, isStorageOpen, isExportImportOpen, handleAlign, createNodeGroup, ungroupNodeGroup, deleteCanvasItems, undoLastCanvasAction]);
+  }, [selectedNodeIds, selectedGroupId, editingGroupId, editingGroupTitleId, groups, selectedConnectionId, pendingDeleteRequest, previewMedia, previewText, contextMenu, quickAddMenu, directorDeskSession, showNewWorkflowDialog, isStorageOpen, isExportImportOpen, handleAlign, createNodeGroup, ungroupNodeGroup, deleteCanvasItems, undoLastCanvasAction, cancelGroupTitleEdit]);
 
   useEffect(() => {
     // Load storage directory name for the top-right indicator
@@ -4667,6 +4713,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       if (!e.shiftKey) setSelectedNodeIds(new Set());
       setSelectedGroupId(null);
       setEditingGroupId(null);
+      setEditingGroupTitleId(null);
     }
   };
 
@@ -4726,6 +4773,21 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       setSelectedGroupId(groupId);
       setEditingGroupId(groupId);
       setSelectedNodeIds(new Set());
+  };
+
+  const handleGroupTitleMouseDown = (e: React.MouseEvent, groupId: string) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      setSelectedGroupId(groupId);
+      setSelectedNodeIds(new Set());
+      setSelectedConnectionId(null);
+  };
+
+  const handleGroupTitleDoubleClick = (e: React.MouseEvent, groupId: string) => {
+      e.stopPropagation();
+      e.preventDefault();
+      beginGroupTitleEdit(groupId);
   };
 
   const handleNodeDoubleClick = (e: React.MouseEvent, id: string) => {
@@ -5810,7 +5872,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       const estimatedHalfWidth = selectedGroup ? 230 : 118;
       return {
           left: Math.max(canvasRect.left + estimatedHalfWidth + 8, Math.min(centerX, canvasRect.right - estimatedHalfWidth - 8)),
-          top: Math.max(canvasRect.top + 8, canvasRect.top + transform.y + activeSelectionBounds.y * transform.k - 44),
+          top: Math.max(canvasRect.top + 8, canvasRect.top + transform.y + activeSelectionBounds.y * transform.k - (selectedGroup ? 82 : 44)),
       };
   })() : null;
 
@@ -5941,24 +6003,51 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                                     boxShadow: isSelected ? `0 0 0 2px ${color.border}55` : undefined,
                                 }}
                                 onMouseDown={(event) => handleGroupMouseDown(event, group.id)}
+                                onDoubleClick={(event) => handleGroupDoubleClick(event, group.id)}
                             />
                             <div
-                                className="absolute left-3 top-3 flex h-9 max-w-[calc(100%-24px)] items-center gap-2 rounded-lg border px-3 text-xs font-semibold shadow-sm"
+                                className="absolute flex h-7 max-w-[360px] items-center gap-2 rounded-md border px-2 text-xs font-semibold shadow-sm"
                                 style={{
                                     left: bounds.x,
-                                    top: bounds.y,
+                                    top: bounds.y - 31,
                                     zIndex: 60,
                                     pointerEvents: 'auto',
-                                    cursor: 'grab',
+                                    cursor: 'default',
                                     backgroundColor: color.header,
                                     borderColor: color.border,
                                     color: color.headerText,
                                 }}
-                                onMouseDown={(event) => handleGroupMouseDown(event, group.id)}
-                                onDoubleClick={(event) => handleGroupDoubleClick(event, group.id)}
-                                title="拖动整体移动；双击进入组内编辑"
+                                onMouseDown={(event) => handleGroupTitleMouseDown(event, group.id)}
+                                onDoubleClick={(event) => handleGroupTitleDoubleClick(event, group.id)}
+                                title="双击编辑分组名称"
                             >
-                                <span className="truncate">{group.title}</span>
+                                {editingGroupTitleId === group.id ? (
+                                    <input
+                                        ref={groupTitleInputRef}
+                                        value={groupTitleDraft}
+                                        className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-white/60"
+                                        style={{ color: color.headerText, cursor: 'text' }}
+                                        aria-label="分组名称"
+                                        onMouseDown={(event) => event.stopPropagation()}
+                                        onDoubleClick={(event) => event.stopPropagation()}
+                                        onChange={(event) => setGroupTitleDraft(event.target.value)}
+                                        onBlur={() => updateNodeGroupTitle(group.id, groupTitleDraft)}
+                                        onKeyDown={(event) => {
+                                            if (event.key === 'Enter') {
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                updateNodeGroupTitle(group.id, groupTitleDraft);
+                                            }
+                                            if (event.key === 'Escape') {
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                cancelGroupTitleEdit(group.id);
+                                            }
+                                        }}
+                                    />
+                                ) : (
+                                    <span className="truncate">{group.title}</span>
+                                )}
                                 <span className="shrink-0 text-[10px] font-medium opacity-70">{group.memberIds.length} 个节点</span>
                                 {isEditing && <span className="shrink-0 rounded bg-white/20 px-1.5 py-0.5 text-[9px]">组内编辑</span>}
                             </div>
