@@ -4839,7 +4839,11 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           nodeId: id,
           initialNode: node,
           sourceGroupId: sourceGroup?.id || null,
-          sourceContentBounds: sourceGroup ? getGroupContentBounds(sourceGroup, nodes) : null,
+          // Keep the drop boundary anchored to the other members. Group bounds
+          // are derived from all members, so including the node being dragged
+          // makes the visible group expand with it and prevents a Shift-drag
+          // from ever being considered outside.
+          sourceContentBounds: sourceGroup ? getGroupContentBounds(sourceGroup, nodes, [id]) : null,
           detachWithShift,
           initialGroups: groups,
           selectionBefore: new Set(selectedNodeIds),
@@ -4976,7 +4980,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       const dx = (e.clientX - dragStartRef.current.x) / transform.k;
       const dy = (e.clientY - dragStartRef.current.y) / transform.k;
       const drag = nodeDragRef.current;
-      if (drag && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+      if (drag && (Math.abs(dx) >= 4 || Math.abs(dy) >= 4)) {
         drag.didMove = true;
         if (drag.detachWithShift) {
           setSelectedNodeIds(new Set([drag.nodeId]));
