@@ -780,6 +780,12 @@ const CanvasWithSidebar: React.FC = () => {
   const [nodes, setNodes] = useState<NodeData[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
   const [groups, setGroups] = useState<NodeGroup[]>([]);
+  const [detachPreview, setDetachPreview] = useState<{
+      nodeId: string;
+      groupId: string;
+      frozenBounds: CanvasBounds;
+      isOutside: boolean;
+  } | null>(null);
   const [transform, setTransform] = useState<CanvasTransform>({ x: 0, y: 0, k: 1 });
   const nodesRef = useRef<NodeData[]>(nodes);
   const workspaceRef = useRef<{ projectId: string | null; canvasId: string }>({ projectId: currentProject?.id || null, canvasId: activeSubCanvasId });
@@ -801,9 +807,16 @@ const CanvasWithSidebar: React.FC = () => {
       () => getNodesBounds(nodes.filter(node => selectedNodeIds.has(node.id))),
       [nodes, selectedNodeIds],
   );
-  const groupBoundsById = useMemo(() => new Map(
-      groups.map(group => [group.id, getGroupBounds(group, nodes)] as const).filter((entry): entry is readonly [string, CanvasBounds] => Boolean(entry[1])),
-  ), [groups, nodes]);
+  const groupBoundsById = useMemo(() => {
+      const boundsById = new Map(
+          groups.map(group => [group.id, getGroupBounds(group, nodes)] as const).filter((entry): entry is readonly [string, CanvasBounds] => Boolean(entry[1])),
+      );
+      // During a Shift detach gesture, keep the source container visibly fixed
+      // at the same bounds used for the release decision. Otherwise its derived
+      // frame would expand together with the node while the drop target stayed put.
+      if (detachPreview) boundsById.set(detachPreview.groupId, detachPreview.frozenBounds);
+      return boundsById;
+  }, [detachPreview, groups, nodes]);
   const selectedGroup = groups.find(group => group.id === selectedGroupId) || null;
 
   useEffect(() => {
@@ -1270,7 +1283,7 @@ const CanvasWithSidebar: React.FC = () => {
       nodeId: string;
       initialNode: NodeData;
       sourceGroupId: string | null;
-      sourceContentBounds: CanvasBounds | null;
+      sourceGroupBounds: CanvasBounds | null;
       detachWithShift: boolean;
       initialGroups: NodeGroup[];
       selectionBefore: Set<string>;
@@ -2436,7 +2449,9 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
     loadStorageInfo();
     
     const handleGlobalMouseUp = () => {
-        if (dragModeRef.current !== 'NONE') {
+        // Node and group gestures have their own release handlers below so a
+        // canvas-wide listener cannot end them before their final state is read.
+        if (dragModeRef.current !== 'NONE' && dragModeRef.current !== 'DRAG_NODE' && dragModeRef.current !== 'DRAG_GROUP') {
             setDragMode('NONE');
             setTempConnection(null);
             connectionStartRef.current = null;
@@ -4757,6 +4772,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       const drag = nodeDragRef.current;
       if (!drag) return;
       nodeDragRef.current = null;
+      setDetachPreview(null);
 
       // Preserve the existing Shift-click multi-select behavior. Shift only
       // becomes a detach gesture after the pointer has actually moved.
@@ -4783,10 +4799,9 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       };
 
       if (drag.sourceGroupId && drag.detachWithShift) {
-          // Use the source content area captured before the node moves. Its
-          // live derived bounds would otherwise follow the dragged node and
-          // make leaving the group impossible.
-          if (!isPointInsideBounds(center, drag.sourceContentBounds)) {
+          // The visible source frame remains frozen throughout Shift-drag, so
+          // this exact same frame must decide whether the child leaves the group.
+          if (!isPointInsideBounds(center, drag.sourceGroupBounds)) {
               recordCanvasHistory({
                   type: 'group-update',
                   label: '移出分组',
@@ -4822,6 +4837,18 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       }
   }, [groups, nodes, recordCanvasHistory, transform.k]);
 
+  const cancelNodeDrag = useCallback(() => {
+      const drag = nodeDragRef.current;
+      if (!drag) return;
+      const initialPositions = new Map(initialNodePositionsRef.current.map(node => [node.id, node]));
+      setNodes(previous => previous.map(node => {
+          const initial = initialPositions.get(node.id);
+          return initial ? { ...node, x: initial.x, y: initial.y } : node;
+      }));
+      nodeDragRef.current = null;
+      setDetachPreview(null);
+  }, []);
+
   const handleNodeMouseDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (contextMenu) setContextMenu(null);
@@ -4839,11 +4866,9 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           nodeId: id,
           initialNode: node,
           sourceGroupId: sourceGroup?.id || null,
-          // Keep the drop boundary anchored to the other members. Group bounds
-          // are derived from all members, so including the node being dragged
-          // makes the visible group expand with it and prevents a Shift-drag
-          // from ever being considered outside.
-          sourceContentBounds: sourceGroup ? getGroupContentBounds(sourceGroup, nodes, [id]) : null,
+          // Capture the complete visible frame. Shift-drag freezes this same
+          // boundary, so the indicator and the release result never disagree.
+          sourceGroupBounds: sourceGroup ? getGroupBounds(sourceGroup, nodes) : null,
           detachWithShift,
           initialGroups: groups,
           selectionBefore: new Set(selectedNodeIds),
@@ -4980,7 +5005,8 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       const dx = (e.clientX - dragStartRef.current.x) / transform.k;
       const dy = (e.clientY - dragStartRef.current.y) / transform.k;
       const drag = nodeDragRef.current;
-      if (drag && (Math.abs(dx) >= 4 || Math.abs(dy) >= 4)) {
+      const movedScreenDistance = Math.hypot(e.clientX - dragStartRef.current.x, e.clientY - dragStartRef.current.y);
+      if (drag && movedScreenDistance >= 4) {
         drag.didMove = true;
         // Users commonly press Shift after beginning a drag. Keep accepting
         // that gesture through the move instead of only reading the modifier
@@ -4991,6 +5017,27 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
         if (drag.detachWithShift) {
           setSelectedNodeIds(new Set([drag.nodeId]));
           setSelectedGroupId(null);
+          const center = {
+              x: drag.initialNode.x + dx + drag.initialNode.width / 2,
+              y: drag.initialNode.y + dy + drag.initialNode.height / 2,
+          };
+          const isOutside = !isPointInsideBounds(center, drag.sourceGroupBounds);
+          if (drag.sourceGroupId && drag.sourceGroupBounds) {
+              setDetachPreview(previous => {
+                  if (previous
+                      && previous.nodeId === drag.nodeId
+                      && previous.groupId === drag.sourceGroupId
+                      && previous.isOutside === isOutside) {
+                      return previous;
+                  }
+                  return {
+                      nodeId: drag.nodeId,
+                      groupId: drag.sourceGroupId,
+                      frozenBounds: drag.sourceGroupBounds,
+                      isOutside,
+                  };
+              });
+          }
         }
       }
       const draggedNodeIds = drag?.detachWithShift
@@ -5103,9 +5150,24 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       initialGroupNodesRef.current = [];
       nodeDragRef.current = null;
     };
+    const handleWindowCancel = () => {
+      if (dragMode === 'DRAG_NODE') cancelNodeDrag();
+      setDragMode('NONE');
+      setTempConnection(null);
+      activeDragGroupRef.current = null;
+      initialGroupNodesRef.current = [];
+      nodeDragRef.current = null;
+      setDetachPreview(null);
+    };
     window.addEventListener('mouseup', handleWindowMouseUp);
-    return () => window.removeEventListener('mouseup', handleWindowMouseUp);
-  }, [dragMode, finishNodeDrag, groups, recordCanvasHistory]);
+    window.addEventListener('blur', handleWindowCancel);
+    window.addEventListener('pointercancel', handleWindowCancel);
+    return () => {
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+      window.removeEventListener('blur', handleWindowCancel);
+      window.removeEventListener('pointercancel', handleWindowCancel);
+    };
+  }, [cancelNodeDrag, dragMode, finishNodeDrag, groups, recordCanvasHistory]);
 
   const nodeHasMedia = (node: NodeData): boolean =>
       !!(node.imageSrc || node.videoSrc || node.audioSrc || (node.outputArtifacts && node.outputArtifacts.length > 0));
@@ -6032,6 +6094,13 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           top: Math.max(canvasRect.top + 8, canvasRect.top + transform.y + activeSelectionBounds.y * transform.k - (selectedGroup ? 82 : 44)),
       };
   })() : null;
+  const detachPreviewNode = detachPreview ? nodes.find(node => node.id === detachPreview.nodeId) || null : null;
+  const detachPreviewStyle = detachPreviewNode && canvasRect ? {
+      left: canvasRect.left + transform.x + detachPreviewNode.x * transform.k,
+      top: canvasRect.top + transform.y + detachPreviewNode.y * transform.k,
+      width: detachPreviewNode.width * transform.k,
+      height: detachPreviewNode.height * transform.k,
+  } : null;
 
   return (
     <div className="w-full h-screen overflow-hidden flex relative font-sans text-gray-800">
@@ -6506,6 +6575,21 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
             )}
             {dragMode === 'SELECT' && selectionBox && (
                 <div className="fixed border border-[#4446CE]/50 bg-[#4446CE]/10 pointer-events-none z-50" style={{ left: containerRef.current!.getBoundingClientRect().left + selectionBox.x, top: containerRef.current!.getBoundingClientRect().top + selectionBox.y, width: selectionBox.w, height: selectionBox.h }}/>
+            )}
+            {detachPreview && detachPreviewStyle && (
+                <div
+                    data-group-detach-preview
+                    className="pointer-events-none fixed z-[140]"
+                    style={detachPreviewStyle}
+                >
+                    <div className={`absolute -inset-1 rounded-xl border-2 border-dashed ${detachPreview.isOutside ? 'border-amber-400 bg-amber-400/10' : 'border-[#8F91F4] bg-[#4446CE]/10'}`} />
+                    <div
+                        data-group-detach-status
+                        className={`absolute left-1/2 top-0 -translate-x-1/2 -translate-y-[calc(100%+9px)] whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-semibold shadow-lg backdrop-blur-md ${detachPreview.isOutside ? 'border-amber-300/70 bg-amber-500/90 text-amber-950' : 'border-[#B9BAFF]/60 bg-[#4446CE]/90 text-white'}`}
+                    >
+                        {detachPreview.isOutside ? '松开移出分组' : '拖到组外可移出'}
+                    </div>
+                </div>
             )}
             {!selectedGroup && selectionFrameStyle && selectedNodeIds.size > 1 && dragMode !== 'SELECT' && (
                 <div
