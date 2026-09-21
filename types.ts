@@ -200,8 +200,12 @@ export interface NodeGroup {
   title: string;
   memberIds: string[];
   layout: 'manual' | 'grid';
+  /** Visual treatment for the group container. Old canvases use the default. */
+  backgroundColor?: GroupBackgroundColor;
   createdAt: number;
 }
+
+export type GroupBackgroundColor = 'default' | 'gray' | 'blue' | 'teal' | 'yellow' | 'orange' | 'red' | 'pink';
 
 export interface DirectorDeskCaptureMetadata {
   metadataVersion: 1;

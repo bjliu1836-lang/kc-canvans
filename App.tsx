@@ -2,7 +2,7 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import Sidebar from './components/Sidebar';
 import { AssetSelectionModal } from './components/AssetSelectionModal';
-import { AssetLibraryItem, AssetLibraryType, AddToAssetPanelState, ArtifactSource, DirectorDeskCaptureMetadata, GenerationInputSnapshot, GenerationKind, GenerationTaskState, GenerationTaskStatus, ImageVersionSnapshot, InputMedia, MultiAngleOptions, NodeData, NodeGroup, Connection, CanvasTransform, Point, DragMode, NodeType, ProjectCanvasItem, ShotClip, TextVersionSnapshot, VideoEditRequest } from './types';
+import { AssetLibraryItem, AssetLibraryType, AddToAssetPanelState, ArtifactSource, DirectorDeskCaptureMetadata, GenerationInputSnapshot, GenerationKind, GenerationTaskState, GenerationTaskStatus, GroupBackgroundColor, ImageVersionSnapshot, InputMedia, MultiAngleOptions, NodeData, NodeGroup, Connection, CanvasTransform, Point, DragMode, NodeType, ProjectCanvasItem, ShotClip, TextVersionSnapshot, VideoEditRequest } from './types';
 import BaseNode from './components/Nodes/BaseNode';
 import { NodeContent } from './components/Nodes/NodeContent';
 import { Icons } from './components/Icons';
@@ -132,6 +132,27 @@ type CanvasHistoryEntry =
 type CanvasBounds = { x: number; y: number; width: number; height: number };
 
 const GROUP_PADDING = { top: 56, right: 32, bottom: 32, left: 32 };
+
+const GROUP_BACKGROUND_OPTIONS: Array<{
+    value: GroupBackgroundColor;
+    label: string;
+    background: string;
+    border: string;
+    header: string;
+    headerText: string;
+}> = [
+    { value: 'default', label: '默认蓝紫', background: 'rgba(68, 70, 206, 0.08)', border: '#4446CE', header: '#4446CE', headerText: '#FFFFFF' },
+    { value: 'gray', label: '深灰', background: 'rgba(63, 63, 70, 0.12)', border: '#52525B', header: '#3F3F46', headerText: '#FFFFFF' },
+    { value: 'blue', label: '蓝色', background: 'rgba(37, 99, 235, 0.10)', border: '#2563EB', header: '#2563EB', headerText: '#FFFFFF' },
+    { value: 'teal', label: '青绿色', background: 'rgba(13, 148, 136, 0.10)', border: '#0D9488', header: '#0D9488', headerText: '#FFFFFF' },
+    { value: 'yellow', label: '黄色', background: 'rgba(202, 138, 4, 0.12)', border: '#CA8A04', header: '#CA8A04', headerText: '#422006' },
+    { value: 'orange', label: '橙色', background: 'rgba(234, 88, 12, 0.10)', border: '#EA580C', header: '#EA580C', headerText: '#FFFFFF' },
+    { value: 'red', label: '红色', background: 'rgba(220, 38, 38, 0.10)', border: '#DC2626', header: '#DC2626', headerText: '#FFFFFF' },
+    { value: 'pink', label: '粉色', background: 'rgba(219, 39, 119, 0.10)', border: '#DB2777', header: '#DB2777', headerText: '#FFFFFF' },
+];
+
+const getGroupBackgroundOption = (value?: GroupBackgroundColor) =>
+    GROUP_BACKGROUND_OPTIONS.find(option => option.value === value) || GROUP_BACKGROUND_OPTIONS[0];
 
 const getNodesBounds = (items: NodeData[]): CanvasBounds | null => {
     if (!items.length) return null;
@@ -747,6 +768,7 @@ const CanvasWithSidebar: React.FC = () => {
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [isGroupColorPickerOpen, setIsGroupColorPickerOpen] = useState(false);
   const selectedNodeBounds = useMemo(
       () => getNodesBounds(nodes.filter(node => selectedNodeIds.has(node.id))),
       [nodes, selectedNodeIds],
@@ -755,6 +777,11 @@ const CanvasWithSidebar: React.FC = () => {
       groups.map(group => [group.id, getGroupBounds(group, nodes)] as const).filter((entry): entry is readonly [string, CanvasBounds] => Boolean(entry[1])),
   ), [groups, nodes]);
   const selectedGroup = groups.find(group => group.id === selectedGroupId) || null;
+
+  useEffect(() => {
+      setIsGroupColorPickerOpen(false);
+  }, [selectedGroupId]);
+
   const [dragMode, setDragMode] = useState<DragMode | 'RESIZE_NODE' | 'SELECT'>('NONE');
   const dragModeRef = useRef(dragMode);
   const blockedSubCanvasStorageKeysRef = useRef<Set<string>>(new Set());
@@ -2116,8 +2143,8 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           columnWidths[index % columns] = Math.max(columnWidths[index % columns], node.width);
           rowHeights[Math.floor(index / columns)] = Math.max(rowHeights[Math.floor(index / columns)], node.height);
       });
-      const gapX = 48;
-      const gapY = 48;
+      const gapX = 96;
+      const gapY = 96;
       const columnX = columnWidths.reduce<number[]>((positions, width, index) => {
           positions.push(index === 0 ? bounds.x : positions[index - 1] + columnWidths[index - 1] + gapX);
           return positions;
@@ -2141,6 +2168,22 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       }));
       setGroups(previous => previous.map(item => item.id === groupId ? { ...item, layout: 'grid' } : item));
   }, [groups, nodes, recordCanvasHistory, selectedGroupId]);
+
+  const updateNodeGroupBackground = useCallback((groupId: string, backgroundColor: GroupBackgroundColor) => {
+      const group = groups.find(item => item.id === groupId);
+      if (!group || group.backgroundColor === backgroundColor) {
+          setIsGroupColorPickerOpen(false);
+          return;
+      }
+      recordCanvasHistory({
+          type: 'group-update',
+          label: '更换分组背景',
+          beforeNodes: [],
+          beforeGroups: groups,
+      });
+      setGroups(previous => previous.map(item => item.id === groupId ? { ...item, backgroundColor } : item));
+      setIsGroupColorPickerOpen(false);
+  }, [groups, recordCanvasHistory]);
 
   const downloadNodeCollection = useCallback(async (nodeIds: Iterable<string>, label: string) => {
       const ids = new Set(nodeIds);
@@ -4668,7 +4711,9 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           .filter(node => group.memberIds.includes(node.id))
           .map(node => ({ id: node.id, x: node.x, y: node.y }));
       initialGroupNodesRef.current = nodes.filter(node => group.memberIds.includes(node.id));
-      setSelectedNodeIds(new Set(group.memberIds));
+      // A group is its own selection. Its children stay visually and
+      // interactively idle while the group container is being dragged.
+      setSelectedNodeIds(new Set());
       setSelectedGroupId(groupId);
       setSelectedConnectionId(null);
   };
@@ -5762,7 +5807,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
   } : null;
   const toolbarPosition = activeSelectionBounds && canvasRect ? (() => {
       const centerX = canvasRect.left + transform.x + (activeSelectionBounds.x + activeSelectionBounds.width / 2) * transform.k;
-      const estimatedHalfWidth = selectedGroup ? 170 : 118;
+      const estimatedHalfWidth = selectedGroup ? 230 : 118;
       return {
           left: Math.max(canvasRect.left + estimatedHalfWidth + 8, Math.min(centerX, canvasRect.right - estimatedHalfWidth - 8)),
           top: Math.max(canvasRect.top + 8, canvasRect.top + transform.y + activeSelectionBounds.y * transform.k - 44),
@@ -5878,22 +5923,43 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                     if (!bounds) return null;
                     const isSelected = selectedGroupId === group.id;
                     const isEditing = editingGroupId === group.id;
+                    const color = getGroupBackgroundOption(group.backgroundColor);
                     return (
                         <React.Fragment key={group.id}>
                             <div
-                                className={`absolute rounded-2xl border transition-colors ${isSelected ? 'border-[#4446CE] bg-[#4446CE]/[0.08]' : (isDark ? 'border-zinc-700/80 bg-zinc-900/20' : 'border-[#C8CAFF] bg-[#EEF0FF]/45')}`}
-                                style={{ left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height, zIndex: 2, pointerEvents: 'auto', cursor: 'grab' }}
+                                className="absolute rounded-2xl border transition-colors"
+                                style={{
+                                    left: bounds.x,
+                                    top: bounds.y,
+                                    width: bounds.width,
+                                    height: bounds.height,
+                                    zIndex: 2,
+                                    pointerEvents: 'auto',
+                                    cursor: 'grab',
+                                    backgroundColor: color.background,
+                                    borderColor: color.border,
+                                    boxShadow: isSelected ? `0 0 0 2px ${color.border}55` : undefined,
+                                }}
                                 onMouseDown={(event) => handleGroupMouseDown(event, group.id)}
                             />
                             <div
-                                className={`absolute left-3 top-3 flex h-9 max-w-[calc(100%-24px)] items-center gap-2 rounded-lg border px-3 text-xs font-semibold shadow-sm ${isSelected ? 'border-[#4446CE]/45 bg-[#4446CE] text-white' : (isDark ? 'border-zinc-700 bg-zinc-900 text-zinc-200' : 'border-[#C8CAFF] bg-white text-[#3739B0]')}`}
-                                style={{ left: bounds.x, top: bounds.y, zIndex: 60, pointerEvents: 'auto', cursor: 'grab' }}
+                                className="absolute left-3 top-3 flex h-9 max-w-[calc(100%-24px)] items-center gap-2 rounded-lg border px-3 text-xs font-semibold shadow-sm"
+                                style={{
+                                    left: bounds.x,
+                                    top: bounds.y,
+                                    zIndex: 60,
+                                    pointerEvents: 'auto',
+                                    cursor: 'grab',
+                                    backgroundColor: color.header,
+                                    borderColor: color.border,
+                                    color: color.headerText,
+                                }}
                                 onMouseDown={(event) => handleGroupMouseDown(event, group.id)}
                                 onDoubleClick={(event) => handleGroupDoubleClick(event, group.id)}
                                 title="拖动整体移动；双击进入组内编辑"
                             >
                                 <span className="truncate">{group.title}</span>
-                                <span className={`shrink-0 text-[10px] font-medium ${isSelected ? 'text-white/70' : 'text-current opacity-55'}`}>{group.memberIds.length} 个节点</span>
+                                <span className="shrink-0 text-[10px] font-medium opacity-70">{group.memberIds.length} 个节点</span>
                                 {isEditing && <span className="shrink-0 rounded bg-white/20 px-1.5 py-0.5 text-[9px]">组内编辑</span>}
                             </div>
                         </React.Fragment>
@@ -6217,6 +6283,37 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
                             >
                                 <Icons.LayoutGrid size={14} /> 整理
                             </button>
+                            <div className="relative">
+                                <button
+                                    type="button"
+                                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-100'}`}
+                                    onClick={() => setIsGroupColorPickerOpen(previous => !previous)}
+                                    title="更换分组背景颜色"
+                                >
+                                    <Icons.Palette size={14} /> 背景颜色
+                                </button>
+                                {isGroupColorPickerOpen && (
+                                    <div
+                                        className={`absolute left-0 top-full z-[130] mt-2 w-52 rounded-xl border p-2 shadow-2xl ${isDark ? 'border-zinc-700 bg-zinc-900 text-zinc-100' : 'border-gray-200 bg-white text-gray-700'}`}
+                                        onMouseDown={(event) => event.stopPropagation()}
+                                    >
+                                        <div className={`mb-1.5 px-1 text-[10px] font-medium ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>选择组背景颜色</div>
+                                        <div className="grid grid-cols-2 gap-1">
+                                            {GROUP_BACKGROUND_OPTIONS.map(option => (
+                                                <button
+                                                    key={option.value}
+                                                    type="button"
+                                                    className={`flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors ${selectedGroup.backgroundColor === option.value || (!selectedGroup.backgroundColor && option.value === 'default') ? (isDark ? 'bg-zinc-800' : 'bg-gray-100') : (isDark ? 'hover:bg-zinc-800/70' : 'hover:bg-gray-50')}`}
+                                                    onClick={() => updateNodeGroupBackground(selectedGroup.id, option.value)}
+                                                >
+                                                    <span className="h-3 w-3 shrink-0 rounded-full border border-black/10" style={{ backgroundColor: option.header }} />
+                                                    <span>{option.label}</span>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
                             <button
                                 type="button"
                                 className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-100'}`}
