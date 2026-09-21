@@ -4982,6 +4982,12 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       const drag = nodeDragRef.current;
       if (drag && (Math.abs(dx) >= 4 || Math.abs(dy) >= 4)) {
         drag.didMove = true;
+        // Users commonly press Shift after beginning a drag. Keep accepting
+        // that gesture through the move instead of only reading the modifier
+        // from the original mousedown event.
+        if (drag.sourceGroupId && e.shiftKey) {
+          drag.detachWithShift = true;
+        }
         if (drag.detachWithShift) {
           setSelectedNodeIds(new Set([drag.nodeId]));
           setSelectedGroupId(null);
