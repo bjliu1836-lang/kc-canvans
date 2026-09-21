@@ -174,6 +174,32 @@ const getGroupBounds = (group: NodeGroup, allNodes: NodeData[]): CanvasBounds | 
     };
 };
 
+// Group labels live above the container. The content drop target is the visible
+// body area, including its internal padding but excluding the label itself.
+const getGroupContentBounds = (
+    group: NodeGroup,
+    allNodes: NodeData[],
+    excludedMemberIds: Iterable<string> = [],
+): CanvasBounds | null => {
+    const excluded = new Set(excludedMemberIds);
+    const memberBounds = getNodesBounds(allNodes.filter(node => group.memberIds.includes(node.id) && !excluded.has(node.id)));
+    if (!memberBounds) return null;
+    return {
+        x: memberBounds.x - GROUP_PADDING.left,
+        y: memberBounds.y - GROUP_PADDING.top,
+        width: memberBounds.width + GROUP_PADDING.left + GROUP_PADDING.right,
+        height: memberBounds.height + GROUP_PADDING.top + GROUP_PADDING.bottom,
+    };
+};
+
+const isPointInsideBounds = (point: Point, bounds: CanvasBounds | null) => Boolean(
+    bounds
+    && point.x >= bounds.x
+    && point.x <= bounds.x + bounds.width
+    && point.y >= bounds.y
+    && point.y <= bounds.y + bounds.height,
+);
+
 const normalizeNodeGroups = (candidateGroups: NodeGroup[], allNodes: NodeData[]) => {
     const existingIds = new Set(allNodes.map(node => node.id));
     const assigned = new Set<string>();
@@ -1240,6 +1266,16 @@ const CanvasWithSidebar: React.FC = () => {
   const initialGroupNodesRef = useRef<NodeData[]>([]);
   const initialSelectionRef = useRef<Set<string>>(new Set());
   const activeDragGroupRef = useRef<string | null>(null);
+  const nodeDragRef = useRef<{
+      nodeId: string;
+      initialNode: NodeData;
+      sourceGroupId: string | null;
+      sourceContentBounds: CanvasBounds | null;
+      detachWithShift: boolean;
+      initialGroups: NodeGroup[];
+      selectionBefore: Set<string>;
+      didMove: boolean;
+  } | null>(null);
   const connectionStartRef = useRef<{ nodeId: string, type: 'source' | 'target' } | null>(null);
   const [tempConnection, setTempConnection] = useState<Point | null>(null);
   const lastMousePosRef = useRef<Point>({ x: 0, y: 0 }); 
@@ -4717,31 +4753,116 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
     }
   };
 
+  const finishNodeDrag = useCallback((clientX: number, clientY: number) => {
+      const drag = nodeDragRef.current;
+      if (!drag) return;
+      nodeDragRef.current = null;
+
+      // Preserve the existing Shift-click multi-select behavior. Shift only
+      // becomes a detach gesture after the pointer has actually moved.
+      if (!drag.didMove) {
+          if (drag.detachWithShift) {
+              const nextSelection = new Set(drag.selectionBefore);
+              nextSelection.has(drag.nodeId) ? nextSelection.delete(drag.nodeId) : nextSelection.add(drag.nodeId);
+              setSelectedNodeIds(nextSelection);
+              setSelectedGroupId(null);
+          }
+          return;
+      }
+
+      const dx = (clientX - dragStartRef.current.x) / transform.k;
+      const dy = (clientY - dragStartRef.current.y) / transform.k;
+      const movedNode = {
+          ...drag.initialNode,
+          x: drag.initialNode.x + dx,
+          y: drag.initialNode.y + dy,
+      };
+      const center = {
+          x: movedNode.x + movedNode.width / 2,
+          y: movedNode.y + movedNode.height / 2,
+      };
+
+      if (drag.sourceGroupId && drag.detachWithShift) {
+          // Use the source content area captured before the node moves. Its
+          // live derived bounds would otherwise follow the dragged node and
+          // make leaving the group impossible.
+          if (!isPointInsideBounds(center, drag.sourceContentBounds)) {
+              recordCanvasHistory({
+                  type: 'group-update',
+                  label: '移出分组',
+                  beforeNodes: [drag.initialNode],
+                  beforeGroups: drag.initialGroups,
+              });
+              setGroups(previous => normalizeNodeGroups(previous.map(group => group.id === drag.sourceGroupId
+                  ? { ...group, memberIds: group.memberIds.filter(memberId => memberId !== drag.nodeId), layout: 'manual' }
+                  : group), nodes));
+              setSelectedNodeIds(new Set([drag.nodeId]));
+              setSelectedGroupId(null);
+          }
+          return;
+      }
+
+      // Only a node that began outside a group can enter one through an
+      // ordinary drag. A normal drag of a member always remains a member.
+      if (!drag.sourceGroupId) {
+          const targetGroup = groups.find(group => isPointInsideBounds(center, getGroupContentBounds(group, nodes)));
+          if (targetGroup) {
+              recordCanvasHistory({
+                  type: 'group-update',
+                  label: '加入分组',
+                  beforeNodes: [drag.initialNode],
+                  beforeGroups: drag.initialGroups,
+              });
+              setGroups(previous => normalizeNodeGroups(previous.map(group => group.id === targetGroup.id
+                  ? { ...group, memberIds: [...group.memberIds, drag.nodeId], layout: 'manual' }
+                  : group), nodes));
+              setSelectedNodeIds(new Set([drag.nodeId]));
+              setSelectedGroupId(null);
+          }
+      }
+  }, [groups, nodes, recordCanvasHistory, transform.k]);
+
   const handleNodeMouseDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (contextMenu) setContextMenu(null);
     if (quickAddMenu) setQuickAddMenu(null);
     if (selectedConnectionId) setSelectedConnectionId(null);
     if (e.button === 0) {
+      const node = nodes.find(item => item.id === id);
+      if (!node) return;
+      const sourceGroup = groups.find(group => group.memberIds.includes(id)) || null;
+      const detachWithShift = Boolean(e.shiftKey && sourceGroup);
       setDragMode('DRAG_NODE');
-        dragStartRef.current = { x: e.clientX, y: e.clientY };
-        const isAlreadySelected = selectedNodeIds.has(id);
-        let newSelection = new Set(selectedNodeIds);
-        if (e.shiftKey) {
-          isAlreadySelected ? newSelection.delete(id) : newSelection.add(id);
-        } else if (selectedGroupId) {
-          // A group drag selects all members so the group can be moved. Once
-          // the user clicks a child node, return to normal canvas semantics:
-          // focus that node instead of keeping the whole group selected.
-          newSelection.clear();
-          newSelection.add(id);
-        } else if (!isAlreadySelected) {
-          newSelection.clear();
-          newSelection.add(id);
-        }
+      dragStartRef.current = { x: e.clientX, y: e.clientY };
+      initialNodePositionsRef.current = nodes.map(n => ({ id: n.id, x: n.x, y: n.y }));
+      nodeDragRef.current = {
+          nodeId: id,
+          initialNode: node,
+          sourceGroupId: sourceGroup?.id || null,
+          sourceContentBounds: sourceGroup ? getGroupContentBounds(sourceGroup, nodes) : null,
+          detachWithShift,
+          initialGroups: groups,
+          selectionBefore: new Set(selectedNodeIds),
+          didMove: false,
+      };
+
+      // A Shift-click on a group child remains a regular selection toggle.
+      // Its selection is applied on mouseup unless the pointer becomes a drag.
+      if (detachWithShift) return;
+
+      const isAlreadySelected = selectedNodeIds.has(id);
+      let newSelection = new Set(selectedNodeIds);
+      if (e.shiftKey) {
+        isAlreadySelected ? newSelection.delete(id) : newSelection.add(id);
+      } else if (selectedGroupId) {
+        newSelection.clear();
+        newSelection.add(id);
+      } else if (!isAlreadySelected) {
+        newSelection.clear();
+        newSelection.add(id);
+      }
       setSelectedNodeIds(newSelection);
       setSelectedGroupId(null);
-      initialNodePositionsRef.current = nodes.map(n => ({ id: n.id, x: n.x, y: n.y }));
     }
   };
 
@@ -4843,13 +4964,33 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
   const handleMouseMove = (e: React.MouseEvent) => {
     lastMousePosRef.current = { x: e.clientX, y: e.clientY };
     const worldPos = screenToWorld(e.clientX, e.clientY);
-    if (dragMode !== 'NONE' && e.buttons === 0) { setDragMode('NONE'); dragStartRef.current = { x: 0, y: 0 }; return; }
+    if (dragMode !== 'NONE' && e.buttons === 0) {
+      if (dragMode === 'DRAG_NODE') finishNodeDrag(e.clientX, e.clientY);
+      setDragMode('NONE');
+      dragStartRef.current = { x: 0, y: 0 };
+      return;
+    }
     if (dragMode === 'PAN') {
       setTransform({ ...initialTransformRef.current, x: initialTransformRef.current.x + (e.clientX - dragStartRef.current.x), y: initialTransformRef.current.y + (e.clientY - dragStartRef.current.y) });
     } else if (dragMode === 'DRAG_NODE') {
       const dx = (e.clientX - dragStartRef.current.x) / transform.k;
       const dy = (e.clientY - dragStartRef.current.y) / transform.k;
-      setNodes(prev => prev.map(n => { if (selectedNodeIds.has(n.id)) { const initial = initialNodePositionsRef.current.find(init => init.id === n.id); if (initial) return { ...n, x: initial.x + dx, y: initial.y + dy }; } return n; }));
+      const drag = nodeDragRef.current;
+      if (drag && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+        drag.didMove = true;
+        if (drag.detachWithShift) {
+          setSelectedNodeIds(new Set([drag.nodeId]));
+          setSelectedGroupId(null);
+        }
+      }
+      const draggedNodeIds = drag?.detachWithShift
+          ? new Set([drag.nodeId])
+          : selectedNodeIds;
+      setNodes(prev => prev.map(n => {
+          if (!draggedNodeIds.has(n.id)) return n;
+          const initial = initialNodePositionsRef.current.find(init => init.id === n.id);
+          return initial ? { ...n, x: initial.x + dx, y: initial.y + dy } : n;
+      }));
     } else if (dragMode === 'DRAG_GROUP') {
       const dx = (e.clientX - dragStartRef.current.x) / transform.k;
       const dy = (e.clientY - dragStartRef.current.y) / transform.k;
@@ -4916,6 +5057,9 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
         beforeGroups: groups,
       });
     }
+    if (dragMode === 'DRAG_NODE') {
+      finishNodeDrag(e.clientX, e.clientY);
+    }
     if (dragMode !== 'NONE') {
       setDragMode('NONE');
       setTempConnection(null);
@@ -4924,6 +5068,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
       setSelectionBox(null);
       activeDragGroupRef.current = null;
       initialGroupNodesRef.current = [];
+      nodeDragRef.current = null;
     }
   };
 
@@ -4931,9 +5076,9 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
   // scoped to the actual pointer gesture so releasing over the viewport or
   // another UI surface immediately returns the canvas to its normal mode.
   useEffect(() => {
-    if (dragMode !== 'DRAG_GROUP') return;
-    const handleWindowMouseUp = () => {
-      if (activeDragGroupRef.current && initialGroupNodesRef.current.length > 0) {
+    if (dragMode !== 'DRAG_GROUP' && dragMode !== 'DRAG_NODE') return;
+    const handleWindowMouseUp = (event: MouseEvent) => {
+      if (dragMode === 'DRAG_GROUP' && activeDragGroupRef.current && initialGroupNodesRef.current.length > 0) {
         recordCanvasHistory({
           type: 'group-update',
           label: '移动分组',
@@ -4941,14 +5086,16 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           beforeGroups: groups,
         });
       }
+      if (dragMode === 'DRAG_NODE') finishNodeDrag(event.clientX, event.clientY);
       setDragMode('NONE');
       setTempConnection(null);
       activeDragGroupRef.current = null;
       initialGroupNodesRef.current = [];
+      nodeDragRef.current = null;
     };
     window.addEventListener('mouseup', handleWindowMouseUp);
     return () => window.removeEventListener('mouseup', handleWindowMouseUp);
-  }, [dragMode, groups, recordCanvasHistory]);
+  }, [dragMode, finishNodeDrag, groups, recordCanvasHistory]);
 
   const nodeHasMedia = (node: NodeData): boolean =>
       !!(node.imageSrc || node.videoSrc || node.audioSrc || (node.outputArtifacts && node.outputArtifacts.length > 0));
