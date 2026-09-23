@@ -4207,7 +4207,7 @@ textarea:focus-visible {
 
 .character-route-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) repeat(3, 32px);
+  grid-template-columns: minmax(0, 1fr) repeat(2, 32px);
   gap: 6px;
   width: var(--right-sidebar-content-width);
   max-width: 100%;
@@ -4328,6 +4328,13 @@ textarea:focus-visible {
 
 .character-route-editor {
   margin-top: 12px;
+}
+
+.character-route-editor-hint {
+  margin: -3px 0 7px;
+  color: rgb(var(--text-dim-rgb));
+  font-size: 10px;
+  line-height: 1.4;
 }
 
 .pose-adjust-section > h3 {
@@ -6644,6 +6651,78 @@ textarea:focus-visible {
 .motion-preview-option:disabled {
   opacity: 0.42;
   cursor: not-allowed;
+}
+
+.motion-preview-requirement {
+  margin: 7px 0 0;
+  color: rgb(var(--text-muted-rgb));
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.motion-community-template-meta {
+  cursor: default;
+}
+
+.motion-community-template-meta summary,
+.motion-advanced-adjustments > summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.motion-community-template-meta summary {
+  color: rgb(var(--text-rgb));
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.motion-community-template-meta > :not(summary) {
+  display: block;
+  margin-top: 3px;
+}
+
+.motion-advanced-adjustments {
+  display: grid;
+  gap: 7px;
+  padding: 7px 0 0;
+  border-top: 1px solid rgb(var(--border-rgb) / 0.36);
+}
+
+.motion-advanced-adjustments > summary {
+  color: rgb(var(--text-muted-rgb));
+  font-size: 10px;
+}
+
+.motion-advanced-adjustments > summary small,
+.motion-advanced-hint {
+  color: rgb(var(--text-dim-rgb));
+  font-size: 9px;
+}
+
+.motion-advanced-adjustments > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: fit-content;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid rgb(var(--border-rgb) / 0.48);
+  border-radius: 7px;
+  color: rgb(var(--text-muted-rgb));
+  background: rgb(var(--surface-rgb) / 0.48);
+  font-size: 9px;
+}
+
+.motion-advanced-adjustments > button.is-active {
+  border-color: rgb(var(--motion-rgb) / 0.55);
+  color: rgb(var(--motion-rgb));
+  background: rgb(var(--motion-rgb) / 0.12);
+}
+
+.motion-community-template-meta:not([open]) > :not(summary),
+.motion-advanced-adjustments:not([open]) > :not(summary) {
+  display: none;
 }
 
 .motion-studio-body {

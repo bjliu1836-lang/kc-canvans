@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState, type ChangeEvent } from "react";
-import { LocateFixed, MapPinPlus, Plus, Trash2, Upload } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { MapPinPlus, Plus, Trash2, Upload } from "lucide-react";
 import {
   InspectorAxisGroup,
   InspectorColorField,
@@ -55,6 +55,7 @@ function replaceAxis(tuple: [number, number, number], axis: 0 | 1 | 2, value: nu
 export function CharacterPanel() {
   const animationInputRef = useRef<HTMLInputElement | null>(null);
   const [activeTab, setActiveTab] = useState<"properties" | "pose" | "action" | "route">("properties");
+  const routeVisibilityBeforeEditingRef = useRef<boolean | null>(null);
   const [animationImportStatus, setAnimationImportStatus] = useState<string | null>(null);
   const [animationImportBusy, setAnimationImportBusy] = useState(false);
   const selectedCrowdId = useDirectorStore((state) => state.selectedCrowdId);
@@ -83,6 +84,8 @@ export function CharacterPanel() {
   const removeImportedAnimationAsset = useDirectorStore((state) => state.removeImportedAnimationAsset);
   const setCameraMotionProgress = useDirectorStore((state) => state.setCameraMotionProgress);
   const setCameraMotionPlaying = useDirectorStore((state) => state.setCameraMotionPlaying);
+  const showCharacterRoutes = useDirectorStore((state) => state.showCharacterRoutes);
+  const setShowCharacterRoutes = useDirectorStore((state) => state.setShowCharacterRoutes);
   const restartCameraMotionPlayback = useDirectorStore((state) => state.restartCameraMotionPlayback);
   const addCharacterRoutePoint = useDirectorStore((state) => state.addCharacterRoutePoint);
   const insertObjectMotionKeyframeAfter = useDirectorStore((state) => state.insertObjectMotionKeyframeAfter);
@@ -91,6 +94,10 @@ export function CharacterPanel() {
   const selectObjectMotionKeyframe = useDirectorStore((state) => state.selectObjectMotionKeyframe);
   const updateObjectMotionKeyframe = useDirectorStore((state) => state.updateObjectMotionKeyframe);
   const updateObjectMotionPath = useDirectorStore((state) => state.updateObjectMotionPath);
+
+  useEffect(() => () => {
+    if (routeVisibilityBeforeEditingRef.current === false) setShowCharacterRoutes(false);
+  }, [setShowCharacterRoutes]);
 
   const selection = useMemo(() => {
     const role = objects.find((item) => item.id === selectedObjectId && item.kind === "character");
@@ -217,6 +224,30 @@ export function CharacterPanel() {
     ? routePath.keyframes[selectedRoutePointIndex + 1].time * timelineDuration - 0.1
     : timelineDuration;
 
+  function ensureRouteEditingVisible() {
+    if (showCharacterRoutes) return;
+    if (routeVisibilityBeforeEditingRef.current === null) routeVisibilityBeforeEditingRef.current = false;
+    setShowCharacterRoutes(true);
+  }
+
+  function setInspectorTab(tab: "properties" | "pose" | "action" | "route") {
+    if (tab === "route" && activeTab !== "route") {
+      routeVisibilityBeforeEditingRef.current = showCharacterRoutes;
+      ensureRouteEditingVisible();
+    } else if (activeTab === "route" && tab !== "route") {
+      const previousVisibility = routeVisibilityBeforeEditingRef.current;
+      routeVisibilityBeforeEditingRef.current = null;
+      if (previousVisibility === false) setShowCharacterRoutes(false);
+    }
+    setActiveTab(tab);
+  }
+
+  function selectRoutePoint(pointId: string, arrivalProgress: number) {
+    selectObjectMotionKeyframe(pointId);
+    setCameraMotionPlaying(false);
+    setCameraMotionProgress(arrivalProgress);
+  }
+
   function setRouteSpeedMode(speedMode: "uniform" | "soft" | "custom") {
     const keyframes = speedMode === "custom" && routePath.speedMode !== "custom" && routeTimingPlan
       ? routePath.keyframes.map((keyframe, index) => ({
@@ -310,10 +341,10 @@ export function CharacterPanel() {
       ariaLabel="角色右侧属性面板"
       className="character-inspector"
       tabs={[
-        { label: "属性", active: activeTab === "properties", onClick: () => setActiveTab("properties") },
-        { label: "姿势", active: activeTab === "pose", onClick: () => setActiveTab("pose") },
-        { label: "动作", active: activeTab === "action", onClick: () => setActiveTab("action") },
-        { label: "路线", active: activeTab === "route", onClick: () => setActiveTab("route") },
+        { label: "属性", active: activeTab === "properties", onClick: () => setInspectorTab("properties") },
+        { label: "姿势", active: activeTab === "pose", onClick: () => setInspectorTab("pose") },
+        { label: "动作", active: activeTab === "action", onClick: () => setInspectorTab("action") },
+        { label: "路线", active: activeTab === "route", onClick: () => setInspectorTab("route") },
       ]}
     >
       {activeTab === "properties" ? (
@@ -672,6 +703,7 @@ export function CharacterPanel() {
                   className="character-route-add"
                   type="button"
                   onClick={() => {
+                    ensureRouteEditingVisible();
                     setCameraMotionPlaying(false);
                     const id = addCharacterRoutePoint(role.id);
                     if (id) selectObjectMotionKeyframe(id);
@@ -679,18 +711,6 @@ export function CharacterPanel() {
                 >
                   <MapPinPlus aria-hidden="true" size={14} />
                   添加点
-                </button>
-                <button
-                  aria-label="预览当前路线点"
-                  title="定位预览"
-                  className="character-route-icon-button"
-                  type="button"
-                  disabled={!selectedRoutePoint}
-                  onClick={() => {
-                    if (selectedRoutePoint) setCameraMotionProgress(selectedArrivalProgress);
-                  }}
-                >
-                  <LocateFixed aria-hidden="true" size={14} />
                 </button>
                 <button
                   aria-label="在当前路线点后插入"
@@ -701,7 +721,15 @@ export function CharacterPanel() {
                   onClick={() => {
                     if (!selectedRoutePoint) return;
                     const id = insertObjectMotionKeyframeAfter(role.id, selectedRoutePoint.id);
-                    if (id) selectObjectMotionKeyframe(id);
+                    if (id) {
+                      const updatedRole = useDirectorStore.getState().project.objects.find((item) => item.id === role.id);
+                      const updatedRoute = updatedRole ? normalizeObjectMotionPath(updatedRole.motionPath, updatedRole.transform) : null;
+                      const insertedIndex = updatedRoute?.keyframes.findIndex((point) => point.id === id) ?? -1;
+                      const arrival = updatedRole && updatedRoute && insertedIndex >= 0
+                        ? getObjectMotionTimingPlan(updatedRole, timelineDuration)?.arrivals[insertedIndex] ?? updatedRoute.keyframes[insertedIndex].time
+                        : selectedArrivalProgress;
+                      selectRoutePoint(id, arrival);
+                    }
                   }}
                 >
                   <Plus aria-hidden="true" size={15} />
@@ -760,7 +788,7 @@ export function CharacterPanel() {
                     aria-label={`选择路线点 ${index + 1}`}
                     aria-pressed={point.id === selectedRoutePoint?.id}
                     onClick={() => {
-                      selectObjectMotionKeyframe(point.id);
+                      selectRoutePoint(point.id, routeTimingPlan?.arrivals[index] ?? point.time);
                     }}
                   >
                     <strong>{index + 1}</strong>
@@ -783,6 +811,11 @@ export function CharacterPanel() {
                       time: Math.min(selectedArrivalMaximum, Math.max(selectedArrivalMinimum, Number(value))) / timelineDuration,
                     })}
                   />
+                  {selectedRoutePointIndex <= 0 || selectedRoutePointIndex >= routePath.keyframes.length - 1 ? (
+                    <p className="character-route-editor-hint">首尾点固定在路线起止位置，不能单独修改到达时间。</p>
+                  ) : routePath.speedMode !== "custom" ? (
+                    <p className="character-route-editor-hint">到达时间按当前速度曲线自动计算；选择“自定义”后可调整。</p>
+                  ) : null}
                   <div className="inspector-field">
                     <span className="inspector-field-label">到点行为</span>
                     <div className="character-route-shape character-route-shape--compact" role="group" aria-label="人物路线点行为">
@@ -802,6 +835,9 @@ export function CharacterPanel() {
                       >停留</button>
                     </div>
                   </div>
+                  {selectedRoutePointIndex === routePath.keyframes.length - 1 ? (
+                    <p className="character-route-editor-hint">末点作为路线终点，不能设置停留。</p>
+                  ) : null}
                   {selectedRoutePoint.pointBehavior === "hold" ? (
                     <>
                       <InspectorRangeNumberField

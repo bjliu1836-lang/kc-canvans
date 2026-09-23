@@ -30,6 +30,9 @@ it("presents a beginner-friendly shooting workflow with the final key bindings",
   expect(screen.queryByText("自由录制")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("录制轨迹还原程度")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "锁定后只保持看向主体" })).toHaveAttribute("aria-pressed", "true");
+  const advancedSections = document.querySelectorAll('details[aria-label="高级调整"]');
+  expect(advancedSections).toHaveLength(2);
+  advancedSections.forEach((section) => expect(section).not.toHaveAttribute("open"));
 });
 
 it("plays the completed move from the camera first-person view", async () => {
@@ -50,6 +53,22 @@ it("plays the completed move from the camera first-person view", async () => {
 
   expect(useDirectorStore.getState().viewMode).toBe("camera");
   expect(useDirectorStore.getState().cameraMotionPlaying).toBe(true);
+});
+
+it("keeps camera previews disabled until the camera itself has two route points", async () => {
+  const user = userEvent.setup();
+  useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
+  useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
+  render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
+
+  const routePreview = screen.getByRole("button", { name: "播放导演视角预演" });
+  const finishedPreview = screen.getByRole("button", { name: "播放第一视角运镜预演" });
+  expect(routePreview).toBeDisabled();
+  expect(finishedPreview).toBeDisabled();
+  expect(screen.getByText("镜头预览需要至少 2 个镜头轨迹点；人物动作仍可在底部播放条预览。")).toBeInTheDocument();
+
+  await user.click(finishedPreview);
+  expect(useDirectorStore.getState().cameraMotionPlaying).toBe(false);
 });
 
 it("automatically creates a hidden motion camera when the scene has no placed camera", async () => {
@@ -296,7 +315,7 @@ it("opens community presets separately and shows their contribution metadata", a
   expect(screen.queryByRole("button", { name: "套用推镜镜头预设" })).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "套用跟拍镜头预设" }));
 
-  const metadata = screen.getByRole("generic", { name: "群友预设资料" });
+  const metadata = screen.getByRole("group", { name: "群友预设资料" });
   expect(metadata).toHaveTextContent("跟拍 · v1.0.0");
   expect(metadata).toHaveTextContent("贡献者：AIGC 耀光");
   expect(metadata).toHaveTextContent("联系：抖音号：AIJPDM001");
@@ -351,7 +370,7 @@ it("updates a community preset route immediately while its range slider moves", 
   expect(screen.getByRole("button", { name: "套用平行跟拍镜头预设" })).toHaveAttribute("aria-pressed", "true");
 });
 
-it("enables stabilization for the complete route while keeping per-waypoint overrides", async () => {
+it("enables stabilization for tracked route points while keeping per-waypoint overrides", async () => {
   const user = userEvent.setup();
   for (const position of [[0, 2, 8], [2, 2, 6], [5, 2, 3]] as [number, number, number][]) {
     useDirectorStore.getState().recordCameraMotionSnapshot("cam_1", { position, target: [0, 1, 0], fov: 50 });
@@ -359,17 +378,23 @@ it("enables stabilization for the complete route while keeping per-waypoint over
   render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
 
   const routeStabilization = screen.getByRole("group", { name: "整条镜头路线防抖" });
-  await user.click(within(routeStabilization).getByRole("button", { name: "全部开启" }));
-  let keyframes = useDirectorStore.getState().project.cameras[0].motionPath?.keyframes ?? [];
-  expect(keyframes.every((keyframe) => keyframe.targetStabilizationEnabled)).toBe(true);
-  expect(screen.getByText("已开启 3 / 3 个点，仍可在下方单独修改")).toBeInTheDocument();
+  expect(within(routeStabilization).getByRole("button", { name: "全部开启" })).toBeDisabled();
+  expect(screen.getByText("先为轨迹点选择跟踪主体，防抖才会生效")).toBeInTheDocument();
 
+  await user.click(screen.getByRole("button", { name: "选择轨迹点 1" }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "轨迹点跟踪主体" }), "char_default_a");
   await user.click(screen.getByRole("button", { name: "选择轨迹点 2" }));
   await user.selectOptions(screen.getByRole("combobox", { name: "轨迹点跟踪主体" }), "char_default_a");
+  await user.click(within(routeStabilization).getByRole("button", { name: "全部开启" }));
+  let keyframes = useDirectorStore.getState().project.cameras[0].motionPath?.keyframes ?? [];
+  expect(keyframes.map((keyframe) => keyframe.targetStabilizationEnabled)).toEqual([true, true, false]);
+  expect(screen.getByText("已开启 2 / 2 个跟踪点，仍可逐点修改")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "选择轨迹点 2" }));
   await user.click(within(screen.getByRole("group", { name: "镜头跟踪抖动" })).getByRole("button", { name: "保留抖动" }));
   keyframes = useDirectorStore.getState().project.cameras[0].motionPath?.keyframes ?? [];
-  expect(keyframes.map((keyframe) => keyframe.targetStabilizationEnabled)).toEqual([true, false, true]);
-  expect(screen.getByText("已开启 2 / 3 个点，仍可在下方单独修改")).toBeInTheDocument();
+  expect(keyframes.map((keyframe) => keyframe.targetStabilizationEnabled)).toEqual([true, false, false]);
+  expect(screen.getByText("已开启 1 / 2 个跟踪点，仍可逐点修改")).toBeInTheDocument();
 });
 
 it("lets users retime an individual middle waypoint to control segment speed", async () => {

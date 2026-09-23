@@ -28,6 +28,7 @@ import {
   getObjectMotionActionPresetId,
   getObjectMotionSnapshot,
   getObjectMotionSpeed,
+  getObjectMotionTimingPlan,
   getObjectMotionTimingSample,
   normalizeObjectMotionPath,
   sampleObjectMotionPath,
@@ -1287,6 +1288,7 @@ function CameraMotionPathRig({
 }
 
 function CharacterRoutePointHandle({
+  arrivalProgress,
   characterId,
   keyframe,
   index,
@@ -1295,6 +1297,7 @@ function CharacterRoutePointHandle({
   translationSnap,
   transformMode,
 }: {
+  arrivalProgress: number;
   characterId: string;
   keyframe: DirectorObjectMotionKeyframe;
   index: number;
@@ -1306,12 +1309,16 @@ function CharacterRoutePointHandle({
   const groupRef = useRef<Group>(null!);
   const selectObject = useDirectorStore((state) => state.selectObject);
   const selectObjectMotionKeyframe = useDirectorStore((state) => state.selectObjectMotionKeyframe);
+  const setCameraMotionPlaying = useDirectorStore((state) => state.setCameraMotionPlaying);
+  const setCameraMotionProgress = useDirectorStore((state) => state.setCameraMotionProgress);
   const updateObjectMotionKeyframe = useDirectorStore((state) => state.updateObjectMotionKeyframe);
 
   function selectPoint(event: ThreeEvent<MouseEvent>) {
     event.stopPropagation();
     selectObject(characterId);
     selectObjectMotionKeyframe(keyframe.id);
+    setCameraMotionPlaying(false);
+    setCameraMotionProgress(arrivalProgress);
   }
 
   function commitTransform() {
@@ -1422,6 +1429,10 @@ function CharacterRouteRig({
     const timing = getObjectMotionTimingSample(character, progress, duration);
     return timing?.holdingPointIndex ?? timing?.segment ?? 0;
   }, [character, duration, progress]);
+  const arrivalProgresses = useMemo(
+    () => getObjectMotionTimingPlan(character, duration)?.arrivals ?? path.keyframes.map((keyframe) => keyframe.time),
+    [character, duration, path.keyframes]
+  );
   const activePoints = useMemo(() => {
     if (!playing || path.keyframes.length < 2) return [];
     const end = Math.max(path.keyframes[0].time, progress);
@@ -1453,6 +1464,7 @@ function CharacterRouteRig({
       ) : null}
       {showHandles ? path.keyframes.map((keyframe, index) => (
         <CharacterRoutePointHandle
+          arrivalProgress={arrivalProgresses[index] ?? keyframe.time}
           key={keyframe.id}
           characterId={character.id}
           index={index}

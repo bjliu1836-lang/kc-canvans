@@ -150,7 +150,7 @@ export function MotionStudio({
 
   const motionPath = activeMotionPath!;
   const trackableObjects = sceneObjects.filter(isCameraFocusableObject);
-  const canPlay = motionPath.keyframes.length >= 2 || sceneObjects.some((item) => (item.motionPath?.keyframes?.length ?? 0) >= 2);
+  const canPreviewCameraMotion = motionPath.keyframes.length >= 2;
   const selectedKeyframe = motionPath.keyframes.find((item) => item.id === selectedCameraKeyframeId) ?? null;
   const trackingObjectId = selectedKeyframe?.targetMode === "object"
     ? selectedKeyframe.targetObjectId ?? ""
@@ -159,9 +159,14 @@ export function MotionStudio({
   const trackingBodyPart = selectedKeyframe?.targetBodyPart ?? "center";
   const trackingFollowMode = selectedKeyframe?.targetFollowMode ?? "immediate";
   const trackingStabilizationEnabled = selectedKeyframe?.targetStabilizationEnabled ?? false;
-  const stabilizedWaypointCount = motionPath.keyframes.filter((keyframe) => keyframe.targetStabilizationEnabled).length;
-  const allWaypointsStabilized = motionPath.keyframes.length > 0
-    && stabilizedWaypointCount === motionPath.keyframes.length;
+  const trackingKeyframes = motionPath.keyframes.filter((keyframe) =>
+    keyframe.targetMode === "object"
+    && Boolean(keyframe.targetObjectId)
+    && trackableObjects.some((object) => object.id === keyframe.targetObjectId)
+  );
+  const stabilizedWaypointCount = trackingKeyframes.filter((keyframe) => keyframe.targetStabilizationEnabled).length;
+  const allWaypointsStabilized = trackingKeyframes.length > 0
+    && stabilizedWaypointCount === trackingKeyframes.length;
   const matchingPreset = findMatchingCameraMotionPreset(motionPath);
   const timingSample = getCameraMotionTimingSample(activeCamera, cameraMotionProgress);
   const activeIndex = timingSample?.holdingPointIndex
@@ -249,12 +254,14 @@ export function MotionStudio({
   }
 
   function setAllTrackingStabilization(targetStabilizationEnabled: boolean) {
-    if (motionPath.keyframes.length === 0) return;
+    if (trackingKeyframes.length === 0) return;
     setCameraMotionPlaying(false);
     updateCameraMotionPath(activeCamera.id, {
       keyframes: motionPath.keyframes.map((keyframe) => ({
         ...keyframe,
-        targetStabilizationEnabled,
+        targetStabilizationEnabled: keyframe.targetMode === "object" && keyframe.targetObjectId
+          ? targetStabilizationEnabled
+          : false,
       })),
     });
   }
@@ -340,7 +347,7 @@ export function MotionStudio({
   }
 
   function previewInView(mode: "director" | "camera") {
-    if (!canPlay) return;
+    if (!canPreviewCameraMotion) return;
     if (cameraMotionPlaying && viewMode === mode) {
       setCameraMotionPlaying(false);
       return;
@@ -447,19 +454,19 @@ export function MotionStudio({
           <button
             type="button"
             className={`motion-preview-option is-director${viewMode === "director" ? " is-active" : ""}`}
-            disabled={!canPlay}
+            disabled={!canPreviewCameraMotion}
             aria-label={cameraMotionPlaying && viewMode === "director" ? "暂停导演视角预演" : "播放导演视角预演"}
             aria-pressed={viewMode === "director"}
             onClick={() => previewInView("director")}
           >
             <Route aria-hidden="true" size={17} />
-            <span><strong>{cameraMotionPlaying && viewMode === "director" ? "暂停" : "看路线"}</strong><small>导演视角看轨迹点</small></span>
+            <span><strong>{cameraMotionPlaying && viewMode === "director" ? "暂停" : "看路线"}</strong><small>导演视角看镜头轨迹点</small></span>
             {cameraMotionPlaying && viewMode === "director" ? <Pause aria-hidden="true" size={14} /> : <Play aria-hidden="true" size={14} />}
           </button>
           <button
             type="button"
             className={`motion-preview-option is-camera${viewMode === "camera" ? " is-active" : ""}`}
-            disabled={!canPlay}
+            disabled={!canPreviewCameraMotion}
             aria-label={cameraMotionPlaying && viewMode === "camera" ? "暂停第一视角运镜预演" : "播放第一视角运镜预演"}
             aria-pressed={viewMode === "camera"}
             onClick={() => previewInView("camera")}
@@ -469,6 +476,11 @@ export function MotionStudio({
             {cameraMotionPlaying && viewMode === "camera" ? <Pause aria-hidden="true" size={14} /> : <Play aria-hidden="true" size={14} />}
           </button>
         </div>
+        {!canPreviewCameraMotion ? (
+          <p className="motion-preview-requirement" role="status">
+            镜头预览需要至少 2 个镜头轨迹点；人物动作仍可在底部播放条预览。
+          </p>
+        ) : null}
       </section>
 
       <div className="motion-studio-body">
@@ -541,7 +553,8 @@ export function MotionStudio({
             ))}
           </div>
           {templateGroup === "community" ? (
-            <div className="motion-community-template-meta" aria-label="群友预设资料">
+            <details className="motion-community-template-meta" aria-label="群友预设资料">
+              <summary>群友预设资料</summary>
               {activeTemplate?.group === "community" ? (
                 <>
                   <strong>{activeTemplate.label} · v{activeTemplate.version}</strong>
@@ -554,7 +567,7 @@ export function MotionStudio({
               ) : (
                 <span>选择一个群友预设后显示贡献者、来源、版本和许可资料。</span>
               )}
-            </div>
+            </details>
           ) : null}
         </section>
 
@@ -591,36 +604,7 @@ export function MotionStudio({
         <div className="motion-route-column">
           <div className="motion-route-title">
             <div><Video aria-hidden="true" size={15} /><strong>镜头路线</strong><span>{motionPath.keyframes.length} 个点</span></div>
-            {motionPath.keyframes.length > 0 ? (
-              <button
-                type="button"
-                className={batchSelectionEnabled ? "is-active" : undefined}
-                aria-label="批量选择并移动轨迹点"
-                aria-pressed={batchSelectionEnabled}
-                onClick={toggleBatchSelection}
-              >
-                <Move3D aria-hidden="true" size={13} />
-                批量移动
-              </button>
-            ) : null}
           </div>
-
-          {batchSelectionEnabled ? (
-            <div className="motion-batch-selection" aria-label="批量轨迹点选择工具">
-              <span>已选 {selectedCameraKeyframeIds.length} 个点</span>
-              <small>点下面的数字，可选 1、3、6</small>
-              <button
-                type="button"
-                aria-label="全选所有轨迹点"
-                onClick={() => setCameraMotionKeyframeSelection(motionPath.keyframes.map((item) => item.id))}
-              >全选</button>
-              <button
-                type="button"
-                aria-label="清空轨迹点选择"
-                onClick={() => setCameraMotionKeyframeSelection([])}
-              >清空</button>
-            </div>
-          ) : null}
 
           {motionPath.keyframes.length === 0 ? (
             <div className="motion-route-empty" role="status">
@@ -670,40 +654,12 @@ export function MotionStudio({
                   </div>
                 );
               })}
-              <button type="button" className="motion-waypoint-add" aria-label="添加当前视角为轨迹点" onClick={addCurrentView}>
-                <Plus aria-hidden="true" size={16} />
-              </button>
             </div>
           )}
 
           {selectedKeyframe && !batchSelectionEnabled ? (
             <div className="motion-selected-actions" aria-label="当前轨迹点操作">
               <span>轨迹点 {motionPath.keyframes.indexOf(selectedKeyframe) + 1}</span>
-              {motionPath.keyframes.indexOf(selectedKeyframe) > 0 && motionPath.keyframes.indexOf(selectedKeyframe) < motionPath.keyframes.length - 1 ? (
-                <label className="motion-waypoint-arrival">
-                  到达
-                  <input
-                    aria-label="当前轨迹点到达时间"
-                    type="number"
-                    min={(
-                      motionPath.keyframes[motionPath.keyframes.indexOf(selectedKeyframe) - 1].time * motionPath.duration
-                      + (motionPath.keyframes[motionPath.keyframes.indexOf(selectedKeyframe) - 1].pointBehavior === "hold"
-                        ? motionPath.keyframes[motionPath.keyframes.indexOf(selectedKeyframe) - 1].holdSeconds ?? 0
-                        : 0)
-                      + 0.1
-                    ).toFixed(1)}
-                    max={(motionPath.keyframes[motionPath.keyframes.indexOf(selectedKeyframe) + 1].time * motionPath.duration - 0.1).toFixed(1)}
-                    step="0.1"
-                    value={arrivalTimeDraft}
-                    disabled={motionPath.speedMode !== "custom"}
-                    onChange={(event) => setArrivalTimeDraft(event.currentTarget.value)}
-                    onBlur={commitArrivalTimeDraft}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") event.currentTarget.blur();
-                    }}
-                  />秒{motionPath.speedMode !== "custom" ? <small>自动</small> : null}
-                </label>
-              ) : null}
               <button type="button" onClick={editSelectedWaypoint}><MousePointer2 aria-hidden="true" size={13} />进入此点调整</button>
               <button
                 type="button"
@@ -729,6 +685,46 @@ export function MotionStudio({
                 : "请先点选要一起移动的轨迹点"}
             </div>
           ) : null}
+
+          <details className="motion-advanced-adjustments" aria-label="高级调整">
+            <summary>高级调整 <small>批量移动与逐点时间</small></summary>
+            {motionPath.keyframes.length > 0 ? (
+              <button
+                type="button"
+                className={batchSelectionEnabled ? "is-active" : undefined}
+                aria-label="批量选择并移动轨迹点"
+                aria-pressed={batchSelectionEnabled}
+                onClick={toggleBatchSelection}
+              >
+                <Move3D aria-hidden="true" size={13} />批量移动
+              </button>
+            ) : null}
+            {batchSelectionEnabled ? (
+              <div className="motion-batch-selection" aria-label="批量轨迹点选择工具">
+                <span>已选 {selectedCameraKeyframeIds.length} 个点</span>
+                <small>点下面的数字，可选 1、3、6</small>
+                <button type="button" aria-label="全选所有轨迹点" onClick={() => setCameraMotionKeyframeSelection(motionPath.keyframes.map((item) => item.id))}>全选</button>
+                <button type="button" aria-label="清空轨迹点选择" onClick={() => setCameraMotionKeyframeSelection([])}>清空</button>
+              </div>
+            ) : null}
+            {selectedKeyframe && motionPath.keyframes.indexOf(selectedKeyframe) > 0 && motionPath.keyframes.indexOf(selectedKeyframe) < motionPath.keyframes.length - 1 ? (
+              <label className="motion-waypoint-arrival">
+                到达时间
+                <input
+                  aria-label="当前轨迹点到达时间"
+                  type="number"
+                  min={(motionPath.keyframes[motionPath.keyframes.indexOf(selectedKeyframe) - 1].time * motionPath.duration + (motionPath.keyframes[motionPath.keyframes.indexOf(selectedKeyframe) - 1].pointBehavior === "hold" ? motionPath.keyframes[motionPath.keyframes.indexOf(selectedKeyframe) - 1].holdSeconds ?? 0 : 0) + 0.1).toFixed(1)}
+                  max={(motionPath.keyframes[motionPath.keyframes.indexOf(selectedKeyframe) + 1].time * motionPath.duration - 0.1).toFixed(1)}
+                  step="0.1"
+                  value={arrivalTimeDraft}
+                  disabled={motionPath.speedMode !== "custom"}
+                  onChange={(event) => setArrivalTimeDraft(event.currentTarget.value)}
+                  onBlur={commitArrivalTimeDraft}
+                  onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+                />秒{motionPath.speedMode !== "custom" ? <small>需先选“自定义”速度</small> : null}
+              </label>
+            ) : selectedKeyframe ? <small className="motion-advanced-hint">首尾轨迹点固定在起点和终点，不能单独改到达时间。</small> : null}
+          </details>
         </div>
 
         <div className="motion-settings-column">
@@ -785,74 +781,6 @@ export function MotionStudio({
               <button type="button" aria-pressed={motionPath.speedMode === "custom"} onClick={() => setCameraSpeedMode("custom")}>自定义</button>
             </div>
           </div>
-          {motionPath.speedMode === "custom" ? (
-            <RouteCustomEasingControl
-              curve={motionPath.customEasing}
-              label="镜头段内节奏"
-              onChange={(customEasing) => updateCameraMotionPath(activeCamera.id, { customEasing })}
-            />
-          ) : null}
-          <div className="motion-setting-row">
-            <span><LocateFixed aria-hidden="true" size={14} />全线防抖</span>
-            <div className="motion-mini-segmented" role="group" aria-label="整条镜头路线防抖">
-              <button
-                type="button"
-                disabled={motionPath.keyframes.length === 0}
-                aria-pressed={motionPath.keyframes.length > 0 && stabilizedWaypointCount === 0}
-                onClick={() => setAllTrackingStabilization(false)}
-              >全部关闭</button>
-              <button
-                type="button"
-                disabled={motionPath.keyframes.length === 0}
-                aria-pressed={allWaypointsStabilized}
-                onClick={() => setAllTrackingStabilization(true)}
-              >全部开启</button>
-            </div>
-            <small className="motion-tracking-status">
-              {motionPath.keyframes.length === 0
-                ? "生成轨迹后可一键设置全部点"
-                : `已开启 ${stabilizedWaypointCount} / ${motionPath.keyframes.length} 个点，仍可在下方单独修改`}
-            </small>
-          </div>
-          <div className="motion-setting-row">
-            <span><LocateFixed aria-hidden="true" size={14} />此点行为</span>
-            <div className="motion-mini-segmented" role="group" aria-label="轨迹点行为">
-              <button
-                type="button"
-                disabled={!selectedKeyframe}
-                aria-pressed={(selectedKeyframe?.pointBehavior ?? "pass") === "pass"}
-                onClick={() => selectedKeyframe && updateCameraMotionKeyframe(activeCamera.id, selectedKeyframe.id, { pointBehavior: "pass", holdSeconds: 0 })}
-              >经过</button>
-              <button
-                type="button"
-                disabled={!selectedKeyframe || motionPath.keyframes.indexOf(selectedKeyframe) === motionPath.keyframes.length - 1}
-                aria-pressed={selectedKeyframe?.pointBehavior === "hold"}
-                onClick={() => selectedKeyframe && updateCameraMotionKeyframe(activeCamera.id, selectedKeyframe.id, { pointBehavior: "hold", holdSeconds: selectedKeyframe.holdSeconds || 1 })}
-              >停留</button>
-            </div>
-            <small className="motion-tracking-status">
-              {!selectedKeyframe ? "先选择一个轨迹点" : selectedKeyframe.pointBehavior === "hold" ? "镜头到这里后暂停" : "镜头连续通过，不会自动刹停"}
-            </small>
-          </div>
-          {selectedKeyframe?.pointBehavior === "hold" ? (
-            <label className="motion-setting-row">
-              <span><Pause aria-hidden="true" size={14} />停留时长</span>
-              <input
-                aria-label="轨迹点停留时长"
-                type="range"
-                min="0.1"
-                max={motionPath.duration}
-                step="0.1"
-                value={selectedKeyframe.holdSeconds ?? 1}
-                onPointerDown={beginUndoBatch}
-                onPointerUp={endUndoBatch}
-                onPointerCancel={endUndoBatch}
-                onBlur={endUndoBatch}
-                onChange={(event) => updateCameraMotionKeyframe(activeCamera.id, selectedKeyframe.id, { holdSeconds: Number(event.currentTarget.value) })}
-              />
-              <output>{(selectedKeyframe.holdSeconds ?? 1).toFixed(1)}s</output>
-            </label>
-          ) : null}
           <div className="motion-setting-row">
             <span><MousePointer2 aria-hidden="true" size={14} />此点跟踪</span>
             <select
@@ -875,6 +803,84 @@ export function MotionStudio({
                   : "这个点使用自己保存的固定朝向"}
             </small>
           </div>
+          <div className="motion-setting-row">
+            <span><LocateFixed aria-hidden="true" size={14} />全线防抖</span>
+            <div className="motion-mini-segmented" role="group" aria-label="整条镜头路线防抖">
+              <button
+                type="button"
+                disabled={trackingKeyframes.length === 0}
+                aria-pressed={trackingKeyframes.length > 0 && stabilizedWaypointCount === 0}
+                onClick={() => setAllTrackingStabilization(false)}
+              >全部关闭</button>
+              <button
+                type="button"
+                disabled={trackingKeyframes.length === 0}
+                aria-pressed={allWaypointsStabilized}
+                onClick={() => setAllTrackingStabilization(true)}
+              >全部开启</button>
+            </div>
+            <small className="motion-tracking-status">
+              {motionPath.keyframes.length === 0
+                ? "生成镜头轨迹后可设置"
+                : trackingKeyframes.length === 0
+                  ? "先为轨迹点选择跟踪主体，防抖才会生效"
+                  : `已开启 ${stabilizedWaypointCount} / ${trackingKeyframes.length} 个跟踪点，仍可逐点修改`}
+            </small>
+          </div>
+          <details className="motion-advanced-adjustments" aria-label="高级调整">
+            <summary>高级调整 <small>自定义节奏与逐点参数</small></summary>
+            {motionPath.speedMode === "custom" ? (
+              <RouteCustomEasingControl
+                curve={motionPath.customEasing}
+                label="镜头段内节奏"
+                onChange={(customEasing) => updateCameraMotionPath(activeCamera.id, { customEasing })}
+              />
+            ) : <small className="motion-advanced-hint">选择“自定义”速度后，可调整每段节奏。</small>}
+          <div className="motion-setting-row">
+            <span><LocateFixed aria-hidden="true" size={14} />此点行为</span>
+            <div className="motion-mini-segmented" role="group" aria-label="轨迹点行为">
+              <button
+                type="button"
+                disabled={!selectedKeyframe}
+                aria-pressed={(selectedKeyframe?.pointBehavior ?? "pass") === "pass"}
+                onClick={() => selectedKeyframe && updateCameraMotionKeyframe(activeCamera.id, selectedKeyframe.id, { pointBehavior: "pass", holdSeconds: 0 })}
+              >经过</button>
+              <button
+                type="button"
+                disabled={!selectedKeyframe || motionPath.keyframes.indexOf(selectedKeyframe) === motionPath.keyframes.length - 1}
+                aria-pressed={selectedKeyframe?.pointBehavior === "hold"}
+                onClick={() => selectedKeyframe && updateCameraMotionKeyframe(activeCamera.id, selectedKeyframe.id, { pointBehavior: "hold", holdSeconds: selectedKeyframe.holdSeconds || 1 })}
+              >停留</button>
+            </div>
+            <small className="motion-tracking-status">
+              {!selectedKeyframe
+                ? "先选择一个轨迹点"
+                : motionPath.keyframes.indexOf(selectedKeyframe) === motionPath.keyframes.length - 1
+                  ? "末点作为结束画面，不能设置停留"
+                  : selectedKeyframe.pointBehavior === "hold"
+                    ? "镜头到这里后暂停"
+                    : "镜头连续通过，不会自动刹停"}
+            </small>
+          </div>
+          {selectedKeyframe?.pointBehavior === "hold" ? (
+            <label className="motion-setting-row">
+              <span><Pause aria-hidden="true" size={14} />停留时长</span>
+              <input
+                aria-label="轨迹点停留时长"
+                type="range"
+                min="0.1"
+                max={motionPath.duration}
+                step="0.1"
+                value={selectedKeyframe.holdSeconds ?? 1}
+                onPointerDown={beginUndoBatch}
+                onPointerUp={endUndoBatch}
+                onPointerCancel={endUndoBatch}
+                onBlur={endUndoBatch}
+                onChange={(event) => updateCameraMotionKeyframe(activeCamera.id, selectedKeyframe.id, { holdSeconds: Number(event.currentTarget.value) })}
+              />
+              <output>{(selectedKeyframe.holdSeconds ?? 1).toFixed(1)}s</output>
+            </label>
+          ) : null}
           {trackingObject?.kind === "character" ? (
             <label className="motion-setting-row">
               <span><LocateFixed aria-hidden="true" size={14} />跟踪部位</span>
@@ -954,6 +960,7 @@ export function MotionStudio({
               >跟随移动</button>
             </div>
           </div>
+          </details>
         </div>
       </div>
     </section>

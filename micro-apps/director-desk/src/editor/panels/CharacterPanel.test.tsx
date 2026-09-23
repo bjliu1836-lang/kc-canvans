@@ -403,7 +403,7 @@ it("adds and edits a route point from the character route tab", async () => {
   expect(point?.facingMode).toBe("path");
 });
 
-it("selects a route point without moving the scene preview until explicitly requested", async () => {
+it("selects a route point and seeks the scene preview to that point", async () => {
   const user = userEvent.setup();
   useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
   useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
@@ -412,10 +412,20 @@ it("selects a route point without moving the scene preview until explicitly requ
 
   await user.click(screen.getByRole("button", { name: "路线" }));
   await user.click(screen.getByRole("button", { name: "选择路线点 2" }));
-  expect(useDirectorStore.getState().cameraMotionProgress).toBe(0.25);
-
-  await user.click(screen.getByRole("button", { name: "预览当前路线点" }));
   expect(useDirectorStore.getState().cameraMotionProgress).toBe(1);
+  expect(screen.queryByRole("button", { name: "预览当前路线点" })).not.toBeInTheDocument();
+});
+
+it("temporarily shows character routes while editing and restores a hidden scene preference", async () => {
+  const user = userEvent.setup();
+  useDirectorStore.getState().setShowCharacterRoutes(false);
+  render(<CharacterPanel />);
+
+  await user.click(screen.getByRole("button", { name: "路线" }));
+  expect(useDirectorStore.getState().showCharacterRoutes).toBe(true);
+
+  await user.click(screen.getByRole("button", { name: "属性" }));
+  expect(useDirectorStore.getState().showCharacterRoutes).toBe(false);
 });
 
 it("switches the character route between smooth curve and straight line", async () => {

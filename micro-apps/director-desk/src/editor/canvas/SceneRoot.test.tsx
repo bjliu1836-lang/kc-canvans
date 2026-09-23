@@ -680,7 +680,7 @@ it("renders an editable camera motion path for the selected viewport camera", ()
   expect(container.querySelector('mesh[name="cam_1_motion_key_2-motion-handle"]')).toBeInTheDocument();
 });
 
-it("renders visible character route points and selects their character without changing the preview time", () => {
+it("renders visible character route points and seeks when selecting one", () => {
   useDirectorStore.getState().addObjectMotionKeyframe("char_default_a", 0);
   useDirectorStore.getState().updateObjectTransform("char_default_a", { position: [3, 0, 1] });
   useDirectorStore.getState().addObjectMotionKeyframe("char_default_a", 1);
@@ -698,7 +698,7 @@ it("renders visible character route points and selects their character without c
   fireEvent.click(container.querySelector('mesh[name="char_default_a_motion_key_2-character-route-handle"]')!);
   expect(useDirectorStore.getState().selectedObjectId).toBe("char_default_a");
   expect(useDirectorStore.getState().selectedObjectMotionKeyframeId).toBe("char_default_a_motion_key_2");
-  expect(useDirectorStore.getState().cameraMotionProgress).toBe(0.35);
+  expect(useDirectorStore.getState().cameraMotionProgress).toBe(1);
 });
 
 it("keeps character routes visible after the character is deselected and honors the visibility toggle", () => {
