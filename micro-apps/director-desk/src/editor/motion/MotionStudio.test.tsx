@@ -483,4 +483,17 @@ it("shows a reference video export entry", async () => {
   expect(screen.getByRole("combobox", { name: "参考视频画质" })).toHaveValue("720p");
   expect(screen.getByRole("combobox", { name: "参考视频帧率" })).toHaveValue("30");
   expect(screen.getByRole("button", { name: "导出 MP4" })).toBeInTheDocument();
+  expect(document.querySelector(".motion-export-background")).toHaveTextContent("将使用纯色背景：#5A5C60");
+});
+
+it("keeps a persisted black background until the director explicitly switches to the base export background", async () => {
+  const user = userEvent.setup();
+  useDirectorStore.getState().updateScene({ backgroundColor: "#000000", backgroundBrightness: 0 });
+  render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
+
+  await user.click(screen.getByRole("button", { name: "导出运镜" }));
+  expect(document.querySelector(".motion-export-background")).toHaveTextContent("将使用纯色背景：#000000");
+  await user.click(screen.getByRole("button", { name: "使用基础背景" }));
+  expect(useDirectorStore.getState().project.scene.backgroundColor).toBe("#5A5C60");
+  expect(useDirectorStore.getState().project.scene.backgroundBrightness).toBe(1);
 });

@@ -155,6 +155,8 @@ interface DirectorInternalState {
   selectedCameraKeyframeId: string | null;
   selectedCameraKeyframeIds: string[];
   selectedObjectMotionKeyframeId: string | null;
+  /** Character whose next route point is being picked from the ground plane. */
+  characterRoutePlacementId: string | null;
   cameraMotionProgress: number;
   cameraMotionPlaying: boolean;
   cameraMotionPlaybackRevision: number;
@@ -190,6 +192,9 @@ export interface DirectorActions {
   setPanoramaAsset: (input: PanoramaAssetInput) => void;
   removeImportedAsset: (assetId: string) => void;
   updateObjectTransform: (id: string, patch: Partial<DirectorTransform>) => void;
+  beginCharacterRoutePlacement: (characterId: string) => void;
+  cancelCharacterRoutePlacement: () => void;
+  placeCharacterRoutePoint: (characterId: string, position: [number, number, number]) => string | null;
   addCharacterRoutePoint: (characterId: string) => string | null;
   addObjectMotionKeyframe: (objectId: string, time: number) => string | null;
   insertObjectMotionKeyframeAfter: (objectId: string, keyframeId: string) => string | null;
@@ -296,7 +301,7 @@ const DEFAULT_SCENE: SceneSettings = {
   scale: 1,
   position: [0, 0, 0],
   rotation: [0, 0, 0],
-  backgroundColor: "#000000",
+  backgroundColor: "#5A5C60",
   backgroundBrightness: 1,
   panoramaYaw: 0,
   panoramaRadius: 60,
@@ -308,7 +313,7 @@ const DEFAULT_SCENE: SceneSettings = {
   groundTextureScale: 1,
   groundColor: "#303640",
   groundBrightness: 1,
-  groundOpacity: 0.4,
+  groundOpacity: 0.72,
   groundHeight: 0,
   pathCollisionEnabled: false,
 };
@@ -672,6 +677,7 @@ function createRuntimeStateFromPersistedState(state: DirectorState): DirectorRun
     selectedCameraKeyframeId: null,
     selectedCameraKeyframeIds: [],
     selectedObjectMotionKeyframeId: null,
+    characterRoutePlacementId: null,
     cameraMotionProgress: 0,
     cameraMotionPlaying: false,
     cameraMotionPlaybackRevision: 0,
@@ -1473,6 +1479,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
       commitUiMutation((state) => ({
         ...state,
         viewMode: mode,
+        characterRoutePlacementId: mode === "camera" ? null : state.characterRoutePlacementId,
         cameraMotionPlaying: mode === "camera" ? state.cameraMotionPlaying : false,
         cameraPilotMode: mode === "camera" ? "idle" : state.cameraPilotMode,
         cameraPilotEditKeyframeId: mode === "camera" ? null : state.cameraPilotEditKeyframeId,
@@ -1497,6 +1504,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
           selectedCameraKeyframeId: selectedObject?.kind === "camera" ? null : state.selectedCameraKeyframeId,
           selectedCameraKeyframeIds: selectedObject?.kind === "camera" ? [] : state.selectedCameraKeyframeIds,
           selectedObjectMotionKeyframeId: null,
+          characterRoutePlacementId: state.characterRoutePlacementId === id ? state.characterRoutePlacementId : null,
           cameraMotionProgress: selectedObject?.kind === "camera" ? 0 : state.cameraMotionProgress,
           cameraMotionPlaying: false,
           project: {
@@ -1525,6 +1533,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         return {
           ...state,
           selectedCrowdId: crowdId,
+          characterRoutePlacementId: null,
           selectedObjectId: crowdMemberIds[crowdMemberIds.length - 1] ?? null,
           selectedObjectIds: crowdMemberIds,
           directorInspectorMode: "auto",
@@ -1750,6 +1759,90 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         };
       });
       return recordedId;
+    },
+    beginCharacterRoutePlacement: (characterId) =>
+      commitUiMutation((state) => {
+        const character = state.project.objects.find((item) => item.id === characterId && item.kind === "character");
+        return character && state.selectedObjectId === characterId && !state.selectedCrowdId && !character.locked ? {
+          ...state,
+          characterRoutePlacementId: characterId,
+          cameraMotionPlaying: false,
+        } : state;
+      }),
+    cancelCharacterRoutePlacement: () =>
+      commitUiMutation((state) => state.characterRoutePlacementId
+        ? { ...state, characterRoutePlacementId: null }
+        : state),
+    placeCharacterRoutePoint: (characterId, position) => {
+      let routePointId: string | null = null;
+      commitMutation((state) => {
+        if (state.characterRoutePlacementId !== characterId) return state;
+        const character = state.project.objects.find((item) => item.id === characterId && item.kind === "character");
+        if (!character || state.selectedObjectId !== characterId || state.selectedCrowdId || character.locked) {
+          return { ...state, characterRoutePlacementId: null };
+        }
+
+        const motionPath = normalizeObjectMotionPath(character.motionPath, character.transform);
+        const existing = motionPath.keyframes;
+        const anchorTransform = existing.length ? existing[existing.length - 1].transform : character.transform;
+        const endpointTransform: DirectorTransform = {
+          position: [position[0], anchorTransform.position[1], position[2]],
+          rotation: [...anchorTransform.rotation],
+          scale: [...anchorTransform.scale],
+        };
+        const startId = existing.length === 0
+          ? getNextSequentialId(existing.map((item) => item.id), `${characterId}_motion_key_`, 1)
+          : null;
+        routePointId = getNextSequentialId(
+          [...existing.map((item) => item.id), ...(startId ? [startId] : [])],
+          `${characterId}_motion_key_`,
+          existing.length + 1 + (startId ? 1 : 0)
+        );
+        const endpoint: DirectorObjectMotionKeyframe = {
+          id: routePointId,
+          time: 1,
+          transform: endpointTransform,
+          actionPresetId: null,
+          facingMode: "path",
+          pointBehavior: "pass",
+          holdSeconds: 0,
+          holdAction: "current",
+          holdActionPresetId: null,
+        };
+        const start: DirectorObjectMotionKeyframe | null = startId ? {
+          id: startId,
+          time: 0,
+          transform: {
+            position: [...character.transform.position],
+            rotation: [...character.transform.rotation],
+            scale: [...character.transform.scale],
+          },
+          actionPresetId: null,
+          facingMode: "path",
+          pointBehavior: "pass",
+          holdSeconds: 0,
+          holdAction: "current",
+          holdActionPresetId: null,
+        } : null;
+        const keyframes: DirectorObjectMotionKeyframe[] = start
+          ? [start, endpoint]
+          : [...existing.map((item, index) => ({ ...item, time: index / existing.length })), endpoint];
+
+        return {
+          ...state,
+          characterRoutePlacementId: null,
+          selectedObjectMotionKeyframeId: routePointId,
+          cameraMotionProgress: 1,
+          cameraMotionPlaying: false,
+          project: {
+            ...state.project,
+            objects: state.project.objects.map((item) =>
+              item.id === characterId ? { ...item, motionPath: { ...motionPath, keyframes } } : item
+            ),
+          },
+        };
+      });
+      return routePointId;
     },
     addCharacterRoutePoint: (characterId) => {
       let routePointId: string | null = null;
@@ -3152,6 +3245,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
       set((state) => ({
         ...(state as DirectorRuntimeState),
         motionStudioOpen: open,
+        characterRoutePlacementId: null,
         cameraPilotMode: open ? state.cameraPilotMode : "idle",
         cameraPilotEditKeyframeId: open ? state.cameraPilotEditKeyframeId : null,
         cameraPilotHoveredTargetId: open ? state.cameraPilotHoveredTargetId : null,
@@ -3163,6 +3257,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         ...(state as DirectorRuntimeState),
         viewMode: "director",
         motionStudioOpen: true,
+        characterRoutePlacementId: null,
         cameraPilotMode: mode,
         cameraPilotEditKeyframeId: editKeyframeId,
         cameraMotionPlaying: false,

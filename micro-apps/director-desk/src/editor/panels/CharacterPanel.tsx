@@ -84,10 +84,12 @@ export function CharacterPanel() {
   const removeImportedAnimationAsset = useDirectorStore((state) => state.removeImportedAnimationAsset);
   const setCameraMotionProgress = useDirectorStore((state) => state.setCameraMotionProgress);
   const setCameraMotionPlaying = useDirectorStore((state) => state.setCameraMotionPlaying);
+  const beginCharacterRoutePlacement = useDirectorStore((state) => state.beginCharacterRoutePlacement);
+  const cancelCharacterRoutePlacement = useDirectorStore((state) => state.cancelCharacterRoutePlacement);
+  const characterRoutePlacementId = useDirectorStore((state) => state.characterRoutePlacementId);
   const showCharacterRoutes = useDirectorStore((state) => state.showCharacterRoutes);
   const setShowCharacterRoutes = useDirectorStore((state) => state.setShowCharacterRoutes);
   const restartCameraMotionPlayback = useDirectorStore((state) => state.restartCameraMotionPlayback);
-  const addCharacterRoutePoint = useDirectorStore((state) => state.addCharacterRoutePoint);
   const insertObjectMotionKeyframeAfter = useDirectorStore((state) => state.insertObjectMotionKeyframeAfter);
   const deleteObjectMotionKeyframe = useDirectorStore((state) => state.deleteObjectMotionKeyframe);
   const selectedObjectMotionKeyframeId = useDirectorStore((state) => state.selectedObjectMotionKeyframeId);
@@ -96,8 +98,9 @@ export function CharacterPanel() {
   const updateObjectMotionPath = useDirectorStore((state) => state.updateObjectMotionPath);
 
   useEffect(() => () => {
+    cancelCharacterRoutePlacement();
     if (routeVisibilityBeforeEditingRef.current === false) setShowCharacterRoutes(false);
-  }, [setShowCharacterRoutes]);
+  }, [cancelCharacterRoutePlacement, setShowCharacterRoutes]);
 
   const selection = useMemo(() => {
     const role = objects.find((item) => item.id === selectedObjectId && item.kind === "character");
@@ -231,6 +234,7 @@ export function CharacterPanel() {
   }
 
   function setInspectorTab(tab: "properties" | "pose" | "action" | "route") {
+    if (tab !== "route") cancelCharacterRoutePlacement();
     if (tab === "route" && activeTab !== "route") {
       routeVisibilityBeforeEditingRef.current = showCharacterRoutes;
       ensureRouteEditingVisible();
@@ -705,13 +709,23 @@ export function CharacterPanel() {
                   onClick={() => {
                     ensureRouteEditingVisible();
                     setCameraMotionPlaying(false);
-                    const id = addCharacterRoutePoint(role.id);
-                    if (id) selectObjectMotionKeyframe(id);
+                    beginCharacterRoutePlacement(role.id);
                   }}
                 >
                   <MapPinPlus aria-hidden="true" size={14} />
-                  添加点
+                  {characterRoutePlacementId === role.id ? "点击地面放置" : "添加点"}
                 </button>
+                {characterRoutePlacementId === role.id ? (
+                  <button
+                    className="character-route-icon-button"
+                    type="button"
+                    aria-label="取消地面选点"
+                    title="取消选点（Esc）"
+                    onClick={cancelCharacterRoutePlacement}
+                  >
+                    取消
+                  </button>
+                ) : null}
                 <button
                   aria-label="在当前路线点后插入"
                   title="在当前点后插入"
@@ -796,6 +810,7 @@ export function CharacterPanel() {
                   </button>
                 ))}
               </div>
+              {characterRoutePlacementId === role.id ? <p className="character-route-editor-hint" role="status">移动鼠标预览落点，点击地面确认；按 Esc 取消。</p> : null}
               {selectedRoutePoint ? (
                 <InspectorSection title={`路线点 ${routePath.keyframes.findIndex((point) => point.id === selectedRoutePoint.id) + 1}`} className="character-route-editor">
                   <InspectorRangeNumberField

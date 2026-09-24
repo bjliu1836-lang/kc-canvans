@@ -43,7 +43,7 @@ import { getUE4GroundedLabelY } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { DirectorKeyboardController } from "./DirectorKeyboardController";
 import { SceneRoot } from "./SceneRoot";
 import { ViewportAspectOverlay } from "./ViewportAspectOverlay";
-import { ViewportBackground } from "./ViewportBackground";
+import { ViewportBackground, type PanoramaTextureStatus } from "./ViewportBackground";
 import { ViewportToolbar } from "./ViewportToolbar";
 import { getViewportAspectFrameRect, type ViewportSafeAreaInsets } from "./viewportAspectFrame";
 import { getViewportAspectRatioValue } from "../schema/viewportAspectRatio";
@@ -1005,6 +1005,8 @@ export function DirectorCanvas() {
   const cameraPilotHoveredTargetId = useDirectorStore((state) => state.cameraPilotHoveredTargetId);
   const cameraPilotLockedTargetId = useDirectorStore((state) => state.cameraPilotLockedTargetId);
   const cameraPilotLockedPoint = useDirectorStore((state) => state.cameraPilotLockedPoint);
+  const characterRoutePlacementId = useDirectorStore((state) => state.characterRoutePlacementId);
+  const cancelCharacterRoutePlacement = useDirectorStore((state) => state.cancelCharacterRoutePlacement);
   const sceneObjects = useDirectorStore((state) => state.project.objects);
   const panoramaAsset = useDirectorStore((state) =>
     state.project.assets.find((asset) => asset.id === state.project.panoramaAssetId) as DirectorAssetRef | undefined
@@ -1017,6 +1019,7 @@ export function DirectorCanvas() {
   const viewportContainerRef = useRef<HTMLDivElement | null>(null);
   const viewportCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const referenceVideoCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const referencePanoramaStatusRef = useRef<PanoramaTextureStatus>("idle");
   const mediaExportInProgressRef = useRef(false);
   const benchmarkCleanupRef = useRef<(() => void) | null>(null);
   const viewportCameraSnapshotRef = useRef<CameraShotSnapshot>(DEFAULT_DIRECTOR_VIEW_SNAPSHOT);
@@ -1029,6 +1032,7 @@ export function DirectorCanvas() {
   const [referenceVideoRendering, setReferenceVideoRendering] = useState(false);
   const [automaticViewportAspect, setAutomaticViewportAspect] = useState(16 / 9);
   const isCameraPiloting = cameraPilotMode !== "idle";
+  const isCharacterRoutePlacement = Boolean(characterRoutePlacementId);
   const activeCameraMotionPath = useMemo(
     () => (activeCamera ? getCameraMotionPath(activeCamera) : undefined),
     [activeCamera]
@@ -1191,6 +1195,35 @@ export function DirectorCanvas() {
 
   useEffect(() => () => benchmarkCleanupRef.current?.(), []);
 
+  const updateReferencePanoramaStatus = useCallback((status: PanoramaTextureStatus) => {
+    referencePanoramaStatusRef.current = status;
+  }, []);
+
+  const waitForReferencePanorama = useCallback(async () => {
+    if (!panoramaAsset) return;
+    const startedWaitingAt = performance.now();
+    while (referencePanoramaStatusRef.current !== "ready" && referencePanoramaStatusRef.current !== "error") {
+      if (performance.now() - startedWaitingAt > 10_000) {
+        throw new Error("全景图纹理仍在加载，无法导出 MP4，请稍后重试");
+      }
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+    if (referencePanoramaStatusRef.current === "error") {
+      throw new Error("全景图加载失败，无法导出 MP4，请重新导入后再试");
+    }
+  }, [panoramaAsset]);
+
+  useEffect(() => {
+    if (!characterRoutePlacementId) return;
+    const cancelWithEscape = (event: KeyboardEvent) => {
+      if (event.code !== "Escape") return;
+      event.preventDefault();
+      cancelCharacterRoutePlacement();
+    };
+    window.addEventListener("keydown", cancelWithEscape, true);
+    return () => window.removeEventListener("keydown", cancelWithEscape, true);
+  }, [cancelCharacterRoutePlacement, characterRoutePlacementId]);
+
   useLayoutEffect(() => {
     const element = viewportContainerRef.current;
     if (!element) return;
@@ -1217,6 +1250,7 @@ export function DirectorCanvas() {
       const originalPlaying = useDirectorStore.getState().cameraMotionPlaying;
       flushSync(() => {
         setReferenceVideoQuality(quality);
+        referencePanoramaStatusRef.current = "idle";
         setReferenceVideoRendering(true);
       });
       try {
@@ -1224,6 +1258,7 @@ export function DirectorCanvas() {
         while (!referenceVideoCanvasRef.current && performance.now() - startedWaitingAt < 2000) {
           await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         }
+        await waitForReferencePanorama();
         const canvas = referenceVideoCanvasRef.current;
         const mimeType = getSupportedReferenceVideoMimeType();
         if (!canvas || !mimeType || !activeCamera || !activeCameraMotionPath || activeCameraMotionPath.keyframes.length < 2) {
@@ -1284,7 +1319,7 @@ export function DirectorCanvas() {
       }
     });
     return () => clearReferenceVideoExportHandler();
-  }, [activeCamera, activeCameraMotionPath, activeMotionDuration, setCameraMotionPlaying, setCameraMotionProgress]);
+  }, [activeCamera, activeCameraMotionPath, activeMotionDuration, setCameraMotionPlaying, setCameraMotionProgress, waitForReferencePanorama]);
 
   useEffect(() => {
     setCleanFrameExportHandler(async ({ fileName, position, quality }) => {
@@ -1296,6 +1331,7 @@ export function DirectorCanvas() {
       const targetProgress = position === "first" ? 0 : position === "last" ? 1 : originalProgress;
       flushSync(() => {
         setReferenceVideoQuality(quality);
+        referencePanoramaStatusRef.current = "idle";
         setReferenceVideoRendering(true);
       });
       try {
@@ -1305,6 +1341,7 @@ export function DirectorCanvas() {
         while (!referenceVideoCanvasRef.current && performance.now() - startedWaitingAt < 2000) {
           await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         }
+        await waitForReferencePanorama();
         await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
         const canvas = referenceVideoCanvasRef.current;
         if (!canvas) throw new Error("当前浏览器无法导出成片帧");
@@ -1329,7 +1366,7 @@ export function DirectorCanvas() {
       }
     });
     return () => clearCleanFrameExportHandler();
-  }, [activeCamera, setCameraMotionPlaying, setCameraMotionProgress]);
+  }, [activeCamera, setCameraMotionPlaying, setCameraMotionProgress, waitForReferencePanorama]);
 
   function getViewportCameraSnapshot(): CameraShotSnapshot {
     return viewportCameraSnapshotRef.current;
@@ -1408,7 +1445,7 @@ export function DirectorCanvas() {
 
   return (
     <div className="canvas-frame" data-benchmark-mode={benchmarkMode ?? "off"}>
-      <div className="director-canvas" data-testid="director-canvas" ref={viewportContainerRef}>
+      <div className={`director-canvas${isCharacterRoutePlacement ? " is-route-placement" : ""}`} data-testid="director-canvas" ref={viewportContainerRef}>
         <Canvas
           key={`main-${contextPerformanceConfig.antialias ? "aa" : "no-aa"}-${contextPerformanceConfig.preserveDrawingBuffer ? "capture" : "standard"}`}
           camera={{ position: directorViewSnapshot.position, fov: directorViewSnapshot.fov }}
@@ -1418,7 +1455,7 @@ export function DirectorCanvas() {
             preserveDrawingBuffer: contextPerformanceConfig.preserveDrawingBuffer,
           }}
           onPointerMissed={() => {
-            if (!isCameraPiloting) openSceneInspector();
+            if (!isCameraPiloting && !isCharacterRoutePlacement) openSceneInspector();
           }}
           onCreated={({ camera, gl }) => {
             const perspectiveCamera = camera as ThreePerspectiveCamera;
@@ -1465,7 +1502,7 @@ export function DirectorCanvas() {
             <OrbitControls
               ref={controlsRef}
               enableDamping
-              enabled={!isCameraPiloting}
+              enabled={!isCameraPiloting && !isCharacterRoutePlacement}
               makeDefault
               rotateSpeed={viewportRotateSensitivity}
               target={DEFAULT_DIRECTOR_VIEW_SNAPSHOT.target}
@@ -1576,6 +1613,7 @@ export function DirectorCanvas() {
               <ViewportBackground
                 backgroundColor={sceneSettings.backgroundColor}
                 backgroundBrightness={sceneSettings.backgroundBrightness}
+                onPanoramaStatusChange={updateReferencePanoramaStatus}
                 panoramaAsset={panoramaAsset}
                 panoramaRadius={sceneSettings.panoramaRadius}
                 panoramaYaw={sceneSettings.panoramaYaw}

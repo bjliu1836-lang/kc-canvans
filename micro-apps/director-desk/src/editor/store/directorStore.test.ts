@@ -56,7 +56,7 @@ it("seeds the demo with one mannequin role and one camera", () => {
   expect(state.viewportRuleOfThirdsEnabled).toBe(false);
   expect(state.viewportRotateSensitivity).toBe(DEFAULT_VIEWPORT_ROTATE_SENSITIVITY);
   expect(state.viewportZoomSensitivity).toBe(DEFAULT_VIEWPORT_ZOOM_SENSITIVITY);
-  expect(state.project.scene.backgroundColor).toBe("#000000");
+  expect(state.project.scene.backgroundColor).toBe("#5A5C60");
   expect(defaultCharacter?.name).toBe("角色01");
   expect(defaultCameraObject?.name).toBe("机位01");
   expect(state.project.cameras[0]?.name).toBe("机位01");
@@ -973,6 +973,42 @@ it("appends camera captures with sequential camera-shot names", () => {
   expect(camera.lastCaptureUrl).toBe("data:image/png;base64,c");
 });
 
+it("commits a ground-picked route atomically and anchors an empty route at the current character transform", () => {
+  useDirectorStore.setState(createInitialDirectorState());
+  const characterId = "char_default_a";
+  const before = useDirectorStore.getState().project.objects.find((item) => item.id === characterId)!;
+  useDirectorStore.getState().updateObjectTransform(characterId, { position: [2, 0.4, -3] });
+  useDirectorStore.getState().selectObject(characterId);
+
+  useDirectorStore.getState().beginCharacterRoutePlacement(characterId);
+  expect(useDirectorStore.getState().project.objects.find((item) => item.id === characterId)?.motionPath?.keyframes ?? []).toEqual([]);
+
+  const endpointId = useDirectorStore.getState().placeCharacterRoutePoint(characterId, [7, 99, 4]);
+  const path = useDirectorStore.getState().project.objects.find((item) => item.id === characterId)?.motionPath;
+  expect(endpointId).toBeTruthy();
+  expect(path?.keyframes).toMatchObject([
+    { time: 0, transform: { position: [2, 0.4, -3] }, actionPresetId: null },
+    { id: endpointId, time: 1, transform: { position: [7, 0.4, 4] } },
+  ]);
+  expect(path?.keyframes[0].id).not.toBe(endpointId);
+  expect(useDirectorStore.getState().characterRoutePlacementId).toBeNull();
+  expect(useDirectorStore.getState().selectedObjectId).toBe(before.id);
+});
+
+it("cancels a pending ground route placement when the selected object changes or camera piloting starts", () => {
+  useDirectorStore.setState(createInitialDirectorState());
+  useDirectorStore.getState().selectObject("char_default_a");
+  useDirectorStore.getState().beginCharacterRoutePlacement("char_default_a");
+  useDirectorStore.getState().selectObject("cam_1");
+  expect(useDirectorStore.getState().characterRoutePlacementId).toBeNull();
+  expect(useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a")?.motionPath?.keyframes ?? []).toEqual([]);
+
+  useDirectorStore.getState().selectObject("char_default_a");
+  useDirectorStore.getState().beginCharacterRoutePlacement("char_default_a");
+  useDirectorStore.getState().startCameraPilot();
+  expect(useDirectorStore.getState().characterRoutePlacementId).toBeNull();
+});
+
 it("keeps capture-time camera metadata with the screenshot", () => {
   useDirectorStore.setState(createInitialDirectorState());
 
@@ -1106,7 +1142,7 @@ it("keeps persisted director scenes isolated per canvas card instance", () => {
   useDirectorStore.getState().openScopedScene("node_director_b");
 
   expect(useDirectorStore.getState().viewportAspectRatio).toBe("auto");
-  expect(useDirectorStore.getState().project.scene.backgroundColor).toBe("#000000");
+  expect(useDirectorStore.getState().project.scene.backgroundColor).toBe("#5A5C60");
 
   useDirectorStore.getState().updateScene({ backgroundColor: "#303640" });
 

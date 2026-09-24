@@ -21,6 +21,8 @@ type PanoramaTextureState =
   | { status: "ready"; texture: Texture }
   | { status: "error"; error: Error };
 
+export type PanoramaTextureStatus = PanoramaTextureState["status"];
+
 export function configurePanoramaTexture(texture: Texture, projectionMode: PanoramaProjectionMode = "equirectangular") {
   texture.colorSpace = SRGBColorSpace;
   if (projectionMode === "equirectangular") {
@@ -95,12 +97,14 @@ export function ViewportBackground({
   panoramaAsset,
   panoramaRadius,
   panoramaYaw,
+  onPanoramaStatusChange,
 }: {
   backgroundColor: string;
   backgroundBrightness?: number;
   panoramaAsset?: DirectorAssetRef | null;
   panoramaRadius: number;
   panoramaYaw: number;
+  onPanoramaStatusChange?: (status: PanoramaTextureStatus) => void;
 }) {
   const { gl, scene } = useThree();
   const projectionMode = panoramaAsset?.projectionMode ?? "equirectangular";
@@ -127,6 +131,10 @@ export function ViewportBackground({
     scene.backgroundRotation.set(0, textureState.status === "ready" && projectionMode === "equirectangular" ? rotationY : 0, 0);
     gl.setClearColor(fallbackColor, 1);
   }, [backgroundBrightness, fallbackColor, gl, projectionMode, rotationY, scene, textureState]);
+
+  useEffect(() => {
+    onPanoramaStatusChange?.(textureState.status);
+  }, [onPanoramaStatusChange, textureState.status]);
 
   return (
     <>

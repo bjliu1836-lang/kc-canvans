@@ -387,20 +387,20 @@ it("restarts action playback from zero when another action is chosen while alrea
   expect(state.cameraMotionPlaybackRevision).toBe(previousRevision + 1);
 });
 
-it("adds and edits a route point from the character route tab", async () => {
+it("enters ground route placement from the character route tab without writing a keyframe", async () => {
   const user = userEvent.setup();
   render(<CharacterPanel />);
 
   await user.click(screen.getByRole("button", { name: "路线" }));
   await user.click(screen.getByRole("button", { name: "添加点" }));
 
-  expect(screen.getByRole("button", { name: "选择路线点 1" })).toHaveAttribute("aria-pressed", "true");
-  await user.selectOptions(screen.getByLabelText("路线点本段动作"), "run-cycle");
-  await user.selectOptions(screen.getByLabelText("路线点朝向方式"), "path");
+  expect(useDirectorStore.getState().characterRoutePlacementId).toBe("char_default_a");
+  expect(useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a")?.motionPath?.keyframes ?? []).toEqual([]);
+  expect(screen.getByRole("status")).toHaveTextContent("点击地面确认");
 
-  const point = useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a")?.motionPath?.keyframes[0];
-  expect(point?.actionPresetId).toBe("run-cycle");
-  expect(point?.facingMode).toBe("path");
+  await user.click(screen.getByRole("button", { name: "取消地面选点" }));
+  expect(useDirectorStore.getState().characterRoutePlacementId).toBeNull();
+  expect(useDirectorStore.getState().project.objects.find((item) => item.id === "char_default_a")?.motionPath?.keyframes ?? []).toEqual([]);
 });
 
 it("selects a route point and seeks the scene preview to that point", async () => {

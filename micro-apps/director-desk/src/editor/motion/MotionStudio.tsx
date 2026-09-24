@@ -83,6 +83,11 @@ export function MotionStudio({
   const cameraPilotFollowTarget = useDirectorStore((state) => state.cameraPilotFollowTarget);
   const selectedObjectId = useDirectorStore((state) => state.selectedObjectId);
   const sceneObjects = useDirectorStore((state) => state.project.objects);
+  const sceneSettings = useDirectorStore((state) => state.project.scene);
+  const panoramaAsset = useDirectorStore((state) =>
+    state.project.assets.find((asset) => asset.id === state.project.panoramaAssetId)
+  );
+  const updateScene = useDirectorStore((state) => state.updateScene);
   const setMotionStudioOpen = useDirectorStore((state) => state.setMotionStudioOpen);
   const setViewMode = useDirectorStore((state) => state.setViewMode);
   const ensureMotionCamera = useDirectorStore((state) => state.ensureMotionCamera);
@@ -438,6 +443,12 @@ export function MotionStudio({
       {exportOpen ? (
         <section className="motion-export-panel" aria-label="导出运镜设置">
           <div><strong>导出 MP4 参考视频</strong><small>导出干净的第一视角运镜，不包含轨迹线和操作界面</small></div>
+          <p className="motion-export-background" role="status">
+            {panoramaAsset ? `将使用全景背景：${panoramaAsset.name || panoramaAsset.fileName}` : `将使用纯色背景：${sceneSettings.backgroundColor}`}
+            {!panoramaAsset && (sceneSettings.backgroundColor.toLowerCase() === "#000000" || sceneSettings.backgroundBrightness <= 0) ? (
+              <button type="button" onClick={() => updateScene({ backgroundColor: "#5A5C60", backgroundBrightness: 1 })}>使用基础背景</button>
+            ) : null}
+          </p>
           <label><span>画质</span><select aria-label="参考视频画质" value={exportQuality} onChange={(event) => setExportQuality(event.currentTarget.value as ReferenceVideoExportQuality)}><option value="720p">720p</option><option value="1080p">1080p</option></select></label>
           <label><span>帧率</span><select aria-label="参考视频帧率" value={exportFps} onChange={(event) => setExportFps(Number(event.currentTarget.value))}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
           <button type="button" className="motion-export-confirm" disabled={motionPath.keyframes.length < 2 || exporting} onClick={() => void exportReferenceVideo()}><Download aria-hidden="true" size={14} />{exporting ? "正在录制" : "导出 MP4"}</button>

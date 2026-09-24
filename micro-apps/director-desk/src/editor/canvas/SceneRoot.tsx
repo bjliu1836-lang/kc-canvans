@@ -1488,6 +1488,77 @@ function CharacterRouteRig({
   );
 }
 
+function CharacterRoutePlacementPlane({
+  character,
+  objects,
+  scene,
+  sceneRootRef,
+}: {
+  character: DirectorObject;
+  objects: DirectorObject[];
+  scene: SceneSettings;
+  sceneRootRef: MutableRefObject<Group | null>;
+}) {
+  const placeCharacterRoutePoint = useDirectorStore((state) => state.placeCharacterRoutePoint);
+  const routeAnchor = useMemo(() => {
+    const path = normalizeObjectMotionPath(character.motionPath, character.transform);
+    return path.keyframes[path.keyframes.length - 1]?.transform ?? character.transform;
+  }, [character.motionPath, character.transform]);
+  const [previewPosition, setPreviewPosition] = useState<[number, number, number]>(() => [
+    character.transform.position[0],
+    scene.groundHeight,
+    character.transform.position[2],
+  ]);
+
+  const getLocalPlacementPosition = useCallback((event: Pick<ThreeEvent<MouseEvent>, "point">) => {
+    const localPoint = event.point.clone();
+    sceneRootRef.current?.worldToLocal(localPoint);
+    const snap = scene.snapToGrid ? (value: number) => Math.round(value) : (value: number) => value;
+    const candidate = {
+      position: [snap(localPoint.x), routeAnchor.position[1], snap(localPoint.z)] as [number, number, number],
+      rotation: [...routeAnchor.rotation] as [number, number, number],
+      scale: [...routeAnchor.scale] as [number, number, number],
+    };
+    const constrained = constrainObjectMotionTransform(character, candidate, scene, objects);
+    return [constrained.position[0], routeAnchor.position[1], constrained.position[2]] as [number, number, number];
+  }, [character, objects, routeAnchor, scene, sceneRootRef]);
+
+  const updatePreview = useCallback((event: ThreeEvent<PointerEvent>) => {
+    event.stopPropagation();
+    setPreviewPosition(getLocalPlacementPosition(event));
+  }, [getLocalPlacementPosition]);
+
+  return (
+    <>
+      <mesh
+        name="character-route-placement-ground"
+        position={[0, scene.groundHeight, 0]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        onClick={(event) => {
+          event.stopPropagation();
+          placeCharacterRoutePoint(character.id, getLocalPlacementPosition(event));
+        }}
+        onPointerMove={updatePreview}
+        userData={{ [HIDE_FROM_VIEWPORT_CAPTURE_KEY]: true }}
+      >
+        <planeGeometry args={[GROUND_PLANE_SIZE, GROUND_PLANE_SIZE]} />
+        <meshBasicMaterial depthWrite={false} opacity={0} transparent />
+      </mesh>
+      <group position={[previewPosition[0], scene.groundHeight, previewPosition[2]]} userData={{ [HIDE_FROM_VIEWPORT_CAPTURE_KEY]: true }}>
+        <mesh position={[0, 0.025, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.22, 0.34, 36]} />
+          <meshBasicMaterial color="#F7B955" depthTest={false} depthWrite={false} transparent opacity={0.96} />
+        </mesh>
+        <mesh position={[0, 0.06, 0]}>
+          <sphereGeometry args={[0.09, 16, 12]} />
+          <meshBasicMaterial color="#FFF2C2" depthTest={false} />
+        </mesh>
+        <ViewportObjectLabel position={[0, 0.42, 0]}>点击放置</ViewportObjectLabel>
+      </group>
+    </>
+  );
+}
+
 export type SceneRootRenderMode = "interactive" | "director-monitor" | "clean-camera";
 
 export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRootRenderMode }) {
@@ -1508,6 +1579,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
   const selectedCrowdId = useDirectorStore((state) => state.selectedCrowdId);
   const transformMode = useDirectorStore((state) => state.transformMode);
   const showCharacterRoutes = useDirectorStore((state) => state.showCharacterRoutes);
+  const characterRoutePlacementId = useDirectorStore((state) => state.characterRoutePlacementId);
   const selectObject = useDirectorStore((state) => state.selectObject);
   const selectCrowd = useDirectorStore((state) => state.selectCrowd);
   const interactive = renderMode === "interactive";
@@ -1556,6 +1628,9 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
 
     return result;
   }, [objects]);
+  const routePlacementCharacter = interactive
+    ? objects.find((item) => item.id === characterRoutePlacementId && item.kind === "character")
+    : null;
 
   function handleObjectSelect(item: DirectorObject) {
     if (item.kind === "character" && item.crowdId) {
@@ -1588,6 +1663,14 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
             transparent
           />
         </mesh>
+      ) : null}
+      {routePlacementCharacter ? (
+        <CharacterRoutePlacementPlane
+          character={routePlacementCharacter}
+          objects={objects}
+          scene={scene}
+          sceneRootRef={sceneRootRef}
+        />
       ) : null}
       {objects
         .filter((item) => item.visible && item.kind !== "camera")
@@ -1627,9 +1710,10 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
                 && !item.locked
                 && cameraPilotMode === "idle"
                 && !selectedObjectMotionKeyframeId
+                && !characterRoutePlacementId
               }
               translationSnap={translationSnap}
-              onSelect={handleObjectSelect}
+              onSelect={characterRoutePlacementId ? undefined : handleObjectSelect}
             />
           );
         })}
@@ -1641,7 +1725,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
             objects={objects}
             selected={selectedCrowdId === crowdId}
             transformMode={transformMode}
-            transformable={cameraPilotMode === "idle" && !(crowdLocksById.get(crowdId) ?? false)}
+            transformable={cameraPilotMode === "idle" && !characterRoutePlacementId && !(crowdLocksById.get(crowdId) ?? false)}
             translationSnap={translationSnap}
           />
         )
@@ -1655,7 +1739,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
             duration={activeMotionDuration}
             progress={cameraMotionProgress}
             playing={cameraMotionPlaying}
-            showHandles={interactive}
+            showHandles={interactive && !characterRoutePlacementId}
             scene={scene}
             objects={objects}
             transformMode={transformMode}
@@ -1668,7 +1752,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
             .filter(({ object }) => object?.visible ?? true)
             .map(({ camera, object }) => (
               <group key={camera.id}>
-                {interactive && !motionStudioOpen && !camera.isVirtual ? (
+                {interactive && !motionStudioOpen && !characterRoutePlacementId && !camera.isVirtual ? (
                   <ViewportCameraRig
                     camera={camera}
                     object={object}
@@ -1679,7 +1763,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
                     translationSnap={translationSnap}
                   />
                 ) : null}
-                {interactive && cameraPilotMode === "idle" && (object?.id === selectedObjectId || (motionStudioOpen && camera.id === activeCameraId)) ? (
+                {interactive && cameraPilotMode === "idle" && !characterRoutePlacementId && (object?.id === selectedObjectId || (motionStudioOpen && camera.id === activeCameraId)) ? (
                   <CameraMotionPathRig
                     camera={camera}
                     scene={scene}
