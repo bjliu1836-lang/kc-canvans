@@ -14,7 +14,6 @@ import {
   Route,
   SlidersHorizontal,
   Trash2,
-  Users,
   Video,
   X,
 } from "lucide-react";
@@ -41,7 +40,6 @@ import {
 import {
   CAMERA_PATH_TEMPLATES,
   createCameraPathTemplate,
-  getCameraPathTemplatesByGroup,
   type CameraPathTemplateId,
 } from "./cameraPathTemplates";
 import {
@@ -81,6 +79,7 @@ export function MotionStudio({
   const cameraMotionProgress = useDirectorStore((state) => state.cameraMotionProgress);
   const cameraMotionPlaying = useDirectorStore((state) => state.cameraMotionPlaying);
   const cameraPilotFollowTarget = useDirectorStore((state) => state.cameraPilotFollowTarget);
+  const sceneInstanceId = useDirectorStore((state) => state.sceneInstanceId);
   const selectedObjectId = useDirectorStore((state) => state.selectedObjectId);
   const sceneObjects = useDirectorStore((state) => state.project.objects);
   const sceneSettings = useDirectorStore((state) => state.project.scene);
@@ -114,13 +113,33 @@ export function MotionStudio({
   const [arrivalTimeDraft, setArrivalTimeDraft] = useState("");
   const [templateTargetObjectId, setTemplateTargetObjectId] = useState("");
   const [templateScale, setTemplateScale] = useState(1);
-  const [templateGroup, setTemplateGroup] = useState<"official" | "community">("official");
+  const [showMoreTemplates, setShowMoreTemplates] = useState(false);
   const [activeTemplateId, setActiveTemplateId] = useState<CameraPathTemplateId | null>(null);
+  const [pendingTemplateId, setPendingTemplateId] = useState<CameraPathTemplateId | null>(null);
   const activeTemplateRef = useRef<{
+    cameraId: string;
     snapshot: CameraShotSnapshot;
     targetObjectId: string;
     templateId: CameraPathTemplateId;
   } | null>(null);
+  const templateRouteFingerprintRef = useRef<string | null>(null);
+  const didDefaultTemplateTargetRef = useRef(false);
+
+  useEffect(() => {
+    didDefaultTemplateTargetRef.current = false;
+    activeTemplateRef.current = null;
+    templateRouteFingerprintRef.current = null;
+    setTemplateTargetObjectId("");
+    setActiveTemplateId(null);
+    setPendingTemplateId(null);
+  }, [sceneInstanceId]);
+
+  useEffect(() => {
+    activeTemplateRef.current = null;
+    templateRouteFingerprintRef.current = null;
+    setActiveTemplateId(null);
+    setPendingTemplateId(null);
+  }, [activeCamera?.id]);
 
   useEffect(() => {
     if (!open) return;
@@ -132,6 +151,21 @@ export function MotionStudio({
       setTemplateTargetObjectId(selectedObjectId);
     }
   }, [selectedObjectId]);
+
+  useEffect(() => {
+    const characters = sceneObjects.filter((object) => object.kind === "character");
+    const selectedObject = selectedObjectId
+      ? sceneObjects.find((object) => object.id === selectedObjectId && isCameraFocusableObject(object))
+      : null;
+    if (selectedObject) {
+      didDefaultTemplateTargetRef.current = true;
+      return;
+    }
+    if (characters.length === 1 && !didDefaultTemplateTargetRef.current) {
+      didDefaultTemplateTargetRef.current = true;
+      setTemplateTargetObjectId(characters[0].id);
+    }
+  }, [sceneObjects, selectedObjectId]);
 
   const activeMotionPath = activeCamera ? getCameraMotionPath(activeCamera) : null;
   const activeSelectedKeyframe = activeMotionPath?.keyframes.find((item) => item.id === selectedCameraKeyframeId) ?? null;
@@ -156,6 +190,10 @@ export function MotionStudio({
   const motionPath = activeMotionPath!;
   const trackableObjects = sceneObjects.filter(isCameraFocusableObject);
   const canPreviewCameraMotion = motionPath.keyframes.length >= 2;
+  const hasCharacterRoute = sceneObjects.some((object) =>
+    object.kind === "character" && (object.motionPath?.keyframes.length ?? 0) >= 2
+  );
+  const canPreviewFinishedShot = canPreviewCameraMotion || hasCharacterRoute;
   const selectedKeyframe = motionPath.keyframes.find((item) => item.id === selectedCameraKeyframeId) ?? null;
   const trackingObjectId = selectedKeyframe?.targetMode === "object"
     ? selectedKeyframe.targetObjectId ?? ""
@@ -178,8 +216,16 @@ export function MotionStudio({
     ?? timingSample?.segment
     ?? getActiveCameraWaypointIndex(cameraMotionProgress, motionPath.keyframes.map((item) => item.time));
   const timelinePreviewActive = cameraMotionPlaying || cameraMotionProgress > 0.0001;
-  const visiblePathTemplates = getCameraPathTemplatesByGroup(templateGroup);
+  const featuredPathTemplates = ["follow", "push-in", "orbit-close"] as const;
+  const visiblePathTemplates = CAMERA_PATH_TEMPLATES.filter((template) =>
+    showMoreTemplates ? !featuredPathTemplates.includes(template.id as typeof featuredPathTemplates[number]) : featuredPathTemplates.includes(template.id as typeof featuredPathTemplates[number])
+  );
   const activeTemplate = CAMERA_PATH_TEMPLATES.find((template) => template.id === activeTemplateId) ?? null;
+  const hasManualTemplateEdits = Boolean(
+    activeTemplateRef.current?.cameraId === activeCamera.id
+    && templateRouteFingerprintRef.current
+    && templateRouteFingerprintRef.current !== JSON.stringify(motionPath)
+  );
 
   function addCurrentView() {
     recordCameraMotionSnapshot(activeCamera.id, getViewportCameraSnapshot());
@@ -309,10 +355,17 @@ export function MotionStudio({
     setBatchSelectionEnabled(false);
     updateCameraMotionPath(activeCamera.id, generatedPath);
     selectCameraMotionKeyframe(generatedPath.keyframes[0]?.id ?? null);
+    const updatedCamera = useDirectorStore.getState().project.cameras.find((camera) => camera.id === activeCamera.id);
+    templateRouteFingerprintRef.current = JSON.stringify(updatedCamera ? getCameraMotionPath(updatedCamera) : generatedPath);
   }
 
   function applyPathTemplate(templateId: CameraPathTemplateId) {
+    if (motionPath.keyframes.length > 0 && (activeTemplateRef.current?.cameraId !== activeCamera.id || hasManualTemplateEdits)) {
+      setPendingTemplateId(templateId);
+      return;
+    }
     const context = {
+      cameraId: activeCamera.id,
       snapshot: getViewportCameraSnapshot(),
       targetObjectId: templateTargetObjectId,
       templateId,
@@ -322,16 +375,30 @@ export function MotionStudio({
     generatePathTemplate({ ...context, scale: templateScale });
   }
 
+  function confirmTemplateReplacement() {
+    if (!pendingTemplateId) return;
+    const context = {
+      cameraId: activeCamera.id,
+      snapshot: getViewportCameraSnapshot(),
+      targetObjectId: templateTargetObjectId,
+      templateId: pendingTemplateId,
+    };
+    activeTemplateRef.current = context;
+    setActiveTemplateId(pendingTemplateId);
+    setPendingTemplateId(null);
+    generatePathTemplate({ ...context, scale: templateScale });
+  }
+
   function updateTemplateScale(scale: number) {
     setTemplateScale(scale);
     const context = activeTemplateRef.current;
-    if (context) generatePathTemplate({ ...context, scale });
+    if (context?.cameraId === activeCamera.id && !hasManualTemplateEdits) generatePathTemplate({ ...context, scale });
   }
 
   function updateTemplateTarget(targetObjectId: string) {
     setTemplateTargetObjectId(targetObjectId);
     const context = activeTemplateRef.current;
-    if (!context) return;
+    if (!context || context.cameraId !== activeCamera.id || hasManualTemplateEdits) return;
     const nextContext = { ...context, targetObjectId };
     activeTemplateRef.current = nextContext;
     generatePathTemplate({ ...nextContext, scale: templateScale });
@@ -352,7 +419,8 @@ export function MotionStudio({
   }
 
   function previewInView(mode: "director" | "camera") {
-    if (!canPreviewCameraMotion) return;
+    if (mode === "director" && !canPreviewCameraMotion) return;
+    if (mode === "camera" && !canPreviewFinishedShot) return;
     if (cameraMotionPlaying && viewMode === mode) {
       setCameraMotionPlaying(false);
       return;
@@ -402,7 +470,7 @@ export function MotionStudio({
   }
 
   async function exportReferenceVideo() {
-    if (motionPath.keyframes.length < 2 || exporting) return;
+    if (!canPreviewFinishedShot || exporting) return;
     setExporting(true);
     setExportStatus("正在录制参考视频...");
     try {
@@ -451,70 +519,55 @@ export function MotionStudio({
           </p>
           <label><span>画质</span><select aria-label="参考视频画质" value={exportQuality} onChange={(event) => setExportQuality(event.currentTarget.value as ReferenceVideoExportQuality)}><option value="720p">720p</option><option value="1080p">1080p</option></select></label>
           <label><span>帧率</span><select aria-label="参考视频帧率" value={exportFps} onChange={(event) => setExportFps(Number(event.currentTarget.value))}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
-          <button type="button" className="motion-export-confirm" disabled={motionPath.keyframes.length < 2 || exporting} onClick={() => void exportReferenceVideo()}><Download aria-hidden="true" size={14} />{exporting ? "正在录制" : "导出 MP4"}</button>
+          <p className="motion-export-duration">本段时长 {motionPath.duration.toFixed(1)} 秒{canPreviewCameraMotion ? " · 使用镜头路线" : hasCharacterRoute ? " · 固定当前机位" : ""}</p>
+          <button type="button" className="motion-export-confirm" disabled={!canPreviewFinishedShot || exporting} onClick={() => void exportReferenceVideo()}><Download aria-hidden="true" size={14} />{exporting ? "正在录制" : "导出 MP4"}</button>
           {exportStatus ? <output className="motion-export-status" role="status">{exportStatus}</output> : null}
         </section>
       ) : null}
 
       <section className="motion-preview-panel" aria-label="运镜预览方式">
         <div className="motion-block-heading">
-          <strong>你想怎么看？</strong>
-          <small>路线检查和最终镜头分开预览</small>
+          <strong>先看镜头画面</strong>
+          <small>人物有路线时，固定机位也能直接预览和导出</small>
         </div>
         <div className="motion-preview-options">
           <button
             type="button"
             className={`motion-preview-option is-director${viewMode === "director" ? " is-active" : ""}`}
             disabled={!canPreviewCameraMotion}
-            aria-label={cameraMotionPlaying && viewMode === "director" ? "暂停导演视角预演" : "播放导演视角预演"}
+            aria-label={cameraMotionPlaying && viewMode === "director" ? "暂停检查路线" : "播放检查路线"}
             aria-pressed={viewMode === "director"}
             onClick={() => previewInView("director")}
           >
             <Route aria-hidden="true" size={17} />
-            <span><strong>{cameraMotionPlaying && viewMode === "director" ? "暂停" : "看路线"}</strong><small>导演视角看镜头轨迹点</small></span>
+            <span><strong>{cameraMotionPlaying && viewMode === "director" ? "暂停" : "检查路线"}</strong><small>查看镜头轨迹点</small></span>
             {cameraMotionPlaying && viewMode === "director" ? <Pause aria-hidden="true" size={14} /> : <Play aria-hidden="true" size={14} />}
           </button>
           <button
             type="button"
             className={`motion-preview-option is-camera${viewMode === "camera" ? " is-active" : ""}`}
-            disabled={!canPreviewCameraMotion}
-            aria-label={cameraMotionPlaying && viewMode === "camera" ? "暂停第一视角运镜预演" : "播放第一视角运镜预演"}
+            disabled={!canPreviewFinishedShot}
+            aria-label={cameraMotionPlaying && viewMode === "camera" ? "暂停镜头画面" : "播放镜头画面"}
             aria-pressed={viewMode === "camera"}
             onClick={() => previewInView("camera")}
           >
             <Video aria-hidden="true" size={17} />
-            <span><strong>{cameraMotionPlaying && viewMode === "camera" ? "暂停" : "看成片"}</strong><small>第一视角看最终镜头</small></span>
+            <span><strong>{cameraMotionPlaying && viewMode === "camera" ? "暂停" : "看镜头画面"}</strong><small>{canPreviewCameraMotion ? "第一视角看最终镜头" : "固定当前机位拍人物路线"}</small></span>
             {cameraMotionPlaying && viewMode === "camera" ? <Pause aria-hidden="true" size={14} /> : <Play aria-hidden="true" size={14} />}
           </button>
         </div>
-        {!canPreviewCameraMotion ? (
+        {!canPreviewFinishedShot ? (
           <p className="motion-preview-requirement" role="status">
-            镜头预览需要至少 2 个镜头轨迹点；人物动作仍可在底部播放条预览。
+            先为人物添加路线，或添加至少 2 个镜头轨迹点。
           </p>
-        ) : null}
+        ) : !canPreviewCameraMotion ? <p className="motion-preview-requirement" role="status">固定机位已就绪：可直接看镜头画面和导出 MP4；添加 2 个镜头点后可检查路线。</p> : null}
       </section>
 
       <div className="motion-studio-body">
         <section className="motion-template-panel" aria-label="镜头预设">
           <div className="motion-block-heading">
-            <strong>一键镜头</strong>
-            <small>选择主体和幅度，再套用镜头</small>
-          </div>
-          <div className="motion-template-tabs" role="group" aria-label="镜头预设分类">
-            <button
-              type="button"
-              aria-pressed={templateGroup === "official"}
-              className={templateGroup === "official" ? "is-active" : undefined}
-              onClick={() => setTemplateGroup("official")}
-              aria-label="基础预设"
-            >基础预设 <small>{getCameraPathTemplatesByGroup("official").length}</small></button>
-            <button
-              type="button"
-              aria-pressed={templateGroup === "community"}
-              className={templateGroup === "community" ? "is-active" : undefined}
-              onClick={() => setTemplateGroup("community")}
-              aria-label="群友预设"
-            ><Users aria-hidden="true" size={12} />群友预设 <small>{getCameraPathTemplatesByGroup("community").length}</small></button>
+            <strong>选一种拍法</strong>
+            <small>选好主体后，一键生成可继续调整的镜头</small>
           </div>
           <div className="motion-template-controls">
             <label>
@@ -531,9 +584,9 @@ export function MotionStudio({
               </select>
             </label>
             <label>
-              <span><Move3D aria-hidden="true" size={13} />轨迹范围</span>
+              <span><Move3D aria-hidden="true" size={13} />运动幅度</span>
               <input
-                aria-label="镜头预设轨迹范围"
+                aria-label="镜头预设运动幅度"
                 type="range"
                 min="0.5"
                 max="3"
@@ -559,11 +612,25 @@ export function MotionStudio({
                 title={template.description}
                 onClick={() => applyPathTemplate(template.id)}
               >
-                {template.label}
+                {template.id === "follow" ? "跟着人物走" : template.id === "push-in" ? "靠近人物" : template.id === "orbit-close" ? "环绕人物" : template.label}
               </button>
             ))}
           </div>
-          {templateGroup === "community" ? (
+          <button
+            type="button"
+            className="motion-template-more"
+            aria-expanded={showMoreTemplates}
+            onClick={() => setShowMoreTemplates((current) => !current)}
+          >{showMoreTemplates ? "收起更多镜头" : "更多镜头"}</button>
+          {hasManualTemplateEdits ? <p className="motion-template-edited" role="status">已保留手工路线；修改主体或运动幅度后，重新套用镜头才会更新路线。</p> : null}
+          {pendingTemplateId ? (
+            <div className="motion-template-replace" role="alert">
+              <span>这会替换已手工调整的镜头路线。</span>
+              <button type="button" onClick={confirmTemplateReplacement}>替换路线</button>
+              <button type="button" onClick={() => setPendingTemplateId(null)}>取消</button>
+            </div>
+          ) : null}
+          {showMoreTemplates && activeTemplate?.group === "community" ? (
             <details className="motion-community-template-meta" aria-label="群友预设资料">
               <summary>群友预设资料</summary>
               {activeTemplate?.group === "community" ? (

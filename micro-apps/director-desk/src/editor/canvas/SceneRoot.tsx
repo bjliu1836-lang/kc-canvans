@@ -1505,10 +1505,14 @@ function CharacterRoutePlacementPlane({
     return path.keyframes[path.keyframes.length - 1]?.transform ?? character.transform;
   }, [character.motionPath, character.transform]);
   const [previewPosition, setPreviewPosition] = useState<[number, number, number]>(() => [
-    character.transform.position[0],
+    routeAnchor.position[0],
     scene.groundHeight,
-    character.transform.position[2],
+    routeAnchor.position[2],
   ]);
+
+  useEffect(() => {
+    setPreviewPosition([routeAnchor.position[0], scene.groundHeight, routeAnchor.position[2]]);
+  }, [character.id, routeAnchor.position, scene.groundHeight]);
 
   const getLocalPlacementPosition = useCallback((event: Pick<ThreeEvent<MouseEvent>, "point">) => {
     const localPoint = event.point.clone();
@@ -1544,6 +1548,16 @@ function CharacterRoutePlacementPlane({
         <planeGeometry args={[GROUND_PLANE_SIZE, GROUND_PLANE_SIZE]} />
         <meshBasicMaterial depthWrite={false} opacity={0} transparent />
       </mesh>
+      <Line
+        color="#F7B955"
+        lineWidth={2}
+        opacity={0.9}
+        points={[
+          [routeAnchor.position[0], scene.groundHeight + 0.04, routeAnchor.position[2]],
+          [previewPosition[0], scene.groundHeight + 0.04, previewPosition[2]],
+        ]}
+        transparent
+      />
       <group position={[previewPosition[0], scene.groundHeight, previewPosition[2]]} userData={{ [HIDE_FROM_VIEWPORT_CAPTURE_KEY]: true }}>
         <mesh position={[0, 0.025, 0]} rotation={[-Math.PI / 2, 0, 0]}>
           <ringGeometry args={[0.22, 0.34, 36]} />
@@ -1553,7 +1567,7 @@ function CharacterRoutePlacementPlane({
           <sphereGeometry args={[0.09, 16, 12]} />
           <meshBasicMaterial color="#FFF2C2" depthTest={false} />
         </mesh>
-        <ViewportObjectLabel position={[0, 0.42, 0]}>点击放置</ViewportObjectLabel>
+        <ViewportObjectLabel position={[0, 0.42, 0]}>终点预览 · 点击确认</ViewportObjectLabel>
       </group>
     </>
   );

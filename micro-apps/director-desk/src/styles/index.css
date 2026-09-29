@@ -1631,7 +1631,7 @@ textarea:focus-visible {
   box-shadow: none;
 }
 
-.director-canvas > div,
+.director-canvas > div:first-child,
 .director-canvas canvas {
   display: block;
   width: 100% !important;
@@ -5483,8 +5483,84 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
+.motion-export-duration,
+.motion-template-edited {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: rgb(var(--text-muted-rgb));
+  font-size: 10px;
+}
+
+.motion-template-more {
+  width: 100%;
+  min-height: 28px;
+  border: 1px solid rgb(var(--border-rgb) / 0.58);
+  border-radius: 5px;
+  color: rgb(var(--text-muted-rgb));
+  background: rgb(var(--surface-rgb) / 0.35);
+  font-size: 10px;
+}
+
+.motion-template-replace {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 5px;
+  padding: 7px;
+  border: 1px solid rgb(var(--motion-rgb) / 0.48);
+  border-radius: 6px;
+  color: rgb(var(--text-muted-rgb));
+  background: rgb(var(--motion-rgb) / 0.08);
+  font-size: 10px;
+}
+
+.motion-template-replace button {
+  padding: 3px 6px;
+  border: 1px solid rgb(var(--border-rgb) / 0.68);
+  border-radius: 4px;
+  color: rgb(var(--text-rgb));
+  background: rgb(var(--surface-rgb) / 0.78);
+  font: inherit;
+}
+
 .director-canvas.is-route-placement canvas {
   cursor: crosshair;
+}
+
+.character-route-placement-hud {
+  position: absolute;
+  z-index: 12;
+  top: 18px;
+  left: 50%;
+  display: grid;
+  min-width: 232px;
+  padding: 8px 10px;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  transform: translateX(-50%);
+  border: 1px solid rgb(247 185 85 / 0.58);
+  border-radius: 8px;
+  color: rgb(var(--text-rgb));
+  background: rgb(var(--panel-rgb) / 0.9);
+  box-shadow: 0 8px 22px rgb(0 0 0 / 0.26);
+  font-size: 11px;
+}
+
+.character-route-placement-hud small {
+  color: rgb(var(--text-muted-rgb));
+  font-size: 10px;
+}
+
+.character-route-placement-hud button {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  align-self: center;
+  padding: 4px 7px;
+  border: 1px solid rgb(var(--border-rgb) / 0.68);
+  border-radius: 5px;
+  color: rgb(var(--text-rgb));
+  background: rgb(var(--surface-rgb) / 0.74);
+  font: inherit;
 }
 
 .motion-export-panel label,
@@ -5622,8 +5698,8 @@ textarea:focus-visible {
 
 .reference-video-renderer {
   position: fixed;
-  left: -100000px;
   top: 0;
+  left: -100000px;
   display: block;
   overflow: hidden;
   pointer-events: none;

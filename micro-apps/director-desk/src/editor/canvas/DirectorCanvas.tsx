@@ -1037,11 +1037,6 @@ export function DirectorCanvas() {
     () => (activeCamera ? getCameraMotionPath(activeCamera) : undefined),
     [activeCamera]
   );
-  const isCameraPreviewing =
-    motionStudioOpen
-    && viewMode === "camera"
-    && (activeCameraMotionPath?.keyframes.length ?? 0) >= 2
-    && !isCameraPiloting;
   const showViewportGrid = shouldRenderViewportGrid(sceneSettings.showGrid);
   const hasObjectMotion = useMemo(
     () => sceneObjects.some((item) =>
@@ -1049,7 +1044,17 @@ export function DirectorCanvas() {
     ),
     [sceneObjects]
   );
+  const hasCharacterRoute = useMemo(
+    () => sceneObjects.some((item) => item.kind === "character" && (item.motionPath?.keyframes?.length ?? 0) >= 2),
+    [sceneObjects]
+  );
   const hasPlayableMotion = (activeCameraMotionPath?.keyframes.length ?? 0) >= 2 || hasObjectMotion;
+  const canPreviewFinishedShot = (activeCameraMotionPath?.keyframes.length ?? 0) >= 2 || hasCharacterRoute;
+  const isCameraPreviewing =
+    motionStudioOpen
+    && viewMode === "camera"
+    && canPreviewFinishedShot
+    && !isCameraPiloting;
   const activeMotionDuration = activeCameraMotionPath?.duration ?? DEFAULT_CAMERA_MOTION_PATH.duration;
   const viewportAspectRatio = useDirectorStore((state) => state.viewportAspectRatio);
   const finishedShotFov = useDirectorStore((state) => state.finishedShotFov);
@@ -1261,7 +1266,7 @@ export function DirectorCanvas() {
         await waitForReferencePanorama();
         const canvas = referenceVideoCanvasRef.current;
         const mimeType = getSupportedReferenceVideoMimeType();
-        if (!canvas || !mimeType || !activeCamera || !activeCameraMotionPath || activeCameraMotionPath.keyframes.length < 2) {
+        if (!canvas || !mimeType || !activeCamera || !activeCameraMotionPath || !canPreviewFinishedShot) {
           throw new Error("当前浏览器无法导出参考视频");
         }
 
@@ -1319,7 +1324,7 @@ export function DirectorCanvas() {
       }
     });
     return () => clearReferenceVideoExportHandler();
-  }, [activeCamera, activeCameraMotionPath, activeMotionDuration, setCameraMotionPlaying, setCameraMotionProgress, waitForReferencePanorama]);
+  }, [activeCamera, activeCameraMotionPath, activeMotionDuration, canPreviewFinishedShot, setCameraMotionPlaying, setCameraMotionProgress, waitForReferencePanorama]);
 
   useEffect(() => {
     setCleanFrameExportHandler(async ({ fileName, position, quality }) => {
@@ -1549,6 +1554,13 @@ export function DirectorCanvas() {
             <SceneRoot />
           </Suspense>
         </Canvas>
+        {isCharacterRoutePlacement ? (
+          <div className="character-route-placement-hud" role="status">
+            <span>正在为{sceneObjects.find((object) => object.id === characterRoutePlacementId)?.name ?? "人物"}选终点</span>
+            <small>移动鼠标预览，点击地面确认</small>
+            <button type="button" onClick={cancelCharacterRoutePlacement}>取消</button>
+          </div>
+        ) : null}
       </div>
       <ViewportAspectOverlay
         bottomPadding={aspectOverlayBottomPadding}

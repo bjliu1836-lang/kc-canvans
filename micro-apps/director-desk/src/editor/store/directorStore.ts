@@ -146,6 +146,8 @@ export interface DirectorClipboardEntry {
 }
 
 interface DirectorInternalState {
+  /** Changes only when a complete director project is replaced or a different desk scene is opened. */
+  sceneInstanceId: number;
   clipboard: DirectorClipboardEntry[];
   clipboardPasteCount: number;
   undoStack: DirectorState[];
@@ -663,11 +665,12 @@ function readPersistedDirectorState(options: DirectorStateOptions = {}): Directo
   }
 }
 
-function createRuntimeStateFromPersistedState(state: DirectorState): DirectorRuntimeState {
+function createRuntimeStateFromPersistedState(state: DirectorState, sceneInstanceId = 0): DirectorRuntimeState {
   const snapshot = cloneJsonValue(state);
 
   return {
     ...snapshot,
+    sceneInstanceId,
     clipboard: [],
     clipboardPasteCount: 0,
     undoStack: [],
@@ -3306,7 +3309,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
     undo: () => {
       const currentState = get() as DirectorRuntimeState;
       if (currentState.undoBatchDepth > 0 && currentState.undoBatchSnapshot) {
-        const runtimeState = createRuntimeStateFromPersistedState(currentState.undoBatchSnapshot);
+        const runtimeState = createRuntimeStateFromPersistedState(currentState.undoBatchSnapshot, currentState.sceneInstanceId);
         set({
           ...runtimeState,
           clipboard: currentState.clipboard,
@@ -3322,7 +3325,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
       const previousState = currentState.undoStack[currentState.undoStack.length - 1];
       if (!previousState) return;
 
-      const runtimeState = createRuntimeStateFromPersistedState(previousState);
+      const runtimeState = createRuntimeStateFromPersistedState(previousState, currentState.sceneInstanceId);
       set({
         ...runtimeState,
         clipboard: currentState.clipboard,
@@ -3343,6 +3346,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
 
       set({
         ...runtimeState,
+        sceneInstanceId: currentState.sceneInstanceId + 1,
         clipboard: currentState.clipboard,
         clipboardPasteCount: currentState.clipboardPasteCount,
         undoStack: [],
@@ -3352,6 +3356,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
     replaceProject: (project) =>
       commitMutation((state) => ({
         ...state,
+        sceneInstanceId: state.sceneInstanceId + 1,
         project: migrateDirectorProject(cloneJsonValue(project)),
         selectedObjectId: null,
         selectedObjectIds: [],
@@ -3371,6 +3376,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
 
       set({
         ...createRuntimeStateFromPersistedState(snapshot),
+        sceneInstanceId: (get() as DirectorRuntimeState).sceneInstanceId + 1,
         clipboard: (get() as DirectorRuntimeState).clipboard,
         clipboardPasteCount: (get() as DirectorRuntimeState).clipboardPasteCount,
         undoStack: [],

@@ -253,6 +253,20 @@ it("renders a live R3F viewport and director scene controls", () => {
   expect(screen.getByTestId("orbit-controls")).toHaveAttribute("data-enabled", "true");
 });
 
+it("shows the selected character and a cancel control while placing a route endpoint", () => {
+  useDirectorStore.setState({
+    ...useDirectorStore.getState(),
+    characterRoutePlacementId: "char_default_a",
+  });
+
+  render(<App />);
+
+  expect(screen.getByText("正在为角色01选终点")).toBeInTheDocument();
+  expect(screen.getByText("移动鼠标预览，点击地面确认")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  expect(useDirectorStore.getState().characterRoutePlacementId).toBeNull();
+});
+
 it("passes the active panorama to the interactive viewport", () => {
   useDirectorStore.getState().setPanoramaAsset({
     name: "测试全景",

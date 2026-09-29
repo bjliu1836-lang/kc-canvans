@@ -962,7 +962,7 @@ export function CharacterPanel() {
                     />
                   ) : null}
                 </InspectorSection>
-              ) : <p>添加第一个路线点后，可在场景里拖动编号点继续摆路线。</p>}
+              ) : <p>点“添加点”后在地面选择终点；起点会自动使用人物当前位置。</p>}
             </>
           )}
         </InspectorSection>

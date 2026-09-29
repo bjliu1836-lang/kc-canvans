@@ -18,8 +18,11 @@ it("presents a beginner-friendly shooting workflow with the final key bindings",
 
   expect(screen.getByRole("region", { name: "运镜工作台" })).toBeInTheDocument();
   expect(screen.getByText(/无需摆放机位/)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "播放导演视角预演" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "播放第一视角运镜预演" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "播放检查路线" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "播放镜头画面" })).toBeInTheDocument();
+  expect(screen.getByText("跟着人物走")).toBeInTheDocument();
+  expect(screen.getByText("靠近人物")).toBeInTheDocument();
+  expect(screen.getByText("环绕人物")).toBeInTheDocument();
   expect(screen.getByText("空格")).toBeInTheDocument();
   expect(screen.getByText("E")).toBeInTheDocument();
   expect(screen.getByText("上升")).toBeInTheDocument();
@@ -49,26 +52,27 @@ it("plays the completed move from the camera first-person view", async () => {
   });
   render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
 
-  await user.click(screen.getByRole("button", { name: "播放第一视角运镜预演" }));
+  await user.click(screen.getByRole("button", { name: "播放镜头画面" }));
 
   expect(useDirectorStore.getState().viewMode).toBe("camera");
   expect(useDirectorStore.getState().cameraMotionPlaying).toBe(true);
 });
 
-it("keeps camera previews disabled until the camera itself has two route points", async () => {
+it("uses the fixed current camera when a character has a route", async () => {
   const user = userEvent.setup();
   useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
   useDirectorStore.getState().addCharacterRoutePoint("char_default_a");
   render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
 
-  const routePreview = screen.getByRole("button", { name: "播放导演视角预演" });
-  const finishedPreview = screen.getByRole("button", { name: "播放第一视角运镜预演" });
+  const routePreview = screen.getByRole("button", { name: "播放检查路线" });
+  const finishedPreview = screen.getByRole("button", { name: "播放镜头画面" });
   expect(routePreview).toBeDisabled();
-  expect(finishedPreview).toBeDisabled();
-  expect(screen.getByText("镜头预览需要至少 2 个镜头轨迹点；人物动作仍可在底部播放条预览。")).toBeInTheDocument();
+  expect(finishedPreview).toBeEnabled();
+  expect(screen.getByText("固定机位已就绪：可直接看镜头画面和导出 MP4；添加 2 个镜头点后可检查路线。")).toBeInTheDocument();
 
   await user.click(finishedPreview);
-  expect(useDirectorStore.getState().cameraMotionPlaying).toBe(false);
+  expect(useDirectorStore.getState().cameraMotionPlaying).toBe(true);
+  expect(useDirectorStore.getState().viewMode).toBe("camera");
 });
 
 it("automatically creates a hidden motion camera when the scene has no placed camera", async () => {
@@ -298,7 +302,46 @@ it("generates an editable camera route that follows the selected character", asy
   expect(useDirectorStore.getState().cameraMotionProgress).toBe(0);
 });
 
-it("opens community presets separately and shows their contribution metadata", async () => {
+it("restores the unique-character template default after a project switch without overriding a same-scene center choice", async () => {
+  const user = userEvent.setup();
+  render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
+
+  const target = screen.getByRole("combobox", { name: "镜头预设跟踪主体" });
+  await waitFor(() => expect(target).toHaveValue("char_default_a"));
+  await user.selectOptions(target, "");
+  expect(target).toHaveValue("");
+
+  const nextProject = JSON.parse(JSON.stringify(useDirectorStore.getState().project));
+  useDirectorStore.getState().replaceProject(nextProject);
+
+  await waitFor(() => expect(target).toHaveValue("char_default_a"));
+});
+
+it("keeps an explicitly selected focus target ahead of the single-character default", () => {
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    ...state,
+    selectedObjectId: "prop_focus",
+    selectedObjectIds: ["prop_focus"],
+    project: {
+      ...state.project,
+      objects: [...state.project.objects, {
+        id: "prop_focus",
+        name: "道具01",
+        kind: "prop" as const,
+        visible: true,
+        locked: false,
+        transform: { position: [2, 0, 0] as [number, number, number], rotation: [0, 0, 0] as [number, number, number], scale: [1, 1, 1] as [number, number, number] },
+      }],
+    },
+  });
+
+  render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
+
+  expect(screen.getByRole("combobox", { name: "镜头预设跟踪主体" })).toHaveValue("prop_focus");
+});
+
+it("keeps less common presets under more cameras and shows their contribution metadata", async () => {
   const user = userEvent.setup();
   useDirectorStore.setState({
     ...useDirectorStore.getState(),
@@ -307,19 +350,16 @@ it("opens community presets separately and shows their contribution metadata", a
   });
   render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
 
-  expect(screen.getByRole("button", { name: "基础预设" })).toHaveAttribute("aria-pressed", "true");
-  expect(screen.queryByRole("button", { name: "套用跟拍镜头预设" })).not.toBeInTheDocument();
-
-  await user.click(screen.getByRole("button", { name: "群友预设" }));
-  expect(screen.getByRole("button", { name: "群友预设" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.queryByRole("button", { name: "套用平行跟拍镜头预设" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "更多镜头" }));
   expect(screen.queryByRole("button", { name: "套用推镜镜头预设" })).not.toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "套用跟拍镜头预设" }));
+  await user.click(screen.getByRole("button", { name: "套用平行跟拍镜头预设" }));
 
   const metadata = screen.getByRole("group", { name: "群友预设资料" });
-  expect(metadata).toHaveTextContent("跟拍 · v1.0.0");
+  expect(metadata).toHaveTextContent("平行跟拍 · v1.0.0");
   expect(metadata).toHaveTextContent("贡献者：AIGC 耀光");
   expect(metadata).toHaveTextContent("联系：抖音号：AIJPDM001");
-  expect(metadata).toHaveTextContent("适合：走路、跑步、运动主体");
+  expect(metadata).toHaveTextContent("适合：人物行进、车辆侧拍");
   const path = useDirectorStore.getState().project.cameras[0].motionPath;
   expect(path?.keyframes.every((point) => point.targetObjectId === "char_default_a")).toBe(true);
 });
@@ -333,11 +373,12 @@ it("scales the generated camera route without changing the tracked subject", asy
   });
   render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
 
+  await user.click(screen.getByRole("button", { name: "更多镜头" }));
   await user.click(screen.getByRole("button", { name: "套用左移镜镜头预设" }));
   const smallPath = useDirectorStore.getState().project.cameras[0].motionPath!;
   const smallTravel = Math.abs(smallPath.keyframes[2].position[0] - smallPath.keyframes[0].position[0]);
 
-  const range = screen.getByRole("slider", { name: "镜头预设轨迹范围" });
+  const range = screen.getByRole("slider", { name: "镜头预设运动幅度" });
   fireEvent.change(range, { target: { value: "3" } });
   const largePath = useDirectorStore.getState().project.cameras[0].motionPath!;
   const largeTravel = Math.abs(largePath.keyframes[2].position[0] - largePath.keyframes[0].position[0]);
@@ -356,18 +397,79 @@ it("updates a community preset route immediately while its range slider moves", 
   });
   render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
 
-  await user.click(screen.getByRole("button", { name: "群友预设" }));
+  await user.click(screen.getByRole("button", { name: "更多镜头" }));
   await user.click(screen.getByRole("button", { name: "套用平行跟拍镜头预设" }));
   const smallPath = useDirectorStore.getState().project.cameras[0].motionPath!;
   const smallDistance = Math.hypot(...smallPath.keyframes[0].position);
 
-  fireEvent.change(screen.getByRole("slider", { name: "镜头预设轨迹范围" }), { target: { value: "2.5" } });
+  fireEvent.change(screen.getByRole("slider", { name: "镜头预设运动幅度" }), { target: { value: "2.5" } });
   const largePath = useDirectorStore.getState().project.cameras[0].motionPath!;
   const largeDistance = Math.hypot(...largePath.keyframes[0].position);
 
   expect(largeDistance).toBeGreaterThan(smallDistance * 2);
   expect(screen.getByText("250%")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "套用平行跟拍镜头预设" })).toHaveAttribute("aria-pressed", "true");
+});
+
+it("keeps hand-edited template routes when replacement is cancelled", async () => {
+  const user = userEvent.setup();
+  render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
+
+  await user.click(screen.getByRole("button", { name: "套用推镜镜头预设" }));
+  const firstPoint = useDirectorStore.getState().project.cameras[0].motionPath!.keyframes[0];
+  useDirectorStore.getState().updateCameraMotionKeyframe("cam_1", firstPoint.id, { position: [9, 2, 8] });
+  const routeBeforeReplacement = JSON.stringify(useDirectorStore.getState().project.cameras[0].motionPath);
+  const selectedPointBeforeReplacement = useDirectorStore.getState().selectedCameraKeyframeId;
+  await waitFor(() => expect(screen.getByText(/已保留手工路线/)).toBeInTheDocument());
+
+  fireEvent.change(screen.getByRole("slider", { name: "镜头预设运动幅度" }), { target: { value: "2" } });
+  expect(JSON.stringify(useDirectorStore.getState().project.cameras[0].motionPath)).toBe(routeBeforeReplacement);
+
+  await user.click(screen.getByRole("button", { name: "套用跟拍镜头预设" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("这会替换已手工调整的镜头路线。");
+  await user.click(screen.getByRole("button", { name: "取消" }));
+
+  expect(JSON.stringify(useDirectorStore.getState().project.cameras[0].motionPath)).toBe(routeBeforeReplacement);
+  expect(useDirectorStore.getState().selectedCameraKeyframeId).toBe(selectedPointBeforeReplacement);
+});
+
+it("clears a pending template replacement and selected template when switching cameras", async () => {
+  const user = userEvent.setup();
+  const state = useDirectorStore.getState();
+  const firstCamera = state.project.cameras[0];
+  const secondCamera = {
+    ...firstCamera,
+    id: "cam_2",
+    name: "机位02",
+    motionPath: undefined,
+  };
+  useDirectorStore.setState({
+    ...state,
+    project: {
+      ...state.project,
+      cameras: [firstCamera, secondCamera],
+      activeCameraId: firstCamera.id,
+    },
+  });
+  render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
+
+  await user.click(screen.getByRole("button", { name: "套用推镜镜头预设" }));
+  const firstPoint = useDirectorStore.getState().project.cameras[0].motionPath!.keyframes[0];
+  useDirectorStore.getState().updateCameraMotionKeyframe(firstCamera.id, firstPoint.id, { position: [9, 2, 8] });
+  await user.click(screen.getByRole("button", { name: "套用跟拍镜头预设" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("这会替换已手工调整的镜头路线。");
+
+  useDirectorStore.setState((current) => ({
+    ...current,
+    project: {
+      ...current.project,
+      activeCameraId: secondCamera.id,
+    },
+  }));
+
+  await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  expect(screen.getByRole("button", { name: "套用推镜镜头预设" })).toHaveAttribute("aria-pressed", "false");
+  expect(screen.getByRole("button", { name: "套用跟拍镜头预设" })).toHaveAttribute("aria-pressed", "false");
 });
 
 it("enables stabilization for tracked route points while keeping per-waypoint overrides", async () => {
