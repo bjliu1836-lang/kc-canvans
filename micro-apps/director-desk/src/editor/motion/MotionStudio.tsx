@@ -27,9 +27,14 @@ import { getCameraMotionPath, getCameraMotionTimingPlan, getCameraMotionTimingSa
 import {
   getAnimatedCameraFocusTarget,
   getDirectorObjectFocusTarget,
+  getDirectorObjectFocusOffsetY,
   isCameraFocusableObject,
 } from "../schema/cameraTarget";
 import { getObjectMotionSnapshot } from "../schema/objectMotion";
+import { getViewportAspectRatioValue } from "../schema/viewportAspectRatio";
+import { getCameraRigPositionFromViewSnapshot, getCameraViewSnapshotFromShot } from "../schema/cameraGeometry";
+import type { DirectorCameraMotionPath, DirectorObject } from "../schema/directorProject";
+import { getBodyPreset } from "../runtime/mannequin/bodyTypes";
 import type { CameraShotSnapshot } from "../store/directorStore";
 import { useDirectorStore } from "../store/directorStore";
 import {
@@ -38,8 +43,12 @@ import {
   getCameraMotionPresetPatch,
 } from "./cameraMotionPresets";
 import {
+  applyCameraFramingToPath,
+  CAMERA_FRAMINGS,
   CAMERA_PATH_TEMPLATES,
   createCameraPathTemplate,
+  getCameraFramingDistance,
+  type CameraFramingId,
   type CameraPathTemplateId,
 } from "./cameraPathTemplates";
 import {
@@ -59,14 +68,65 @@ export function getActiveCameraWaypointIndex(progress: number, times: number[]) 
   return active;
 }
 
+function getTemplateSubjectHeight(object: DirectorObject | null) {
+  if (!object) return 2;
+  const verticalScale = Math.max(0.1, Math.abs(object.transform.scale[1]));
+  if (object.kind === "character" && object.characterRig?.rigType !== "ue4-mannequin") {
+    const p = getBodyPreset(object.bodyType).proportions;
+    const abdomenY = p.hipY + p.pelvisRadius * 0.6 + p.torsoLowerHeight * 0.5;
+    const chestY = abdomenY + p.torsoLowerHeight * 0.5 + p.torsoUpperHeight * 0.5 + p.torsoUpperRadius * 0.1;
+    const neckY = chestY + p.torsoUpperHeight * 0.5 + p.neckHeight * 0.5 + p.torsoUpperRadius * 0.2;
+    const headY = neckY + p.neckHeight * 0.5 + p.headRadius * 0.75;
+    return Math.min(24, Math.max(0.25, (headY + p.headRadius * p.headScale[1]) * verticalScale));
+  }
+  return Math.min(24, Math.max(0.25, getDirectorObjectFocusOffsetY(object) * 2 * verticalScale));
+}
+
+function getTemplateTargetBodyPart(object: DirectorObject | null, framing: CameraFramingId): DirectorCameraTargetBodyPart {
+  if (object?.kind !== "character") return "center";
+  if (framing === "close-up") return "head";
+  if (framing === "close" || framing === "medium") return "chest";
+  return "center";
+}
+
+function getTemplateFocusTarget(
+  object: DirectorObject,
+  framing: CameraFramingId,
+  subjectHeight: number,
+  resolveObjectFocus?: (object: DirectorObject, bodyPart: DirectorCameraTargetBodyPart) => [number, number, number] | null
+) {
+  const semanticTarget = object.kind === "character"
+    ? resolveObjectFocus?.(object, getTemplateTargetBodyPart(object, framing))
+    : null;
+  if (semanticTarget) return semanticTarget;
+  const target = getDirectorObjectFocusTarget(object);
+  const verticalOffset = object.kind !== "character"
+    ? 0
+    : framing === "close-up" ? subjectHeight * 0.4 : framing === "close" || framing === "medium" ? subjectHeight * 0.1 : 0;
+  return [target[0], target[1] + verticalOffset, target[2]] as [number, number, number];
+}
+
+function getFixedFramingPosition(position: [number, number, number], target: [number, number, number], distance: number) {
+  let x = position[0] - target[0];
+  let y = Math.min(0.25, Math.max(-0.2, position[1] - target[1]));
+  let z = position[2] - target[2];
+  const length = Math.hypot(x, y, z) || 1;
+  x /= length;
+  y /= length;
+  z /= length;
+  return [target[0] + x * distance, target[1] + y * distance, target[2] + z * distance] as [number, number, number];
+}
+
 export function MotionStudio({
   getViewportCameraSnapshot,
   onLoadCameraSnapshot,
   onStartPilot,
+  resolveObjectFocus,
 }: {
   getViewportCameraSnapshot: () => CameraShotSnapshot;
   onLoadCameraSnapshot?: (snapshot: CameraShotSnapshot) => void;
   onStartPilot?: (editKeyframeId?: string | null) => void;
+  resolveObjectFocus?: (object: DirectorObject, bodyPart: DirectorCameraTargetBodyPart) => [number, number, number] | null;
 }) {
   const open = useDirectorStore((state) => state.motionStudioOpen);
   const viewMode = useDirectorStore((state) => state.viewMode);
@@ -83,6 +143,7 @@ export function MotionStudio({
   const selectedObjectId = useDirectorStore((state) => state.selectedObjectId);
   const sceneObjects = useDirectorStore((state) => state.project.objects);
   const sceneSettings = useDirectorStore((state) => state.project.scene);
+  const viewportAspectRatio = useDirectorStore((state) => state.viewportAspectRatio);
   const panoramaAsset = useDirectorStore((state) =>
     state.project.assets.find((asset) => asset.id === state.project.panoramaAssetId)
   );
@@ -97,6 +158,8 @@ export function MotionStudio({
   const setCameraMotionProgress = useDirectorStore((state) => state.setCameraMotionProgress);
   const setCameraMotionPlaying = useDirectorStore((state) => state.setCameraMotionPlaying);
   const updateCameraMotionPath = useDirectorStore((state) => state.updateCameraMotionPath);
+  const updateCamera = useDirectorStore((state) => state.updateCamera);
+  const setFinishedShotFov = useDirectorStore((state) => state.setFinishedShotFov);
   const updateCameraMotionKeyframe = useDirectorStore((state) => state.updateCameraMotionKeyframe);
   const deleteCameraMotionKeyframe = useDirectorStore((state) => state.deleteCameraMotionKeyframe);
   const moveCameraMotionKeyframe = useDirectorStore((state) => state.moveCameraMotionKeyframe);
@@ -112,6 +175,7 @@ export function MotionStudio({
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [arrivalTimeDraft, setArrivalTimeDraft] = useState("");
   const [templateTargetObjectId, setTemplateTargetObjectId] = useState("");
+  const [templateFraming, setTemplateFraming] = useState<CameraFramingId>("full");
   const [templateScale, setTemplateScale] = useState(1);
   const [showMoreTemplates, setShowMoreTemplates] = useState(false);
   const [activeTemplateId, setActiveTemplateId] = useState<CameraPathTemplateId | null>(null);
@@ -120,6 +184,7 @@ export function MotionStudio({
     cameraId: string;
     snapshot: CameraShotSnapshot;
     targetObjectId: string;
+    framing: CameraFramingId;
     templateId: CameraPathTemplateId;
   } | null>(null);
   const templateRouteFingerprintRef = useRef<string | null>(null);
@@ -324,29 +389,37 @@ export function MotionStudio({
 
   function generatePathTemplate({
     scale,
+    framing,
     snapshot,
     targetObjectId,
     templateId,
   }: {
     scale: number;
+    framing: CameraFramingId;
     snapshot: CameraShotSnapshot;
     targetObjectId: string;
     templateId: CameraPathTemplateId;
   }) {
     const targetObject = trackableObjects.find((object) => object.id === targetObjectId) ?? null;
+    const subjectHeight = getTemplateSubjectHeight(targetObject);
+    const targetBodyPart = getTemplateTargetBodyPart(targetObject, framing);
+    const templateDuration = CAMERA_PATH_TEMPLATES.find((template) => template.id === templateId)?.duration ?? motionPath.duration;
     const focusAt = targetObject
-      ? (progress: number) => getDirectorObjectFocusTarget({
+      ? (progress: number) => getTemplateFocusTarget({
           ...targetObject,
-          transform: getObjectMotionSnapshot(targetObject, progress, motionPath.duration),
-        })
+          transform: getObjectMotionSnapshot(targetObject, progress, templateDuration),
+      }, framing, subjectHeight, resolveObjectFocus)
       : () => [...snapshot.target] as [number, number, number];
     const generatedPath = createCameraPathTemplate({
       cameraId: activeCamera.id,
+      aspectRatio: getViewportAspectRatioValue(viewportAspectRatio) ?? 16 / 9,
+      framing,
       focusAt,
       scale,
       snapshot,
+      subjectHeight,
       targetObjectId: targetObject?.id ?? null,
-      targetBodyPart: targetObject?.kind === "character" ? "chest" : "center",
+      targetBodyPart,
       templateId,
     });
 
@@ -354,6 +427,7 @@ export function MotionStudio({
     setCameraMotionProgress(0);
     setBatchSelectionEnabled(false);
     updateCameraMotionPath(activeCamera.id, generatedPath);
+    setFinishedShotFov(null);
     selectCameraMotionKeyframe(generatedPath.keyframes[0]?.id ?? null);
     const updatedCamera = useDirectorStore.getState().project.cameras.find((camera) => camera.id === activeCamera.id);
     templateRouteFingerprintRef.current = JSON.stringify(updatedCamera ? getCameraMotionPath(updatedCamera) : generatedPath);
@@ -368,6 +442,7 @@ export function MotionStudio({
       cameraId: activeCamera.id,
       snapshot: getViewportCameraSnapshot(),
       targetObjectId: templateTargetObjectId,
+      framing: templateFraming,
       templateId,
     };
     activeTemplateRef.current = context;
@@ -381,6 +456,7 @@ export function MotionStudio({
       cameraId: activeCamera.id,
       snapshot: getViewportCameraSnapshot(),
       targetObjectId: templateTargetObjectId,
+      framing: templateFraming,
       templateId: pendingTemplateId,
     };
     activeTemplateRef.current = context;
@@ -402,6 +478,91 @@ export function MotionStudio({
     const nextContext = { ...context, targetObjectId };
     activeTemplateRef.current = nextContext;
     generatePathTemplate({ ...nextContext, scale: templateScale });
+  }
+
+  function updateTemplateFraming(framing: CameraFramingId) {
+    setTemplateFraming(framing);
+    // A fixed framing has no route to play. Show the resulting camera view
+    // immediately so choosing a shot size always has visible feedback.
+    setViewMode("camera");
+    const context = activeTemplateRef.current;
+    if (context?.cameraId === activeCamera.id && !hasManualTemplateEdits) {
+      const nextContext = { ...context, framing };
+      activeTemplateRef.current = nextContext;
+      generatePathTemplate({ ...nextContext, scale: templateScale });
+      return;
+    }
+    const targetObject = trackableObjects.find((object) => object.id === templateTargetObjectId) ?? null;
+    const subjectHeight = getTemplateSubjectHeight(targetObject);
+    const aspectRatio = getViewportAspectRatioValue(viewportAspectRatio) ?? 16 / 9;
+    if (motionPath.keyframes.length < 2) {
+      const target = targetObject
+        ? getTemplateFocusTarget(targetObject, framing, subjectHeight, resolveObjectFocus)
+        : activeCamera.target;
+      const targetBodyPart = targetObject ? getTemplateTargetBodyPart(targetObject, framing) : null;
+      const currentView = getCameraViewSnapshotFromShot(activeCamera);
+      const nextViewPosition = getFixedFramingPosition(
+        currentView.position,
+        target,
+        getCameraFramingDistance({ fov: activeCamera.fov, framing, aspectRatio, subjectHeight })
+      );
+      updateCamera(activeCamera.id, {
+        target,
+        targetMode: "manual",
+        targetObjectId: null,
+        transform: {
+          ...activeCamera.transform,
+          position: getCameraRigPositionFromViewSnapshot({ fov: activeCamera.fov, position: nextViewPosition, target }),
+        },
+      });
+      if (targetObject && targetBodyPart && motionPath.keyframes.length === 1) {
+        updateCameraMotionPath(activeCamera.id, {
+          keyframes: motionPath.keyframes.map((keyframe) => {
+            // Keep an explicitly tracked different subject intact. Otherwise a
+            // one-point/manual route must carry the same semantic target as the
+            // fixed camera, because playback still resolves that waypoint target.
+            if (keyframe.targetMode === "object" && keyframe.targetObjectId !== targetObject.id) return keyframe;
+            return {
+              ...keyframe,
+              position: nextViewPosition,
+              target,
+              targetMode: "object",
+              targetObjectId: targetObject.id,
+              targetBodyPart,
+            };
+          }),
+        });
+      }
+      setFinishedShotFov(null);
+      return;
+    }
+    const targetBodyPart = targetObject ? getTemplateTargetBodyPart(targetObject, framing) : null;
+    const pathWithFramingTarget: DirectorCameraMotionPath = targetObject && targetBodyPart
+      ? {
+          ...motionPath,
+          keyframes: motionPath.keyframes.map((keyframe) => {
+            if (keyframe.targetMode === "object" && keyframe.targetObjectId !== targetObject.id) return keyframe;
+            const animatedObject = {
+              ...targetObject,
+              transform: getObjectMotionSnapshot(targetObject, keyframe.time, motionPath.duration),
+            };
+            return {
+              ...keyframe,
+              target: getTemplateFocusTarget(animatedObject, framing, subjectHeight, resolveObjectFocus),
+              targetMode: "object" as const,
+              targetObjectId: targetObject.id,
+              targetBodyPart,
+            };
+          }),
+        }
+      : motionPath;
+    updateCameraMotionPath(activeCamera.id, applyCameraFramingToPath({
+      aspectRatio,
+      framing,
+      path: pathWithFramingTarget,
+      subjectHeight,
+    }));
+    setFinishedShotFov(null);
   }
 
   function editSelectedWaypoint() {
@@ -583,6 +744,20 @@ export function MotionStudio({
                 ))}
               </select>
             </label>
+            <div className="motion-template-framing" role="group" aria-label="镜头景别">
+              <span>景别</span>
+              <div>
+                {CAMERA_FRAMINGS.map((framing) => (
+                  <button
+                    key={framing.id}
+                    type="button"
+                    aria-pressed={templateFraming === framing.id}
+                    onClick={() => updateTemplateFraming(framing.id)}
+                  >{framing.label}</button>
+                ))}
+              </div>
+              <small>默认全身；景别只调整主体大小，运动幅度保持独立。</small>
+            </div>
             <label>
               <span><Move3D aria-hidden="true" size={13} />运动幅度</span>
               <input
@@ -622,7 +797,7 @@ export function MotionStudio({
             aria-expanded={showMoreTemplates}
             onClick={() => setShowMoreTemplates((current) => !current)}
           >{showMoreTemplates ? "收起更多镜头" : "更多镜头"}</button>
-          {hasManualTemplateEdits ? <p className="motion-template-edited" role="status">已保留手工路线；修改主体或运动幅度后，重新套用镜头才会更新路线。</p> : null}
+          {hasManualTemplateEdits ? <p className="motion-template-edited" role="status">已保留手工路线；切换景别会按主体缩放路线距离，主体和运动幅度需重新套用镜头。</p> : null}
           {pendingTemplateId ? (
             <div className="motion-template-replace" role="alert">
               <span>这会替换已手工调整的镜头路线。</span>

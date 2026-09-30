@@ -26,6 +26,25 @@ export type CameraPathTemplateId =
   | "overhead-follow"
   | "foreground-reveal";
 
+export type CameraFramingId = "wide" | "full" | "medium" | "close" | "close-up";
+
+export interface CameraFramingDefinition {
+  id: CameraFramingId;
+  label: string;
+  frameHeightMultiplier: number;
+}
+
+export const CAMERA_FRAMINGS: CameraFramingDefinition[] = [
+  { id: "wide", label: "远景", frameHeightMultiplier: 2.6 },
+  { id: "full", label: "全身", frameHeightMultiplier: 1.5 },
+  { id: "medium", label: "半身", frameHeightMultiplier: 0.9 },
+  { id: "close", label: "近景", frameHeightMultiplier: 0.55 },
+  // A close-up still needs enough headroom for the head and shoulders. Keeping
+  // this a little wider than the close shot prevents the camera from entering
+  // the character when the target is the head bone.
+  { id: "close-up", label: "特写", frameHeightMultiplier: 0.78 },
+];
+
 export interface CameraPathTemplateDefinition {
   id: CameraPathTemplateId;
   label: string;
@@ -90,20 +109,83 @@ function getTemplateTimes(templateId: CameraPathTemplateId) {
   return STANDARD_TIMES;
 }
 
+export function getCameraFramingDistance({
+  fov,
+  framing = "full",
+  aspectRatio = 16 / 9,
+  subjectHeight = 2,
+}: {
+  fov: number;
+  framing?: CameraFramingId;
+  aspectRatio?: number;
+  subjectHeight?: number;
+}) {
+  const definition = CAMERA_FRAMINGS.find((item) => item.id === framing) ?? CAMERA_FRAMINGS[1];
+  const safeFov = MathUtils.clamp(Number.isFinite(fov) ? fov : 50, 10, 120);
+  const safeSubjectHeight = MathUtils.clamp(Number.isFinite(subjectHeight) ? subjectHeight : 2, 0.25, 24);
+  const safeAspectRatio = MathUtils.clamp(Number.isFinite(aspectRatio) ? aspectRatio : 16 / 9, 0.2, 5);
+  const visibleHeight = safeSubjectHeight * definition.frameHeightMultiplier;
+  const verticalDistance = visibleHeight / (2 * Math.tan(MathUtils.degToRad(safeFov) / 2));
+  const visibleWidth = safeSubjectHeight * 0.48 * definition.frameHeightMultiplier;
+  const horizontalFov = 2 * Math.atan(Math.tan(MathUtils.degToRad(safeFov) / 2) * safeAspectRatio);
+  const horizontalDistance = visibleWidth / (2 * Math.tan(horizontalFov / 2));
+  return MathUtils.clamp(Math.max(verticalDistance, horizontalDistance), 0.5, 80);
+}
+
+export function applyCameraFramingToPath({
+  framing = "full",
+  aspectRatio,
+  path,
+  subjectHeight = 2,
+}: {
+  framing?: CameraFramingId;
+  aspectRatio?: number;
+  path: DirectorCameraMotionPath;
+  subjectHeight?: number;
+}): DirectorCameraMotionPath {
+  const distances = path.keyframes
+    .map((keyframe) => new Vector3(...keyframe.position).distanceTo(new Vector3(...keyframe.target)))
+    .filter((distance) => distance > 0.0001)
+    .sort((left, right) => left - right);
+  if (distances.length === 0) return path;
+  const referenceDistance = distances[Math.floor(distances.length / 2)];
+  const desiredDistance = getCameraFramingDistance({
+    fov: path.keyframes[0]?.fov ?? 50,
+    framing,
+    aspectRatio,
+    subjectHeight,
+  });
+  const distanceScale = desiredDistance / referenceDistance;
+  return {
+    ...path,
+    keyframes: path.keyframes.map((keyframe) => {
+      const target = new Vector3(...keyframe.target);
+      const offset = new Vector3(...keyframe.position).sub(target);
+      return { ...keyframe, position: tuple(target.addScaledVector(offset, distanceScale)) };
+    }),
+  };
+}
+
 export function createCameraPathTemplate({
   cameraId,
+  aspectRatio,
+  framing = "full",
   focusAt,
   scale = 1,
   snapshot,
+  subjectHeight = 2,
   targetObjectId = null,
   targetBodyPart = "center",
   targetFollowMode = "immediate",
   templateId,
 }: {
   cameraId: string;
+  aspectRatio?: number;
+  framing?: CameraFramingId;
   focusAt: (progress: number) => [number, number, number];
   scale?: number;
   snapshot: CameraMotionSnapshot;
+  subjectHeight?: number;
   targetObjectId?: string | null;
   targetBodyPart?: DirectorCameraTargetBodyPart;
   targetFollowMode?: DirectorCameraTargetFollowMode;
@@ -112,11 +194,15 @@ export function createCameraPathTemplate({
   const definition = CAMERA_PATH_TEMPLATES.find((item) => item.id === templateId);
   if (!definition) throw new Error(`Unknown camera path template: ${templateId}`);
   const range = MathUtils.clamp(Number.isFinite(scale) ? scale : 1, 0.25, 3);
-  const motionRange = definition.group === "community" ? 1 : range;
+  const motionRange = range;
   const times = getTemplateTimes(templateId);
   const middleFocus = new Vector3(...focusAt(0.5));
-  const baseOffset = new Vector3(...snapshot.position).sub(middleFocus);
-  if (baseOffset.lengthSq() < 0.25) baseOffset.set(0, 1.4, 6);
+  const viewDirection = new Vector3(...snapshot.position).sub(middleFocus);
+  if (viewDirection.lengthSq() < 0.0001) viewDirection.set(0, 0.15, 1);
+  viewDirection.y = MathUtils.clamp(viewDirection.y, -0.2, 0.25);
+  const baseOffset = viewDirection.normalize().multiplyScalar(
+    getCameraFramingDistance({ fov: snapshot.fov, framing, aspectRatio, subjectHeight })
+  );
   const horizontalRadial = new Vector3(baseOffset.x, 0, baseOffset.z);
   if (horizontalRadial.lengthSq() < 0.0001) horizontalRadial.set(0, 0, 1);
   horizontalRadial.normalize();
@@ -129,7 +215,7 @@ export function createCameraPathTemplate({
   const movingSide = hasTargetMovement
     ? new Vector3().crossVectors(movement.normalize(), up).normalize()
     : right.clone();
-  const baseDistance = Math.max(2, baseOffset.length());
+  const baseDistance = Math.max(0.25, baseOffset.length());
   const handheldJitter = [
     [0, 0, 0], [.08, .04, -.03], [-.05, -.03, .04], [.06, -.02, 0],
     [-.07, .03, -.02], [.04, -.04, .03], [0, 0, 0],
@@ -139,7 +225,7 @@ export function createCameraPathTemplate({
     const centered = progress - 0.5;
     if (templateId === "push-in" || templateId === "pull-out") {
       const direction = templateId === "push-in" ? -1 : 1;
-      return baseOffset.clone().multiplyScalar(1 + direction * centered * 0.7 * motionRange);
+      return baseOffset.clone().multiplyScalar(Math.max(0.35, 1 + direction * centered * 0.7 * motionRange));
     }
     if (templateId === "pan-left" || templateId === "pan-right") {
       const direction = templateId === "pan-left" ? -1 : 1;
@@ -163,7 +249,7 @@ export function createCameraPathTemplate({
       if (!hasTargetMovement) {
         return baseOffset.clone().addScaledVector(right, centered * baseDistance * 0.9 * motionRange);
       }
-      return movingSide.clone().multiplyScalar(baseDistance).addScaledVector(up, Math.max(0.8, baseOffset.y));
+      return movingSide.clone().multiplyScalar(baseDistance).addScaledVector(up, Math.max(0.12, baseOffset.y));
     }
     if (templateId === "follow") {
       return baseOffset.clone().addScaledVector(horizontalRadial, centered * baseDistance * 0.18 * motionRange);
@@ -222,7 +308,6 @@ export function createCameraPathTemplate({
     keyframes: times.map((time, index) => {
       const focus = new Vector3(...focusAt(time));
       const offset = offsetAt(time, index);
-      if (definition.group === "community") offset.multiplyScalar(range);
       const position = focus.clone().add(offset);
       return {
         id: `${cameraId}_${templateId}_${index + 1}`,

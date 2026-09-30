@@ -786,13 +786,16 @@ export function CharacterPanel() {
                 <button type="button" aria-pressed={routePath.speedMode === "soft"} onClick={() => setRouteSpeedMode("soft")}>柔和</button>
                 <button type="button" aria-pressed={(routePath.speedMode ?? "custom") === "custom"} onClick={() => setRouteSpeedMode("custom")}>自定义</button>
               </div>
-              {routePath.speedMode === "custom" ? (
-                <RouteCustomEasingControl
-                  curve={routePath.customEasing}
-                  label="人物段内节奏"
-                  onChange={(customEasing) => updateObjectMotionPath(role.id, { customEasing })}
-                />
-              ) : null}
+              <details className="character-route-advanced" aria-label="人物路线高级调整">
+                <summary>路线高级设置 <small>自定义运动节奏</small></summary>
+                {routePath.speedMode === "custom" ? (
+                  <RouteCustomEasingControl
+                    curve={routePath.customEasing}
+                    label="人物段内节奏"
+                    onChange={(customEasing) => updateObjectMotionPath(role.id, { customEasing })}
+                  />
+                ) : <p className="character-route-editor-hint">选择“自定义”速度后，可调整每段节奏。</p>}
+              </details>
               <div className="character-route-points" role="group" aria-label="人物路线点列表">
                 {routePath.keyframes.map((point, index) => (
                   <button
@@ -813,6 +816,8 @@ export function CharacterPanel() {
               {characterRoutePlacementId === role.id ? <p className="character-route-editor-hint" role="status">移动鼠标预览落点，点击地面确认；按 Esc 取消。</p> : null}
               {selectedRoutePoint ? (
                 <InspectorSection title={`路线点 ${routePath.keyframes.findIndex((point) => point.id === selectedRoutePoint.id) + 1}`} className="character-route-editor">
+                  <details className="character-route-advanced" aria-label="当前路线点高级调整">
+                    <summary>当前点精细调整 <small>到达时间、坐标与朝向</small></summary>
                   <InspectorRangeNumberField
                     label="到达时间"
                     rangeAriaLabel="路线点到达时间滑杆"
@@ -831,6 +836,51 @@ export function CharacterPanel() {
                   ) : routePath.speedMode !== "custom" ? (
                     <p className="character-route-editor-hint">到达时间按当前速度曲线自动计算；选择“自定义”后可调整。</p>
                   ) : null}
+                  <InspectorAxisGroup
+                    label="路线点位置"
+                    axes={([0, 1, 2] as const).map((axis) => ({
+                      axis: (["X", "Y", "Z"] as const)[axis],
+                      ariaLabel: `路线点位置 ${(["X", "Y", "Z"] as const)[axis]}`,
+                      value: selectedRoutePoint.transform.position[axis],
+                      onChange: (value: string) => updateObjectMotionKeyframe(role.id, selectedRoutePoint.id, {
+                        transform: { position: replaceAxis(selectedRoutePoint.transform.position, axis, Number(value)) },
+                      }),
+                    }))}
+                  />
+                  <label className="inspector-field">
+                    <span className="inspector-field-label">到点朝向</span>
+                    <select
+                      aria-label="路线点朝向方式"
+                      value={selectedRoutePoint.facingMode ?? "manual"}
+                      onChange={(event) => updateObjectMotionKeyframe(role.id, selectedRoutePoint.id, {
+                        facingMode: event.currentTarget.value === "path" ? "path" : "manual",
+                      })}
+                    >
+                      <option value="path">面向下一个点</option>
+                      <option value="manual">手动朝向</option>
+                    </select>
+                  </label>
+                  {selectedRoutePoint.facingMode !== "path" ? (
+                    <InspectorRangeNumberField
+                      label="手动朝向"
+                      rangeAriaLabel="路线点手动朝向滑杆"
+                      numberAriaLabel="路线点手动朝向"
+                      min="-180"
+                      max="180"
+                      step="1"
+                      value={selectedRoutePoint.transform.rotation[1] * 180 / Math.PI}
+                      onValueChange={(value) => updateObjectMotionKeyframe(role.id, selectedRoutePoint.id, {
+                        transform: {
+                          rotation: replaceAxis(
+                            selectedRoutePoint.transform.rotation,
+                            1,
+                            Number(value) * Math.PI / 180
+                          ),
+                        },
+                      })}
+                    />
+                  ) : null}
+                  </details>
                   <div className="inspector-field">
                     <span className="inspector-field-label">到点行为</span>
                     <div className="character-route-shape character-route-shape--compact" role="group" aria-label="人物路线点行为">
@@ -903,17 +953,6 @@ export function CharacterPanel() {
                       ) : null}
                     </>
                   ) : null}
-                  <InspectorAxisGroup
-                    label="路线点位置"
-                    axes={([0, 1, 2] as const).map((axis) => ({
-                      axis: (["X", "Y", "Z"] as const)[axis],
-                      ariaLabel: `路线点位置 ${(["X", "Y", "Z"] as const)[axis]}`,
-                      value: selectedRoutePoint.transform.position[axis],
-                      onChange: (value: string) => updateObjectMotionKeyframe(role.id, selectedRoutePoint.id, {
-                        transform: { position: replaceAxis(selectedRoutePoint.transform.position, axis, Number(value)) },
-                      }),
-                    }))}
-                  />
                   <label className="inspector-field">
                     <span className="inspector-field-label">本段动作</span>
                     <select
@@ -928,39 +967,6 @@ export function CharacterPanel() {
                       {importedActionOptions.map((action) => <option key={action.id} value={action.id}>{action.label}</option>)}
                     </select>
                   </label>
-                  <label className="inspector-field">
-                    <span className="inspector-field-label">到点朝向</span>
-                    <select
-                      aria-label="路线点朝向方式"
-                      value={selectedRoutePoint.facingMode ?? "manual"}
-                      onChange={(event) => updateObjectMotionKeyframe(role.id, selectedRoutePoint.id, {
-                        facingMode: event.currentTarget.value === "path" ? "path" : "manual",
-                      })}
-                    >
-                      <option value="path">面向下一个点</option>
-                      <option value="manual">手动朝向</option>
-                    </select>
-                  </label>
-                  {selectedRoutePoint.facingMode !== "path" ? (
-                    <InspectorRangeNumberField
-                      label="手动朝向"
-                      rangeAriaLabel="路线点手动朝向滑杆"
-                      numberAriaLabel="路线点手动朝向"
-                      min="-180"
-                      max="180"
-                      step="1"
-                      value={selectedRoutePoint.transform.rotation[1] * 180 / Math.PI}
-                      onValueChange={(value) => updateObjectMotionKeyframe(role.id, selectedRoutePoint.id, {
-                        transform: {
-                          rotation: replaceAxis(
-                            selectedRoutePoint.transform.rotation,
-                            1,
-                            Number(value) * Math.PI / 180
-                          ),
-                        },
-                      })}
-                    />
-                  ) : null}
                 </InspectorSection>
               ) : <p>点“添加点”后在地面选择终点；起点会自动使用人物当前位置。</p>}
             </>

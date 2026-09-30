@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { beforeEach, vi } from "vitest";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
+import { getCameraPlaybackSnapshot } from "../schema/cameraPlayback";
 import { MotionStudio } from "./MotionStudio";
 
 beforeEach(() => {
@@ -73,6 +74,50 @@ it("uses the fixed current camera when a character has a route", async () => {
   await user.click(finishedPreview);
   expect(useDirectorStore.getState().cameraMotionPlaying).toBe(true);
   expect(useDirectorStore.getState().viewMode).toBe("camera");
+});
+
+it("applies close framing to a fixed camera's real playback view and clears a stale FOV override", async () => {
+  const user = userEvent.setup();
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({ ...state, finishedShotFov: 36 });
+  useDirectorStore.getState().recordCameraMotionSnapshot("cam_1", {
+    position: [0, 2, 8], target: [0, 1, 0], fov: 50,
+  });
+  const originalKeyframe = useDirectorStore.getState().project.cameras[0].motionPath?.keyframes[0];
+  expect(originalKeyframe).toBeDefined();
+  useDirectorStore.getState().updateCameraMotionKeyframe("cam_1", originalKeyframe!.id, {
+    targetMode: "object",
+    targetObjectId: "char_default_a",
+    targetBodyPart: "chest",
+  });
+  const beforeCamera = useDirectorStore.getState().project.cameras[0];
+  const beforeView = getCameraPlaybackSnapshot(beforeCamera, useDirectorStore.getState().project.objects, 0);
+  render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
+
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "镜头预设跟踪主体" })).toHaveValue("char_default_a"));
+  await user.click(within(screen.getByRole("group", { name: "镜头景别" })).getByRole("button", { name: "特写" }));
+
+  const afterCamera = useDirectorStore.getState().project.cameras[0];
+  const afterView = getCameraPlaybackSnapshot(afterCamera, useDirectorStore.getState().project.objects, 0);
+  const beforeDistance = Math.hypot(...beforeView.position.map((value, axis) => value - beforeView.target[axis]));
+  const afterDistance = Math.hypot(...afterView.position.map((value, axis) => value - afterView.target[axis]));
+  expect(afterDistance).toBeLessThan(beforeDistance);
+  expect(afterCamera.motionPath?.keyframes).toHaveLength(1);
+  expect(afterCamera.targetMode).toBe("manual");
+  expect(afterCamera.motionPath?.keyframes[0]).toMatchObject({
+    id: originalKeyframe!.id,
+    targetMode: "object",
+    targetObjectId: "char_default_a",
+    targetBodyPart: "head",
+  });
+  expect(getCameraPlaybackSnapshot(
+    afterCamera,
+    useDirectorStore.getState().project.objects,
+    0,
+    undefined,
+    (_object, bodyPart) => bodyPart === "head" ? [0, 3, 0] : [0, 1, 0]
+  ).target).toEqual([0, 3, 0]);
+  expect(useDirectorStore.getState().finishedShotFov).toBeNull();
 });
 
 it("automatically creates a hidden motion camera when the scene has no placed camera", async () => {
@@ -302,6 +347,34 @@ it("generates an editable camera route that follows the selected character", asy
   expect(useDirectorStore.getState().cameraMotionProgress).toBe(0);
 });
 
+it("keeps non-character template targets centered at every framing", async () => {
+  const user = userEvent.setup();
+  const state = useDirectorStore.getState();
+  const character = state.project.objects.find((object) => object.id === "char_default_a")!;
+  useDirectorStore.setState({
+    ...state,
+    project: {
+      ...state.project,
+      objects: [...state.project.objects, {
+        ...character,
+        id: "prop_focus",
+        name: "道具",
+        kind: "prop",
+        characterRig: undefined,
+      }],
+    },
+  });
+  render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
+
+  await user.selectOptions(screen.getByRole("combobox", { name: "镜头预设跟踪主体" }), "prop_focus");
+  await user.click(within(screen.getByRole("group", { name: "镜头景别" })).getByRole("button", { name: "特写" }));
+  await user.click(screen.getByRole("button", { name: "套用推镜镜头预设" }));
+
+  expect(useDirectorStore.getState().project.cameras[0].motionPath?.keyframes.every((keyframe) => (
+    keyframe.targetObjectId === "prop_focus" && keyframe.targetBodyPart === "center"
+  ))).toBe(true);
+});
+
 it("restores the unique-character template default after a project switch without overriding a same-scene center choice", async () => {
   const user = userEvent.setup();
   render(<MotionStudio getViewportCameraSnapshot={() => ({ position: [0, 2, 8], target: [0, 1, 0], fov: 50 })} />);
@@ -400,13 +473,21 @@ it("updates a community preset route immediately while its range slider moves", 
   await user.click(screen.getByRole("button", { name: "更多镜头" }));
   await user.click(screen.getByRole("button", { name: "套用平行跟拍镜头预设" }));
   const smallPath = useDirectorStore.getState().project.cameras[0].motionPath!;
-  const smallDistance = Math.hypot(...smallPath.keyframes[0].position);
+  const smallTravel = Math.hypot(
+    smallPath.keyframes[2].position[0] - smallPath.keyframes[0].position[0],
+    smallPath.keyframes[2].position[1] - smallPath.keyframes[0].position[1],
+    smallPath.keyframes[2].position[2] - smallPath.keyframes[0].position[2],
+  );
 
   fireEvent.change(screen.getByRole("slider", { name: "镜头预设运动幅度" }), { target: { value: "2.5" } });
   const largePath = useDirectorStore.getState().project.cameras[0].motionPath!;
-  const largeDistance = Math.hypot(...largePath.keyframes[0].position);
+  const largeTravel = Math.hypot(
+    largePath.keyframes[2].position[0] - largePath.keyframes[0].position[0],
+    largePath.keyframes[2].position[1] - largePath.keyframes[0].position[1],
+    largePath.keyframes[2].position[2] - largePath.keyframes[0].position[2],
+  );
 
-  expect(largeDistance).toBeGreaterThan(smallDistance * 2);
+  expect(largeTravel).toBeGreaterThan(smallTravel * 2);
   expect(screen.getByText("250%")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "套用平行跟拍镜头预设" })).toHaveAttribute("aria-pressed", "true");
 });

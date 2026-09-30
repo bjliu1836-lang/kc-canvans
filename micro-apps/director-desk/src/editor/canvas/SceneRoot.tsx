@@ -531,6 +531,7 @@ function ObjectSceneNode({
   motionScene,
   selected,
   showLabels,
+  showPilotTarget,
   transformMode,
   transformable,
   translationSnap,
@@ -547,6 +548,7 @@ function ObjectSceneNode({
   motionScene: SceneSettings;
   selected: boolean;
   showLabels: boolean;
+  showPilotTarget?: boolean;
   transformMode: TransformMode;
   transformable: boolean;
   translationSnap: number | null;
@@ -692,7 +694,7 @@ function ObjectSceneNode({
         [DIRECTOR_CHARACTER_BONE_MAP_USER_DATA_KEY]: asset?.characterBoneMap,
       }}
     >
-      {pilotTargetState ? (
+      {pilotTargetState && showPilotTarget ? (
         <group position={[0, focusOffsetY, 0]} userData={{ [HIDE_FROM_VIEWPORT_CAPTURE_KEY]: true }}>
           <mesh rotation={[Math.PI / 2, 0, 0]}>
             <ringGeometry args={[0.62, 0.68, 40]} />
@@ -1716,7 +1718,8 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
               motionProgress={cameraMotionProgress}
               motionWalking={motionWalking}
               selected={interactive && !item.crowdId && item.id === selectedObjectId}
-              showLabels={interactive && scene.showLabels && cameraPilotMode === "idle"}
+              showLabels={interactive && effectiveViewMode === "director" && scene.showLabels && cameraPilotMode === "idle"}
+              showPilotTarget={interactive && effectiveViewMode === "director"}
               transformMode={transformMode}
               transformable={
                 interactive
@@ -1744,7 +1747,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
           />
         )
       ) : null}
-      {(interactive || renderMode === "director-monitor") && showCharacterRoutes && cameraPilotMode === "idle" ? objects
+      {effectiveViewMode === "director" && (interactive || renderMode === "director-monitor") && showCharacterRoutes && cameraPilotMode === "idle" ? objects
         .filter((item) => item.visible && item.kind === "character" && (item.motionPath?.keyframes.length ?? 0) > 0)
         .map((character) => (
           <CharacterRouteRig
@@ -1771,7 +1774,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
                     camera={camera}
                     object={object}
                     selected={object?.id === selectedObjectId}
-                    showLabel={scene.showLabels}
+                    showLabel={scene.showLabels && effectiveViewMode === "director"}
                     transformMode={transformMode}
                     transformable={Boolean(object && !object.locked && !selectedCameraKeyframeId)}
                     translationSnap={translationSnap}

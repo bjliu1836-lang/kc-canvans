@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyCameraFramingToPath,
   CAMERA_PATH_TEMPLATES,
   createCameraPathTemplate,
   getCameraPathTemplatesByGroup,
@@ -75,7 +76,7 @@ describe("camera path templates", () => {
     expect(largeTravel).toBeGreaterThan(smallTravel * 3);
   });
 
-  it("scales every community preset around its tracked subject", () => {
+  it("keeps community camera distance separate from motion amplitude", () => {
     for (const template of getCameraPathTemplatesByGroup("community")) {
       const small = createCameraPathTemplate({
         cameraId: "cam",
@@ -102,8 +103,44 @@ describe("camera path templates", () => {
         item.position[2],
       )));
 
-      expect(largeMaximumDistance, template.label).toBeGreaterThan(smallMaximumDistance * 3.5);
+      expect(largeMaximumDistance, template.label).toBeLessThan(smallMaximumDistance * 1.8);
     }
+
+    const small = createCameraPathTemplate({ cameraId: "cam", focusAt: () => [0, 1, 0], snapshot, scale: 0.5, templateId: "follow" });
+    const large = createCameraPathTemplate({ cameraId: "cam", focusAt: () => [0, 1, 0], snapshot, scale: 2, templateId: "follow" });
+    const smallTravel = Math.abs(small.keyframes[2].position[2] - small.keyframes[0].position[2]);
+    const largeTravel = Math.abs(large.keyframes[2].position[2] - large.keyframes[0].position[2]);
+    expect(largeTravel).toBeGreaterThan(smallTravel * 3.5);
+  });
+
+  it("derives full-body framing from subject size instead of a high director view", () => {
+    const highSnapshot = { position: [0, 80, 80] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 50 };
+    const defaultView = createCameraPathTemplate({ cameraId: "cam", focusAt: () => [0, 1, 0], snapshot, subjectHeight: 2.6, templateId: "follow" });
+    const highView = createCameraPathTemplate({ cameraId: "cam", focusAt: () => [0, 1, 0], snapshot: highSnapshot, subjectHeight: 2.6, templateId: "follow" });
+    const defaultDistance = Math.hypot(...defaultView.keyframes[1].position.map((value, axis) => value - [0, 1, 0][axis]));
+    const highDistance = Math.hypot(...highView.keyframes[1].position.map((value, axis) => value - [0, 1, 0][axis]));
+    expect(highDistance).toBeCloseTo(defaultDistance, 5);
+  });
+
+  it("brings close framing toward the target while preserving a hand route's timing and holds", () => {
+    const full = createCameraPathTemplate({ cameraId: "cam", focusAt: () => [0, 1, 0], snapshot, framing: "full", subjectHeight: 2.6, templateId: "follow" });
+    const close = createCameraPathTemplate({ cameraId: "cam", focusAt: () => [0, 1, 0], snapshot, framing: "close-up", subjectHeight: 2.6, templateId: "follow" });
+    expect(Math.hypot(...close.keyframes[1].position.map((value, axis) => value - [0, 1, 0][axis]))).toBeLessThan(
+      Math.hypot(...full.keyframes[1].position.map((value, axis) => value - [0, 1, 0][axis]))
+    );
+
+    const handRoute = {
+      ...full,
+      keyframes: full.keyframes.map((keyframe, index) => ({
+        ...keyframe,
+        pointBehavior: index === 1 ? "hold" as const : "pass" as const,
+        holdSeconds: index === 1 ? 1.2 : 0,
+      })),
+    };
+    const reframed = applyCameraFramingToPath({ framing: "medium", path: handRoute, subjectHeight: 2.6 });
+    expect(reframed.keyframes.map((keyframe) => keyframe.id)).toEqual(handRoute.keyframes.map((keyframe) => keyframe.id));
+    expect(reframed.keyframes.map((keyframe) => keyframe.time)).toEqual(handRoute.keyframes.map((keyframe) => keyframe.time));
+    expect(reframed.keyframes[1]).toMatchObject({ pointBehavior: "hold", holdSeconds: 1.2 });
   });
 
   it("creates deterministic multi-point handheld motion", () => {

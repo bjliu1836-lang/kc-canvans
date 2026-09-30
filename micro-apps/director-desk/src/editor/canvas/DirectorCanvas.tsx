@@ -40,6 +40,7 @@ import { PilotHud } from "../motion/PilotHud";
 import { exitPointerLockSafely, requestPointerLockSafely } from "../motion/pointerLock";
 import { getGroundedLabelY } from "../runtime/mannequin/bodyTypes";
 import { getUE4GroundedLabelY } from "../runtime/ue4Mannequin/ue4MannequinRig";
+import { getSceneSemanticBodyPartTarget } from "../runtime/semanticBodyTracking";
 import { DirectorKeyboardController } from "./DirectorKeyboardController";
 import { SceneRoot } from "./SceneRoot";
 import { ViewportAspectOverlay } from "./ViewportAspectOverlay";
@@ -766,7 +767,7 @@ function MotionMonitor({
   );
   const monitorCameraBase = mainViewMode === "director" ? cameraSnapshot : directorSnapshot;
   const monitorCamera = monitorCameraBase
-    ? { ...monitorCameraBase, fov: monitorFov ?? monitorCameraBase.fov }
+    ? { ...monitorCameraBase, fov: mainViewMode === "director" ? finishedShotFov ?? monitorCameraBase.fov : monitorFov ?? monitorCameraBase.fov }
     : undefined;
   const [position, setPosition] = useState({ x: 214, y: 18 });
   const dragRef = useRef<{ pointerX: number; pointerY: number; startX: number; startY: number } | null>(null);
@@ -831,7 +832,7 @@ function MotionMonitor({
           <ambientLight intensity={1.15} />
           <directionalLight intensity={1.2} position={[8, 10, 6]} />
           {mainViewMode === "director"
-            ? <PlaybackCameraSync fovOverride={monitorFov} snapshot={cameraSnapshot} />
+            ? <PlaybackCameraSync fovOverride={finishedShotFov} snapshot={cameraSnapshot} />
             : <FixedCameraSync fovOverride={monitorFov} snapshot={directorSnapshot} />}
           {mainViewMode === "camera" ? (
             <OrbitControls
@@ -865,24 +866,26 @@ function MotionMonitor({
           跟随轨迹
         </button>
       </div>
-      <div className="motion-monitor-fov motion-monitor-fov--secondary" aria-label="小窗 FOV 设置">
-        <label>
-          <span>小窗</span>
-          <input
-            aria-label="小窗 FOV"
-            type="range"
-            min="10"
-            max="120"
-            step="1"
-            value={monitorFov ?? monitorCameraBase?.fov ?? 50}
-            onChange={(event) => onMonitorFovChange(Number(event.currentTarget.value))}
-          />
-          <output>{Math.round(monitorFov ?? monitorCameraBase?.fov ?? 50)}°</output>
-        </label>
-        <button type="button" disabled={monitorFov === null} onClick={() => onMonitorFovChange(null)}>
-          跟随原视角
-        </button>
-      </div>
+      {mainViewMode === "camera" ? (
+        <div className="motion-monitor-fov motion-monitor-fov--secondary" aria-label="路线观察 FOV 设置">
+          <label>
+            <span>路线观察</span>
+            <input
+              aria-label="路线观察 FOV"
+              type="range"
+              min="10"
+              max="120"
+              step="1"
+              value={monitorFov ?? monitorCameraBase?.fov ?? 50}
+              onChange={(event) => onMonitorFovChange(Number(event.currentTarget.value))}
+            />
+            <output>{Math.round(monitorFov ?? monitorCameraBase?.fov ?? 50)}°</output>
+          </label>
+          <button type="button" disabled={monitorFov === null} onClick={() => onMonitorFovChange(null)}>
+            跟随原视角
+          </button>
+        </div>
+      ) : null}
     </aside>
   );
 }
@@ -1018,6 +1021,7 @@ export function DirectorCanvas() {
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const viewportContainerRef = useRef<HTMLDivElement | null>(null);
   const viewportCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const viewportSceneRef = useRef<Object3D | null>(null);
   const referenceVideoCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const referencePanoramaStatusRef = useRef<PanoramaTextureStatus>("idle");
   const mediaExportInProgressRef = useRef(false);

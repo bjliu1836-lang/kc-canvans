@@ -826,7 +826,7 @@ it("keeps the finished-shot monitor mounted while paused for timeline scrubbing"
   expect(screen.getByLabelText("成片实时监看")).toBeInTheDocument();
   expect(screen.getByLabelText("拖动监看窗口")).toBeInTheDocument();
   expect(screen.getByRole("slider", { name: "看成片 FOV" })).toHaveValue("46");
-  expect(screen.getByRole("slider", { name: "小窗 FOV" })).toHaveValue("46");
+  expect(screen.queryByRole("slider", { name: "路线观察 FOV" })).not.toBeInTheDocument();
 });
 
 it("passes the active panorama to both the main viewport and finished-shot monitor", () => {
@@ -873,11 +873,11 @@ it("passes the active panorama to both the main viewport and finished-shot monit
   });
 });
 
-it("keeps finished-shot and monitor FOV controls independent", () => {
+it("keeps a route-observation FOV independent while showing the camera view", () => {
   const state = useDirectorStore.getState();
   useDirectorStore.setState({
     ...state,
-    viewMode: "director",
+    viewMode: "camera",
     motionStudioOpen: true,
     finishedShotFov: 36,
     motionMonitorFov: 72,
@@ -902,7 +902,7 @@ it("keeps finished-shot and monitor FOV controls independent", () => {
   render(<App />);
 
   const finishedSlider = screen.getByRole("slider", { name: "看成片 FOV" });
-  const monitorSlider = screen.getByRole("slider", { name: "小窗 FOV" });
+  const monitorSlider = screen.getByRole("slider", { name: "路线观察 FOV" });
   expect(finishedSlider).toHaveValue("36");
   expect(monitorSlider).toHaveValue("72");
 

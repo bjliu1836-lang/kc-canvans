@@ -4337,6 +4337,23 @@ textarea:focus-visible {
   line-height: 1.4;
 }
 
+.character-route-advanced {
+  width: var(--right-sidebar-content-width);
+  max-width: 100%;
+  margin-top: 10px;
+  color: rgb(var(--text-dim-rgb));
+}
+
+.character-route-advanced > summary {
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.character-route-advanced > summary small {
+  margin-left: 4px;
+  color: rgb(var(--text-dim-rgb) / 0.82);
+}
+
 .pose-adjust-section > h3 {
   color: rgb(var(--text-rgb));
   font-size: 14px;
@@ -6969,6 +6986,41 @@ textarea:focus-visible {
   align-items: center;
   gap: 5px;
   white-space: nowrap;
+}
+
+.motion-template-framing {
+  display: grid;
+  gap: 5px;
+}
+
+.motion-template-framing > span,
+.motion-template-framing small {
+  color: rgb(var(--text-dim-rgb));
+  font-size: 10px;
+}
+
+.motion-template-framing > div {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.motion-template-framing button {
+  min-width: 0;
+  height: 26px;
+  border: 1px solid rgb(var(--border-rgb) / 0.52);
+  border-radius: 5px;
+  padding: 0 4px;
+  color: rgb(var(--text-muted-rgb));
+  background: rgb(var(--field-rgb) / 0.68);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.motion-template-framing button[aria-pressed="true"] {
+  border-color: rgb(68 70 206 / 0.88);
+  color: #d9d9ff;
+  background: rgb(68 70 206 / 0.22);
 }
 
 .motion-template-controls select {
