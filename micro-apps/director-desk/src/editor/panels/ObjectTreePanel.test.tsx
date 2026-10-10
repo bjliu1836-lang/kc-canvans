@@ -398,3 +398,65 @@ it("switches the active camera when users select a camera row", async () => {
   expect(useDirectorStore.getState().project.activeCameraId).toBe("cam_1");
   expect(useDirectorStore.getState().selectedObjectId).toBe("cam_object_1");
 });
+
+function layoutObject(id: string, name: string, batchId: string) {
+  return {
+    id,
+    name,
+    kind: "prop" as const,
+    visible: true,
+    locked: false,
+    geometryType: "box" as const,
+    transform: { position: [0, 0, 0] as [number, number, number], rotation: [0, 0, 0] as [number, number, number], scale: [1, 1, 1] as [number, number, number] },
+    layoutSource: {
+      batchId,
+      draftId: "draft_1",
+      sourceId: "image_1",
+      sourceFileName: "客厅.png",
+      componentId: id,
+      category: "wall" as const,
+      confidence: 0.8,
+      uncertain: false,
+    },
+  };
+}
+
+it("collapses a generated layout batch into one row named after the source image", async () => {
+  const user = userEvent.setup();
+  const base = createInitialDirectorState();
+  useDirectorStore.setState({
+    ...useDirectorStore.getState(),
+    ...base,
+    project: {
+      ...base.project,
+      layoutBatches: [{
+        id: "layout_1",
+        draftId: "draft_1",
+        sourceId: "image_1",
+        sourceFileName: "客厅.png",
+        createdAt: "2026-10-10T00:00:00.000Z",
+        scale: { mode: "estimated", confidence: 0.4 },
+        objectIds: ["layout_1_wall_01", "layout_1_sofa_01"],
+      }],
+      objects: [
+        ...base.project.objects,
+        layoutObject("layout_1_wall_01", "后墙", "layout_1"),
+        layoutObject("layout_1_sofa_01", "沙发", "layout_1"),
+      ],
+    },
+  });
+
+  render(<ObjectTreePanel />);
+
+  const geometryGroup = screen.getByRole("group", { name: "几何体分组" });
+  const batchRow = within(geometryGroup).getByRole("treeitem", { name: "客厅.png·布景" });
+  expect(within(geometryGroup).queryByRole("button", { name: "后墙" })).not.toBeInTheDocument();
+
+  await user.click(batchRow);
+  expect(batchRow).toHaveAttribute("aria-selected", "true");
+  expect(useDirectorStore.getState().selectedObjectIds).toEqual(["layout_1_wall_01", "layout_1_sofa_01"]);
+
+  await user.click(screen.getByRole("button", { name: "展开 客厅.png·布景" }));
+  expect(within(geometryGroup).getByRole("button", { name: "后墙" })).toBeInTheDocument();
+  expect(within(geometryGroup).getByRole("button", { name: "沙发" })).toBeInTheDocument();
+});

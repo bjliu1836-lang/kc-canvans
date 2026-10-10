@@ -19,6 +19,33 @@ export const LAYOUT_COMPONENT_CATEGORIES = [
 
 export const LAYOUT_COMPONENT_PRIMITIVES = ["box", "cylinder"] as const satisfies readonly GeometryPrimitiveType[];
 
+export type LayoutAnchorDimension = "width" | "height";
+
+/** 各类组件的常见真实尺寸，用于尺度校正时预填，降低用户估算门槛。 */
+export const LAYOUT_ANCHOR_PRESETS: Record<DirectorLayoutCategory, {
+  dimension: LayoutAnchorDimension;
+  meters: number;
+  hint: string;
+}> = {
+  ground: { dimension: "width", meters: 4, hint: "房间开间" },
+  wall: { dimension: "height", meters: 2.8, hint: "层高" },
+  door: { dimension: "height", meters: 2.05, hint: "标准门高" },
+  window: { dimension: "height", meters: 1.5, hint: "窗体高度" },
+  table: { dimension: "height", meters: 0.75, hint: "标准桌高" },
+  chair: { dimension: "height", meters: 0.9, hint: "椅背高度" },
+  sofa: { dimension: "width", meters: 2, hint: "双人沙发宽" },
+  cabinet: { dimension: "height", meters: 1.8, hint: "柜体高度" },
+};
+
+export interface LayoutBatchTransformPatch {
+  /** 以布景中心为基准的整体缩放倍数，1 表示不变。 */
+  scaleFactor?: number;
+  /** 沿 X 轴整体平移（米）。 */
+  offsetX?: number;
+  /** 沿 Z 轴整体平移（米）。 */
+  offsetZ?: number;
+}
+
 export interface LayoutDraftComponent {
   id: string;
   name: string;
@@ -46,6 +73,7 @@ export interface LayoutDraft {
     confidence: number;
     anchorComponentId?: string;
     anchorWidthMeters?: number;
+    anchorDimension?: LayoutAnchorDimension;
   };
   components: LayoutDraftComponent[];
 }
@@ -280,14 +308,16 @@ export function validateLayoutDraftCandidate(
 export function calibrateLayoutDraft(
   draft: LayoutDraft,
   componentId: string,
-  anchorWidthMeters: number
+  anchorMeters: number,
+  dimension: LayoutAnchorDimension = "width"
 ): LayoutDraft {
-  if (!Number.isFinite(anchorWidthMeters) || anchorWidthMeters <= 0 || anchorWidthMeters > 100) {
-    throw new LayoutDraftValidationError(["已知宽度必须大于 0 且不超过 100 米"]);
+  if (!Number.isFinite(anchorMeters) || anchorMeters <= 0 || anchorMeters > 100) {
+    throw new LayoutDraftValidationError(["已知尺寸必须大于 0 且不超过 100 米"]);
   }
   const anchor = draft.components.find((component) => component.id === componentId);
   if (!anchor) throw new LayoutDraftValidationError(["请选择仍在草稿中的组件作为尺寸锚点"]);
-  const factor = anchorWidthMeters / anchor.size[0];
+  const axisIndex = dimension === "height" ? 1 : 0;
+  const factor = anchorMeters / anchor.size[axisIndex];
   if (!Number.isFinite(factor) || factor <= 0) throw new LayoutDraftValidationError(["无法使用该组件校正尺寸"]);
 
   return {
@@ -296,7 +326,8 @@ export function calibrateLayoutDraft(
       mode: "anchored",
       confidence: 1,
       anchorComponentId: componentId,
-      anchorWidthMeters,
+      anchorWidthMeters: anchorMeters,
+      anchorDimension: dimension,
     },
     components: draft.components.map((component) => ({
       ...component,

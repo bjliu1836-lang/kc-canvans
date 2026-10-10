@@ -15,7 +15,7 @@ function readableLayoutError(status: number, data: Record<string, unknown>) {
   const code = typeof data.error === "string" ? data.error : "";
   if (status === 401) return "登录已失效，请返回画布重新登录";
   if (status === 402) return "图片理解模型额度不足，请补充额度后重试";
-  if (code === "DIRECTOR_LAYOUT_MODEL_NOT_CONFIGURED") return "尚未配置支持图片理解的模型，请先配置 MIMO_API_KEY 或 TEXT_API_KEY";
+  if (code === "DIRECTOR_LAYOUT_MODEL_NOT_CONFIGURED") return "尚未配置图片理解模型，请联系管理员完成模型配置后重试";
   if (code === "DIRECTOR_LAYOUT_IMAGE_REQUIRED") return "参考图无效，请重新选择图片";
   if (code === "DIRECTOR_LAYOUT_INVALID_MODEL_JSON") return "图片模型未能返回可用的布景结构，请重试或更换参考图";
   return typeof data.message === "string" && data.message.trim()

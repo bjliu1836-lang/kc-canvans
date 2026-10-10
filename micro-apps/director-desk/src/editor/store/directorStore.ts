@@ -52,7 +52,7 @@ import { parseImportedCharacterActionId } from "../schema/importedCharacterActio
 import { normalizePerformanceProfileId, type PerformanceProfileId } from "../performance/performanceProfiles";
 import { getRuntimePlaybackProgress, setRuntimePlaybackProgress } from "../runtime/playbackRuntime";
 import { buildLayoutBatch } from "../schema/layoutDraft";
-import type { ApplyLayoutDraftInput, ApplyLayoutDraftResult } from "../schema/layoutDraft";
+import type { ApplyLayoutDraftInput, ApplyLayoutDraftResult, LayoutBatchTransformPatch } from "../schema/layoutDraft";
 
 export type TransformMode = "translate" | "rotate" | "scale";
 export type CameraPilotMode = "idle" | "pilot";
@@ -226,6 +226,7 @@ export interface DirectorActions {
   addCrowdCharacters: (input: CrowdCharactersInput) => string[];
   addGeometryPrimitive: (geometryType: GeometryPrimitiveType) => void;
   applyLayoutDraft: (input: ApplyLayoutDraftInput) => ApplyLayoutDraftResult;
+  transformLayoutBatch: (batchId: string, patch: LayoutBatchTransformPatch) => number;
   addCameraShot: (snapshot?: CameraShotSnapshot) => string;
   ensureMotionCamera: (snapshot?: CameraShotSnapshot) => string;
   deleteSelectedObject: () => void;
@@ -2496,6 +2497,60 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         };
       });
       return result;
+    },
+    transformLayoutBatch: (batchId, patch) => {
+      const scaleFactor = typeof patch.scaleFactor === "number" && Number.isFinite(patch.scaleFactor)
+        ? Math.min(10, Math.max(0.05, patch.scaleFactor))
+        : 1;
+      const offsetX = typeof patch.offsetX === "number" && Number.isFinite(patch.offsetX) ? patch.offsetX : 0;
+      const offsetZ = typeof patch.offsetZ === "number" && Number.isFinite(patch.offsetZ) ? patch.offsetZ : 0;
+      if (scaleFactor === 1 && offsetX === 0 && offsetZ === 0) return 0;
+
+      let transformed = 0;
+      commitMutation((state) => {
+        const batchObjects = state.project.objects.filter((object) => object.layoutSource?.batchId === batchId);
+        if (!batchObjects.length) return state;
+        transformed = batchObjects.length;
+
+        let centerX = 0;
+        let centerZ = 0;
+        batchObjects.forEach((object) => {
+          centerX += object.transform.position[0];
+          centerZ += object.transform.position[2];
+        });
+        centerX /= batchObjects.length;
+        centerZ /= batchObjects.length;
+
+        const batchIds = new Set(batchObjects.map((object) => object.id));
+        return {
+          ...state,
+          project: {
+            ...state.project,
+            objects: state.project.objects.map((object) => {
+              if (!batchIds.has(object.id)) return object;
+              const [positionX, positionY, positionZ] = object.transform.position;
+              const [scaleX, scaleY, scaleZ] = object.transform.scale;
+              return {
+                ...object,
+                transform: {
+                  ...object.transform,
+                  position: [
+                    centerX + (positionX - centerX) * scaleFactor + offsetX,
+                    positionY,
+                    centerZ + (positionZ - centerZ) * scaleFactor + offsetZ,
+                  ] as [number, number, number],
+                  scale: [
+                    scaleX * scaleFactor,
+                    scaleY * scaleFactor,
+                    scaleZ * scaleFactor,
+                  ] as [number, number, number],
+                },
+              };
+            }),
+          },
+        };
+      });
+      return transformed;
     },
     addCameraShot: (snapshot) => {
       let nextCameraId = "";

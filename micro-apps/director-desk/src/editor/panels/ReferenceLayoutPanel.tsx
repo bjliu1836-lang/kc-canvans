@@ -1,11 +1,14 @@
 import {
   Box,
+  CheckCheck,
   Eye,
   EyeOff,
   ImagePlus,
   LoaderCircle,
+  Move,
   RefreshCw,
   Ruler,
+  Scaling,
   Sparkles,
   Trash2,
   X,
@@ -24,7 +27,9 @@ import {
 } from "../io/referenceLayoutClient";
 import {
   calibrateLayoutDraft,
+  LAYOUT_ANCHOR_PRESETS,
   LayoutDraftValidationError,
+  type LayoutAnchorDimension,
   type LayoutDraftComponent,
 } from "../schema/layoutDraft";
 import { useDirectorStore } from "../store/directorStore";
@@ -40,6 +45,19 @@ const CATEGORY_LABELS: Record<LayoutDraftComponent["category"], string> = {
   chair: "椅子",
   sofa: "沙发",
   cabinet: "柜子",
+};
+
+const DIMENSION_LABELS: Record<LayoutAnchorDimension, string> = {
+  width: "宽度",
+  height: "高度",
+};
+
+type GenerationStage = "preparing" | "generating" | "validating";
+
+const STAGE_LABELS: Record<GenerationStage, string> = {
+  preparing: "正在准备参考图…",
+  generating: "模型识别中",
+  validating: "校验布局数据…",
 };
 
 let retainedLocalImage: ReferenceLayoutImage | null = null;
@@ -60,8 +78,16 @@ function finiteDraftNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
 export function ReferenceLayoutPanel() {
   const applyLayoutDraft = useDirectorStore((state) => state.applyLayoutDraft);
+  const transformLayoutBatch = useDirectorStore((state) => state.transformLayoutBatch);
+  const selectObject = useDirectorStore((state) => state.selectObject);
+  const toggleObjectSelection = useDirectorStore((state) => state.toggleObjectSelection);
   const layoutBatches = useDirectorStore((state) => state.project.layoutBatches ?? []);
   const draft = useLayoutDraftPreviewStore((state) => state.draft);
   const selectedComponentId = useLayoutDraftPreviewStore((state) => state.selectedComponentId);
@@ -71,12 +97,21 @@ export function ReferenceLayoutPanel() {
   const [localImage, setLocalImage] = useState<ReferenceLayoutImage | null>(retainedLocalImage);
   const [selectedSourceId, setSelectedSourceId] = useState<string>(retainedSelectedSourceId);
   const [generating, setGenerating] = useState(false);
+  const [stage, setStage] = useState<GenerationStage | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [anchorWidth, setAnchorWidth] = useState("");
+  const [anchorDimension, setAnchorDimension] = useState<LayoutAnchorDimension>("width");
   const [appliedBatchId, setAppliedBatchId] = useState<string | null>(retainedAppliedBatchId);
+  const [confirmRegenerate, setConfirmRegenerate] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [batchScale, setBatchScale] = useState("1.2");
+  const [batchOffsetX, setBatchOffsetX] = useState("");
+  const [batchOffsetZ, setBatchOffsetZ] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
+  const editedRef = useRef(false);
 
   const images = useMemo(
     () => [localImage, ...connectedImages].filter((image): image is ReferenceLayoutImage => Boolean(image)),
@@ -84,11 +119,50 @@ export function ReferenceLayoutPanel() {
   );
   const selectedImage = images.find((image) => image.sourceId === selectedSourceId) ?? images[0] ?? null;
   const selectedComponent = draft?.components.find((component) => component.id === selectedComponentId) ?? null;
+  const anchorPreset = selectedComponent ? LAYOUT_ANCHOR_PRESETS[selectedComponent.category] : null;
+  const uncertainCount = draft?.components.filter((component) => component.uncertain).length ?? 0;
   const replaceBatchId = appliedBatchId && layoutBatches.some((batch) => batch.id === appliedBatchId)
     ? appliedBatchId
     : selectedImage
       ? [...layoutBatches].reverse().find((batch) => batch.sourceId === selectedImage.sourceId)?.id ?? null
       : null;
+  const activeBatch = replaceBatchId ? layoutBatches.find((batch) => batch.id === replaceBatchId) ?? null : null;
+
+  // 选中组件变化时，按类别预填推荐真实尺寸，用户可直接确认也可修改
+  useEffect(() => {
+    if (!anchorPreset) return;
+    setAnchorDimension(anchorPreset.dimension);
+    setAnchorWidth(String(anchorPreset.meters));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedComponentId]);
+
+  // 生成中的耗时显示
+  useEffect(() => {
+    if (!generating) return undefined;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [generating]);
+
+  // Ctrl+V 粘贴截图作为参考图（不劫持输入框内粘贴）
+  useEffect(() => {
+    function handlePaste(event: ClipboardEvent) {
+      if (isEditableTarget(event.target)) return;
+      const file = Array.from(event.clipboardData?.files ?? []).find((item) => item.type.startsWith("image/"));
+      if (!file) return;
+      event.preventDefault();
+      void readReferenceImageFile(file).then((image) => {
+        retainedLocalImage = image;
+        setLocalImage(image);
+        chooseSource(image.sourceId);
+      }).catch((reason) => setError(reason instanceof Error ? reason.message : "参考图读取失败"));
+    }
+    document.addEventListener("paste", handlePaste);
+    return () => document.removeEventListener("paste", handlePaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const updateConnectedImages = (event: Event) => {
@@ -101,11 +175,14 @@ export function ReferenceLayoutPanel() {
       abortRef.current?.abort();
       requestIdRef.current += 1;
       setGenerating(false);
+      setStage(null);
       setError(null);
       setLocalImage(null);
       setConnectedImages([]);
       setSelectedSourceId("");
       setAppliedBatchId(null);
+      setConfirmRegenerate(false);
+      editedRef.current = false;
       retainedLocalImage = null;
       retainedSelectedSourceId = "";
       retainedAppliedBatchId = null;
@@ -132,6 +209,7 @@ export function ReferenceLayoutPanel() {
     abortRef.current?.abort();
     requestIdRef.current += 1;
     setGenerating(false);
+    setStage(null);
     setSelectedSourceId(sourceId);
     retainedSelectedSourceId = sourceId;
     setDraft(null);
@@ -139,26 +217,41 @@ export function ReferenceLayoutPanel() {
     setAnchorWidth("");
     setAppliedBatchId(null);
     retainedAppliedBatchId = null;
+    setConfirmRegenerate(false);
+    editedRef.current = false;
   }
 
   async function generateLayout() {
     if (!selectedImage || generating) return;
+    if (draft && editedRef.current) {
+      setConfirmRegenerate(true);
+      return;
+    }
     const controller = new AbortController();
     abortRef.current?.abort();
     abortRef.current = controller;
     const requestId = ++requestIdRef.current;
     setGenerating(true);
+    setStage("preparing");
+    setElapsedSeconds(0);
     setError(null);
+    setConfirmRegenerate(false);
     try {
+      setStage("generating");
       const nextDraft = await requestReferenceLayout(selectedImage, controller.signal);
       if (requestId !== requestIdRef.current || controller.signal.aborted) return;
+      setStage("validating");
       setDraft(nextDraft);
+      editedRef.current = false;
       setAnchorWidth("");
     } catch (reason) {
       if (controller.signal.aborted || requestId !== requestIdRef.current) return;
       setError(reason instanceof Error ? reason.message : "粗布景生成失败，请重试");
     } finally {
-      if (requestId === requestIdRef.current) setGenerating(false);
+      if (requestId === requestIdRef.current) {
+        setGenerating(false);
+        setStage(null);
+      }
     }
   }
 
@@ -166,11 +259,13 @@ export function ReferenceLayoutPanel() {
     abortRef.current?.abort();
     requestIdRef.current += 1;
     setGenerating(false);
+    setStage(null);
     setError("已取消本次生成");
   }
 
   function updateComponent(id: string, updater: (component: LayoutDraftComponent) => LayoutDraftComponent) {
     if (!draft) return;
+    editedRef.current = true;
     setDraft({
       ...draft,
       components: draft.components.map((component) => component.id === id ? updater(component) : component),
@@ -194,11 +289,30 @@ export function ReferenceLayoutPanel() {
     if (!draft || !selectedComponent) return;
     const parsed = finiteDraftNumber(anchorWidth);
     try {
-      setDraft(calibrateLayoutDraft(draft, selectedComponent.id, parsed ?? Number.NaN));
+      setDraft(calibrateLayoutDraft(draft, selectedComponent.id, parsed ?? Number.NaN, anchorDimension));
+      editedRef.current = true;
       setError(null);
     } catch (reason) {
       setError(reason instanceof LayoutDraftValidationError ? reason.message : "尺寸校正失败");
     }
+  }
+
+  function keepAllUncertain() {
+    if (!draft) return;
+    editedRef.current = true;
+    setDraft({
+      ...draft,
+      components: draft.components.map((component) => component.uncertain ? { ...component, uncertain: false } : component),
+    });
+  }
+
+  function dropAllUncertain() {
+    if (!draft) return;
+    editedRef.current = true;
+    setDraft({
+      ...draft,
+      components: draft.components.filter((component) => !component.uncertain),
+    });
   }
 
   function applyDraft(mode: "append" | "replace-batch") {
@@ -211,17 +325,68 @@ export function ReferenceLayoutPanel() {
     setAppliedBatchId(result.batchId);
     retainedAppliedBatchId = result.batchId;
     setDraft(null);
+    editedRef.current = false;
     setError(null);
+  }
+
+  function selectWholeBatch() {
+    if (!activeBatch) return;
+    const [firstId, ...restIds] = activeBatch.objectIds;
+    selectObject(firstId ?? null);
+    restIds.forEach((id) => toggleObjectSelection(id));
+  }
+
+  function applyBatchScale() {
+    if (!activeBatch) return;
+    const factor = finiteDraftNumber(batchScale);
+    if (factor === null || factor <= 0) {
+      setError("缩放倍数必须是大于 0 的数字");
+      return;
+    }
+    const count = transformLayoutBatch(activeBatch.id, { scaleFactor: factor });
+    setError(count ? null : "该布景已不在场景中");
+  }
+
+  function applyBatchOffset() {
+    if (!activeBatch) return;
+    const offsetX = finiteDraftNumber(batchOffsetX) ?? 0;
+    const offsetZ = finiteDraftNumber(batchOffsetZ) ?? 0;
+    if (offsetX === 0 && offsetZ === 0) return;
+    const count = transformLayoutBatch(activeBatch.id, { offsetX, offsetZ });
+    if (count) {
+      setBatchOffsetX("");
+      setBatchOffsetZ("");
+      setError(null);
+    }
+  }
+
+  function handleImageFile(file: File) {
+    void readReferenceImageFile(file).then((image) => {
+      retainedLocalImage = image;
+      setLocalImage(image);
+      chooseSource(image.sourceId);
+    }).catch((reason) => setError(reason instanceof Error ? reason.message : "参考图读取失败"));
   }
 
   return (
     <InspectorSection title="参考图粗布景">
       <div
-        className="reference-layout-panel"
+        className={`reference-layout-panel${dragOver ? " is-dragover" : ""}`}
         onKeyDown={(event) => event.stopPropagation()}
         onPointerDown={(event) => event.stopPropagation()}
+        onDragOver={(event) => {
+          event.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragOver(false);
+          const file = event.dataTransfer?.files?.[0];
+          if (file) handleImageFile(file);
+        }}
       >
-        <p className="reference-layout-help">从一张图片估算地面、墙门窗和基础家具，确认后再加入当前场景。</p>
+        <p className="reference-layout-help">从一张图片估算地面、墙门窗和基础家具，确认后再加入当前场景。支持拖入图片或 Ctrl+V 粘贴截图。</p>
         {selectedImage ? (
           <div className="reference-layout-source-preview">
             <img alt="当前粗布景参考图" src={selectedImage.url} />
@@ -250,11 +415,7 @@ export function ReferenceLayoutPanel() {
             onChange={(event) => {
               const input = event.currentTarget;
               const file = input.files?.[0];
-              if (file) void readReferenceImageFile(file).then((image) => {
-                retainedLocalImage = image;
-                setLocalImage(image);
-                chooseSource(image.sourceId);
-              }).catch((reason) => setError(reason instanceof Error ? reason.message : "参考图读取失败"));
+              if (file) handleImageFile(file);
               input.value = "";
             }}
           />
@@ -269,6 +430,18 @@ export function ReferenceLayoutPanel() {
             <button className="reference-layout-secondary-button" type="button" onClick={cancelGeneration}><X aria-hidden="true" size={14} />取消</button>
           ) : null}
         </div>
+        {generating && stage ? (
+          <p className="reference-layout-progress" role="status">
+            {STAGE_LABELS[stage]}{stage === "generating" ? `（已用 ${elapsedSeconds} 秒，通常需要 20-60 秒）` : ""}
+          </p>
+        ) : null}
+        {confirmRegenerate ? (
+          <div className="reference-layout-confirm-row" role="alert">
+            <span>已手动修改过当前预览，重新生成将丢弃这些修改。</span>
+            <button type="button" onClick={() => { editedRef.current = false; setConfirmRegenerate(false); void generateLayout(); }}>仍要重新生成</button>
+            <button type="button" onClick={() => setConfirmRegenerate(false)}>保留修改</button>
+          </div>
+        ) : null}
         {error ? <p className="reference-layout-error" role="alert">{error}</p> : null}
 
         {draft ? (
@@ -277,6 +450,13 @@ export function ReferenceLayoutPanel() {
               <span><Box aria-hidden="true" size={14} />暂存预览 · {draft.components.length} 个组件</span>
               <em>{draft.scale.mode === "anchored" ? "已按已知尺寸校正" : "未锚定 · 尺度为估计"}</em>
             </div>
+            {uncertainCount > 0 ? (
+              <div className="reference-layout-batch-actions">
+                <span>{uncertainCount} 个待确认</span>
+                <button type="button" onClick={keepAllUncertain}><CheckCheck aria-hidden="true" size={14} />全部保留</button>
+                <button type="button" onClick={dropAllUncertain}><Trash2 aria-hidden="true" size={14} />删除待确认</button>
+              </div>
+            ) : null}
             <div className="reference-layout-component-list">
               {draft.components.map((component) => (
                 <button
@@ -302,7 +482,7 @@ export function ReferenceLayoutPanel() {
                   <button type="button" title={selectedComponent.visible ? "隐藏组件" : "显示组件"} aria-label={selectedComponent.visible ? "隐藏组件" : "显示组件"} onClick={() => updateComponent(selectedComponent.id, (component) => ({ ...component, visible: !component.visible }))}>
                     {selectedComponent.visible ? <Eye aria-hidden="true" size={14} /> : <EyeOff aria-hidden="true" size={14} />}
                   </button>
-                  <button type="button" title="删除组件" aria-label="删除组件" onClick={() => setDraft({ ...draft, components: draft.components.filter((component) => component.id !== selectedComponent.id) })}>
+                  <button type="button" title="删除组件" aria-label="删除组件" onClick={() => { editedRef.current = true; setDraft({ ...draft, components: draft.components.filter((component) => component.id !== selectedComponent.id) }); }}>
                     <Trash2 aria-hidden="true" size={14} />
                   </button>
                 </div>
@@ -320,15 +500,43 @@ export function ReferenceLayoutPanel() {
                 </div>
                 <div className="reference-layout-anchor-row">
                   <Ruler aria-hidden="true" size={14} />
-                  <label>已知宽度（米）<input aria-label="已知宽度（米）" type="number" min="0.01" max="100" step="0.1" value={anchorWidth} onChange={(event) => setAnchorWidth(event.target.value)} /></label>
+                  <label>锚定维度
+                    <select aria-label="锚定维度" value={anchorDimension} onChange={(event) => setAnchorDimension(event.currentTarget.value as LayoutAnchorDimension)}>
+                      <option value="width">宽度</option>
+                      <option value="height">高度</option>
+                    </select>
+                  </label>
+                  <label>已知{DIMENSION_LABELS[anchorDimension]}（米）<input aria-label={`已知${DIMENSION_LABELS[anchorDimension]}（米）`} type="number" min="0.01" max="100" step="0.1" value={anchorWidth} onChange={(event) => setAnchorWidth(event.target.value)} /></label>
                   <button type="button" disabled={!anchorWidth} onClick={applyScaleAnchor}>校正</button>
                 </div>
+                {anchorPreset ? <p className="reference-layout-anchor-hint">已按「{anchorPreset.hint}」预填，可直接校正或改成你确知的尺寸。</p> : null}
               </div>
             ) : null}
             <div className="reference-layout-commit-row">
               <button className="reference-layout-primary-button" disabled={!draft.components.length} type="button" onClick={() => applyDraft("append")}>添加到当前场景</button>
               <button className="reference-layout-secondary-button" disabled={!replaceBatchId || !draft.components.length} type="button" onClick={() => applyDraft("replace-batch")}>替换此生成批次</button>
             </div>
+          </div>
+        ) : null}
+
+        {activeBatch ? (
+          <div className="reference-layout-adjust" aria-label="布景整体调整">
+            <div className="reference-layout-adjust-heading">
+              <span><Move aria-hidden="true" size={14} />布景调整 · {activeBatch.sourceFileName}</span>
+              <button type="button" onClick={selectWholeBatch}>选中整组</button>
+            </div>
+            <div className="reference-layout-adjust-row">
+              <Scaling aria-hidden="true" size={14} />
+              <label>整体缩放<input aria-label="整体缩放倍数" type="number" min="0.05" max="10" step="0.05" value={batchScale} onChange={(event) => setBatchScale(event.target.value)} /></label>
+              <button type="button" onClick={applyBatchScale}>应用缩放</button>
+            </div>
+            <div className="reference-layout-adjust-row">
+              <Move aria-hidden="true" size={14} />
+              <label>平移 X<input aria-label="整体平移 X" type="number" step="0.1" value={batchOffsetX} onChange={(event) => setBatchOffsetX(event.target.value)} /></label>
+              <label>平移 Z<input aria-label="整体平移 Z" type="number" step="0.1" value={batchOffsetZ} onChange={(event) => setBatchOffsetZ(event.target.value)} /></label>
+              <button type="button" onClick={applyBatchOffset}>应用平移</button>
+            </div>
+            <p className="reference-layout-anchor-hint">缩放以布景中心为基准；每次操作可用 Ctrl/Cmd+Z 撤回。</p>
           </div>
         ) : null}
       </div>

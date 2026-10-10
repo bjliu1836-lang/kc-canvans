@@ -147,6 +147,7 @@ export interface DirectorLayoutBatch {
     confidence: number;
     anchorComponentId?: string;
     anchorWidthMeters?: number;
+    anchorDimension?: "width" | "height";
   };
   objectIds: string[];
 }

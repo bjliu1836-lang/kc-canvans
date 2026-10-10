@@ -69,6 +69,19 @@ describe("layout draft validation", () => {
     expect(draft.components[0].size).toEqual([6, 2.8, 0.15]);
   });
 
+  it("calibrates from the height axis when the anchor dimension is height", () => {
+    const draft = validateLayoutDraftCandidate(candidate(), source, { draftId: "draft_fixed" });
+    const calibrated = calibrateLayoutDraft(draft, "wall_01", 1.4, "height");
+
+    expect(calibrated.scale).toMatchObject({
+      mode: "anchored",
+      anchorWidthMeters: 1.4,
+      anchorDimension: "height",
+    });
+    expect(calibrated.components[0].size).toEqual([3, 1.4, 0.075]);
+    expect(calibrated.components[0].position).toEqual([0, 0, -1.5]);
+  });
+
   it("splits a wall around a detected door so the generated passage remains open", () => {
     const value = candidate();
     value.components.push({

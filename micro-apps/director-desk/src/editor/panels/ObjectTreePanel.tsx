@@ -16,6 +16,7 @@ type SceneTreeItem = {
   object?: DirectorObject;
   objectIds: string[];
   crowdId?: string;
+  batchId?: string;
   previewChildren?: SceneTreePreviewItem[];
 };
 
@@ -53,9 +54,10 @@ function isEditableKeyboardTarget(target: EventTarget | null) {
 
 export function ObjectTreePanel() {
   const [query, setQuery] = useState("");
-  const [expandedCrowdIds, setExpandedCrowdIds] = useState<string[]>([]);
+  const [expandedGroupIds, setExpandedGroupIds] = useState<string[]>([]);
   const assets = useDirectorStore((state) => state.project.assets);
   const objects = useDirectorStore((state) => state.project.objects);
+  const layoutBatches = useDirectorStore((state) => state.project.layoutBatches ?? []);
   const selectedObjectId = useDirectorStore((state) => state.selectedObjectId);
   const selectedObjectIds = useDirectorStore((state) => state.selectedObjectIds);
   const selectedCrowdId = useDirectorStore((state) => state.selectedCrowdId);
@@ -96,9 +98,31 @@ export function ObjectTreePanel() {
 
   const groupedItems = useMemo(() => {
     const crowdItems = new Map<string, SceneTreeItem>();
+    const layoutBatchItems = new Map<string, SceneTreeItem>();
     const regularItems: SceneTreeItem[] = [];
+    const batchNames = new Map(layoutBatches.map((batch) => [batch.id, batch.sourceFileName]));
 
     objects.forEach((object) => {
+      if (object.layoutSource?.batchId) {
+        const batchId = object.layoutSource.batchId;
+        const child = { id: object.id, name: object.name, icon: "geometry" as const };
+        const existing = layoutBatchItems.get(batchId);
+        if (existing) {
+          existing.objectIds.push(object.id);
+          existing.previewChildren = [...(existing.previewChildren ?? []), child];
+          return;
+        }
+        layoutBatchItems.set(batchId, {
+          id: batchId,
+          name: `${batchNames.get(batchId) ?? "参考图"}·布景`,
+          icon: "geometry",
+          batchId,
+          objectIds: [object.id],
+          previewChildren: [child],
+        });
+        return;
+      }
+
       if (object.kind === "character" && object.crowdId && object.crowdLabel) {
         const existing = crowdItems.get(object.crowdId);
         if (existing) {
@@ -150,22 +174,28 @@ export function ObjectTreePanel() {
     return {
       characters: regularItems.filter((item) => item.object?.kind === "character"),
       crowd: Array.from(crowdItems.values()),
-      geometry: regularItems.filter(
-        (item) =>
-          (item.object?.kind === "scene" && !isModelBackedObject(item.object)) ||
-          (item.object?.kind === "prop" && !item.object?.assetRefId)
-      ),
+      geometry: [
+        ...Array.from(layoutBatchItems.values()),
+        ...regularItems.filter(
+          (item) =>
+            (item.object?.kind === "scene" && !isModelBackedObject(item.object)) ||
+            (item.object?.kind === "prop" && !item.object?.assetRefId)
+        ),
+      ],
       myModels: regularItems.filter(
         (item) => item.object?.kind !== "character" && item.object?.kind !== "camera" && isModelBackedObject(item.object)
       ),
       cameras: regularItems.filter((item) => item.object?.kind === "camera"),
     };
-  }, [objects, assetsById]);
+  }, [objects, assetsById, layoutBatches]);
 
   useEffect(() => {
-    const crowdIds = new Set(groupedItems.crowd.map((item) => item.id));
-    setExpandedCrowdIds((current) => current.filter((crowdId) => crowdIds.has(crowdId)));
-  }, [groupedItems.crowd]);
+    const expandableIds = new Set([
+      ...groupedItems.crowd.map((item) => item.id),
+      ...groupedItems.geometry.filter((item) => item.batchId).map((item) => item.id),
+    ]);
+    setExpandedGroupIds((current) => current.filter((groupId) => expandableIds.has(groupId)));
+  }, [groupedItems.crowd, groupedItems.geometry]);
 
   const filteredGroups = GROUP_LABELS.map((group) => {
     const itemsByGroup =
@@ -203,7 +233,7 @@ export function ObjectTreePanel() {
   const hasEmptySearchResult = query.trim().length > 0 && filteredGroups.length === 0;
 
   function selectTreeItem(item: SceneTreeItem, event: MouseEvent<HTMLElement>) {
-    if (item.crowdId) {
+    if (item.crowdId || item.batchId) {
       const selectedIds = getSelectedIds();
 
       if (event.shiftKey) {
@@ -226,7 +256,14 @@ export function ObjectTreePanel() {
         return;
       }
 
-      selectCrowd(item.crowdId);
+      if (item.crowdId) {
+        selectCrowd(item.crowdId);
+        return;
+      }
+
+      const [firstBatchObjectId, ...restBatchObjectIds] = item.objectIds;
+      selectObject(firstBatchObjectId ?? null);
+      restBatchObjectIds.forEach((id) => toggleObjectSelection(id));
       return;
     }
 
@@ -271,9 +308,9 @@ export function ObjectTreePanel() {
     selectObject(item.id);
   }
 
-  function toggleCrowdExpanded(crowdId: string) {
-    setExpandedCrowdIds((current) =>
-      current.includes(crowdId) ? current.filter((item) => item !== crowdId) : [...current, crowdId]
+  function toggleGroupExpanded(groupId: string) {
+    setExpandedGroupIds((current) =>
+      current.includes(groupId) ? current.filter((item) => item !== groupId) : [...current, groupId]
     );
   }
 
@@ -312,12 +349,15 @@ export function ObjectTreePanel() {
                 {group.items.map((item) => {
                   const selected = item.crowdId
                     ? selectedCrowdId === item.crowdId || item.objectIds.every((id) => selectedObjectIds.includes(id))
-                    : item.objectIds.length > 1
-                      ? item.objectIds.every((id) => selectedObjectIds.includes(id))
-                      : selectedObjectIds.length
-                        ? selectedObjectIds.includes(item.id)
-                        : item.id === selectedObjectId;
-                  const expanded = item.crowdId ? expandedCrowdIds.includes(item.crowdId) : false;
+                    : item.batchId
+                      ? item.objectIds.length > 0 && item.objectIds.every((id) => selectedObjectIds.includes(id))
+                      : item.objectIds.length > 1
+                        ? item.objectIds.every((id) => selectedObjectIds.includes(id))
+                        : selectedObjectIds.length
+                          ? selectedObjectIds.includes(item.id)
+                          : item.id === selectedObjectId;
+                  const expandableId = item.crowdId ?? item.batchId ?? null;
+                  const expanded = expandableId ? expandedGroupIds.includes(expandableId) : false;
 
                   return (
                     <li key={item.id} className="object-list-item">
@@ -329,14 +369,14 @@ export function ObjectTreePanel() {
                         onClick={(event) => selectTreeItem(item, event)}
                       >
                         <div className="object-row-main">
-                          {item.crowdId ? (
+                          {expandableId ? (
                             <button
                               aria-label={`${expanded ? "收起" : "展开"} ${item.name}`}
                               className="object-row-toggle-button"
                               type="button"
                               onClick={(event) => {
                                 event.stopPropagation();
-                                toggleCrowdExpanded(item.crowdId as string);
+                                toggleGroupExpanded(expandableId);
                               }}
                             >
                               {expanded ? (
@@ -386,7 +426,7 @@ export function ObjectTreePanel() {
                           </>
                         ) : null}
                       </div>
-                      {item.crowdId && expanded && item.previewChildren?.length ? (
+                      {expandableId && expanded && item.previewChildren?.length ? (
                         <ul className="object-crowd-preview-list" aria-label={`${item.name} 成员预览`}>
                           {item.previewChildren.map((child) => (
                             <li key={child.id}>

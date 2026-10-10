@@ -105,6 +105,36 @@ it("adds and replaces one generated layout batch as one undoable transaction", (
     .toMatchObject({ name: "后墙", transform: { scale: [6, 2.8, 0.15] } });
 });
 
+it("scales and offsets a generated layout batch around its center as undoable transactions", () => {
+  const first = useDirectorStore.getState().applyLayoutDraft({ draft: createLayoutDraftFixture(), mode: "append" });
+  const findBatchObject = () => useDirectorStore.getState().project.objects
+    .find((object) => object.layoutSource?.batchId === first.batchId);
+
+  expect(findBatchObject()?.transform).toMatchObject({ position: [0, 0, -3], scale: [6, 2.8, 0.15] });
+
+  const scaledCount = useDirectorStore.getState().transformLayoutBatch(first.batchId, { scaleFactor: 0.5 });
+  expect(scaledCount).toBe(1);
+  expect(findBatchObject()?.transform).toMatchObject({ position: [0, 0, -3], scale: [3, 1.4, 0.075] });
+
+  const movedCount = useDirectorStore.getState().transformLayoutBatch(first.batchId, { offsetX: 1, offsetZ: 2 });
+  expect(movedCount).toBe(1);
+  expect(findBatchObject()?.transform.position).toEqual([1, 0, -1]);
+
+  useDirectorStore.getState().undo();
+  expect(findBatchObject()?.transform.position).toEqual([0, 0, -3]);
+  useDirectorStore.getState().undo();
+  expect(findBatchObject()?.transform.scale).toEqual([6, 2.8, 0.15]);
+});
+
+it("ignores batch transforms for unknown batches and no-op patches", () => {
+  const first = useDirectorStore.getState().applyLayoutDraft({ draft: createLayoutDraftFixture(), mode: "append" });
+  const undoDepth = useDirectorStore.getState().undoStack.length;
+
+  expect(useDirectorStore.getState().transformLayoutBatch("missing_batch", { scaleFactor: 2 })).toBe(0);
+  expect(useDirectorStore.getState().transformLayoutBatch(first.batchId, {})).toBe(0);
+  expect(useDirectorStore.getState().undoStack.length).toBe(undoDepth);
+});
+
 it("seeds the demo with one mannequin role and one camera", () => {
   const state = createInitialDirectorState();
   const defaultCharacter = state.project.objects.find((item) => item.kind === "character");
