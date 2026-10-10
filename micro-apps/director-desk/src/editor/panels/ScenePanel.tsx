@@ -13,6 +13,7 @@ import { readPanoramaFile } from "../loaders/panoramaImport";
 import { useResolvedLocalAssetUrl } from "../loaders/useResolvedLocalAssetUrl";
 import { GROUND_MATERIAL_PRESETS } from "../canvas/groundMaterialPresets";
 import type { GroundMaterialPresetId } from "../schema/directorProject";
+import { ReferenceLayoutPanel } from "./ReferenceLayoutPanel";
 
 const SCENE_SCALE_MIN = 0.1;
 const SCENE_SCALE_MAX = 3;
@@ -169,6 +170,7 @@ export function ScenePanel() {
           },
         ]}
       />
+      <ReferenceLayoutPanel />
       <InspectorSection title="背景">
         <div className="panorama-control-card">
           {panoramaAsset && resolvedPanoramaUrl ? (

@@ -26,6 +26,18 @@ interface HostSessionPayload {
   theme?: unknown;
 }
 
+export interface HostReferenceImage {
+  edgeId: string;
+  sourceNodeId: string;
+  imageUrl: string;
+  fileName: string;
+}
+
+interface HostReferenceImagesPayload {
+  instanceId?: unknown;
+  images?: unknown;
+}
+
 export interface HostCaptureItemPayload {
   dataUrl?: unknown;
   fileName?: unknown;
@@ -44,6 +56,8 @@ let initialized = false;
 let activeExtensionExportRequestId: string | null = null;
 let activeHostInstanceId: string | null = null;
 export const DIRECTOR_DESK_SESSION_OPENED_EVENT = "storyai:director-desk-session-opened";
+export const DIRECTOR_DESK_REFERENCE_IMAGES_EVENT = "storyai:director-desk-reference-images-updated";
+let activeHostReferenceImages: HostReferenceImage[] = [];
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -129,6 +143,8 @@ function openHostSession(payload: HostSessionPayload) {
   const instanceId = normalizeString(payload.instanceId);
   const theme = normalizeTheme(payload.theme);
   activeHostInstanceId = instanceId || null;
+  activeHostReferenceImages = [];
+  window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, { detail: { instanceId, images: [] } }));
   if (theme) {
     applyDirectorDeskTheme(theme);
   }
@@ -136,6 +152,29 @@ function openHostSession(payload: HostSessionPayload) {
     useDirectorStore.getState().openScopedScene(instanceId);
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_SESSION_OPENED_EVENT, { detail: { instanceId } }));
   }
+}
+
+function importHostReferenceImages(payload: HostReferenceImagesPayload) {
+  const instanceId = normalizeString(payload.instanceId);
+  if (instanceId && activeHostInstanceId && instanceId !== activeHostInstanceId) return;
+  const images = Array.isArray(payload.images) ? payload.images : [];
+  activeHostReferenceImages = images.slice(0, 30).flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const item = value as Record<string, unknown>;
+    const edgeId = normalizeString(item.edgeId);
+    const sourceNodeId = normalizeString(item.sourceNodeId);
+    const imageUrl = normalizeString(item.imageUrl);
+    const fileName = normalizeString(item.fileName);
+    if (!edgeId || !sourceNodeId || !imageUrl || !fileName || !isSupportedHostImageUrl(imageUrl)) return [];
+    return [{ edgeId, sourceNodeId, imageUrl, fileName }];
+  });
+  window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: activeHostInstanceId, images: activeHostReferenceImages },
+  }));
+}
+
+export function getHostReferenceImages() {
+  return activeHostReferenceImages.map((image) => ({ ...image }));
 }
 
 function postDirectorExtensionResponse(payload: DirectorExtensionResponsePayload) {
@@ -317,6 +356,12 @@ function handleHostMessage(event: MessageEvent) {
     return;
   }
 
+
+  if (event.data?.type === "storyai:director-desk-reference-images") {
+    importHostReferenceImages((event.data.payload || {}) as HostReferenceImagesPayload);
+    return;
+  }
+
   if (event.data?.type === DIRECTOR_EXTENSION_REQUEST_TYPE) {
     void handleDirectorExtensionRequest(event.data.payload);
   }
@@ -340,5 +385,6 @@ export function clearDirectorDeskHostBridge() {
   initialized = false;
   activeExtensionExportRequestId = null;
   activeHostInstanceId = null;
+  activeHostReferenceImages = [];
   window.removeEventListener("message", handleHostMessage);
 }

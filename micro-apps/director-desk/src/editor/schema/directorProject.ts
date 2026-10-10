@@ -16,6 +16,7 @@ export const GEOMETRY_PRIMITIVE_OPTIONS = [
   { type: "pyramid", label: "棱锥" },
 ] as const;
 export type GeometryPrimitiveType = (typeof GEOMETRY_PRIMITIVE_OPTIONS)[number]["type"];
+export type DirectorLayoutCategory = "ground" | "wall" | "door" | "window" | "table" | "chair" | "sofa" | "cabinet";
 export type CharacterRigType = "mannequin" | "ue4-mannequin" | "mixamo" | "vrm" | "custom-humanoid";
 export type CharacterBodyType =
   | "mannequin"
@@ -123,6 +124,31 @@ export interface DirectorObject {
   linkedCameraId?: string | null;
   characterRig?: CharacterRigState;
   motionPath?: DirectorObjectMotionPath;
+  layoutSource?: {
+    batchId: string;
+    draftId: string;
+    sourceId: string;
+    sourceFileName: string;
+    componentId: string;
+    category: DirectorLayoutCategory;
+    confidence: number;
+    uncertain: boolean;
+  };
+}
+
+export interface DirectorLayoutBatch {
+  id: string;
+  draftId: string;
+  sourceId: string;
+  sourceFileName: string;
+  createdAt: string;
+  scale: {
+    mode: "estimated" | "anchored";
+    confidence: number;
+    anchorComponentId?: string;
+    anchorWidthMeters?: number;
+  };
+  objectIds: string[];
 }
 
 export interface DirectorObjectMotionKeyframe {
@@ -234,4 +260,5 @@ export interface DirectorProject {
   cameras: DirectorCameraShot[];
   activeCameraId: string | null;
   panoramaAssetId: string | null;
+  layoutBatches?: DirectorLayoutBatch[];
 }

@@ -72,3 +72,37 @@ it("creates a deterministic fingerprint that changes with project data", () => {
   project.cameras[0].fov = 72;
   expect(getDirectorProjectFingerprint(project)).not.toBe(original);
 });
+
+it("keeps reference layout source metadata through export and import", () => {
+  const project = createDefaultDirectorProject();
+  project.layoutBatches = [{
+    id: "layout_1",
+    draftId: "draft_1",
+    sourceId: "image_1",
+    sourceFileName: "room.png",
+    createdAt: "2026-10-10T00:00:00.000Z",
+    scale: { mode: "estimated", confidence: 0.4 },
+    objectIds: ["layout_1_wall_1"],
+  }];
+  project.objects.push({
+    id: "layout_1_wall_1",
+    name: "后墙",
+    kind: "prop",
+    visible: true,
+    locked: false,
+    geometryType: "box",
+    transform: { position: [0, 0, -3], rotation: [0, 0, 0], scale: [6, 2.8, 0.15] },
+    layoutSource: {
+      batchId: "layout_1",
+      draftId: "draft_1",
+      sourceId: "image_1",
+      sourceFileName: "room.png",
+      componentId: "wall_1",
+      category: "wall",
+      confidence: 0.8,
+      uncertain: false,
+    },
+  });
+
+  expect(parseProject(serializeProject(project))).toEqual(project);
+});

@@ -494,6 +494,75 @@ const MEDIA_ANALYSIS_SYSTEM_PROMPT = [
   '输出使用中文，结构清晰，避免泛泛形容，尽量描述可观察的视觉事实。'
 ].join('\n');
 
+const DIRECTOR_LAYOUT_SYSTEM_PROMPT = [
+  '你是 3D 影视预演的室内粗布景分析器。',
+  '只依据一张参考图估计可编辑的粗布景，不要虚构图中不可见的精细结构。',
+  '只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet。',
+  '只使用这些 primitive：box, cylinder。不要返回模型名、GLB、纹理或外部资产。',
+  '坐标单位是米，Y 轴向上；position 是物体底面中心；size 顺序是宽、高、深，且每项必须大于 0。',
+  '门洞附近的墙应拆成门洞左右或上方的墙段，不要用一整块墙堵住门洞。',
+  '最多 30 个组件。无法确认的物体请降低 confidence 并设置 uncertain=true。',
+  '没有已知尺寸时使用常见室内尺度估计，scale.mode 固定为 estimated。',
+  '只输出一个 JSON 对象，不要 Markdown，不要解释。格式：',
+  '{"scale":{"mode":"estimated","confidence":0.4},"components":[{"id":"wall_01","name":"后墙","category":"wall","primitive":"box","position":[0,0,-3],"size":[6,2.8,0.15],"rotationYDegrees":0,"confidence":0.8,"uncertain":false,"notes":""}]}'
+].join('\n');
+
+const DIRECTOR_LAYOUT_CATEGORIES = new Set(['ground', 'wall', 'door', 'window', 'table', 'chair', 'sofa', 'cabinet']);
+const DIRECTOR_LAYOUT_PRIMITIVES = new Set(['box', 'cylinder']);
+
+const parseDirectorLayoutJson = (text) => {
+  const stripped = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  try {
+    return JSON.parse(stripped);
+  } catch {
+    const error = new Error('模型没有返回可解析的 JSON');
+    error.issues = [error.message];
+    throw error;
+  }
+};
+
+const validateDirectorLayoutCandidate = (candidate) => {
+  const issues = [];
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    issues.push('布局结果必须是 JSON 对象');
+  }
+  const components = Array.isArray(candidate?.components) ? candidate.components : null;
+  if (!components) issues.push('布局结果缺少 components 数组');
+  if (components && components.length === 0) issues.push('没有识别到可用的粗布景组件');
+  if (components && components.length > 30) issues.push('组件数量超过 30 个上限');
+  const ids = new Set();
+  components?.forEach((item, index) => {
+    const label = `第 ${index + 1} 个组件`;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      issues.push(`${label}不是对象`);
+      return;
+    }
+    if (!DIRECTOR_LAYOUT_CATEGORIES.has(item.category)) issues.push(`${label}包含未知类型 ${String(item.category)}`);
+    if (!DIRECTOR_LAYOUT_PRIMITIVES.has(item.primitive)) issues.push(`${label}包含未知基础资产 ${String(item.primitive)}`);
+    const finiteTuple = (value) => Array.isArray(value) && value.length === 3
+      && value.every(number => typeof number === 'number' && Number.isFinite(number));
+    if (!finiteTuple(item.position)) issues.push(`${label}的位置必须是三个有限数字`);
+    if (!finiteTuple(item.size)) issues.push(`${label}的尺寸必须是三个有限数字`);
+    else if (item.size.some(number => number <= 0 || number > 100)) issues.push(`${label}的尺寸必须大于 0 且不超过 100 米`);
+    if (typeof item.rotationYDegrees !== 'number' || !Number.isFinite(item.rotationYDegrees)) {
+      issues.push(`${label}的朝向必须是有限数字`);
+    }
+    if (typeof item.confidence !== 'number' || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) {
+      issues.push(`${label}的置信度必须在 0 到 1 之间`);
+    }
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!id) issues.push(`${label}缺少 id`);
+    else if (ids.has(id)) issues.push(`${label}的 id 重复`);
+    ids.add(id);
+  });
+  if (issues.length) {
+    const error = new Error(issues[0]);
+    error.issues = issues;
+    throw error;
+  }
+  return candidate;
+};
+
 const DEFAULT_SCRIPT_ASSET_SYSTEM_PROMPT = [
   '你是影视前期视觉资产拆解专家。你的任务是根据用户剧本，为每个主要角色输出完整、稳定、可复用的 AI 角色资产提示词。',
   '执行顺序必须固定：通读剧本 -> 提取角色基础事实 -> 先锁定性别 -> 再判断时代/朝代/世界观 -> 再判断身份阶层职业 -> 再选择五官、发型、服装、配饰 -> 执行道具过滤 -> 输出角色资产表。',
@@ -983,6 +1052,71 @@ const handleTextGeneration = async (req, res) => {
   json(res, 200, { text: extractText(result), usage: result.usage || null });
 };
 
+const handleDirectorLayoutGeneration = async (req, res) => {
+  const body = await readBody(req);
+  const imageUrl = typeof body?.image?.url === 'string' ? body.image.url.trim() : '';
+  if (!imageUrl || !(imageUrl.startsWith('data:image/') || imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
+    return json(res, 400, { error: 'DIRECTOR_LAYOUT_IMAGE_REQUIRED' });
+  }
+
+  const apiKey = process.env.DIRECTOR_LAYOUT_MODEL_DISABLED === 'true'
+    ? ''
+    : process.env.MIMO_API_KEY || process.env.TEXT_API_KEY;
+  if (!apiKey) return json(res, 501, { error: 'DIRECTOR_LAYOUT_MODEL_NOT_CONFIGURED' });
+  const baseUrl = resolveMimoBaseUrl(apiKey);
+  const endpoint = process.env.MIMO_TEXT_ENDPOINT || process.env.TEXT_ENDPOINT || '/chat/completions';
+  const model = process.env.MIMO_VISION_MODEL_ID || resolveMimoTextModel('2.5');
+  let previousText = '';
+  let previousIssues = [];
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const correction = attempt === 1
+      ? [
+          '上一次输出未通过校验。请只修正 JSON 后重新完整输出。',
+          `校验错误：${previousIssues.join('；')}`,
+          `上一次输出：${previousText.slice(0, 12000)}`,
+        ].join('\n')
+      : '分析这张参考图并输出粗布景 JSON。';
+    const result = await callTextModelApi({
+      baseUrl,
+      endpoint,
+      apiKey,
+      payload: {
+        model,
+        messages: [
+          { role: 'system', content: process.env.MIMO_DIRECTOR_LAYOUT_SYSTEM_PROMPT || DIRECTOR_LAYOUT_SYSTEM_PROMPT },
+          {
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url: imageUrl } },
+              { type: 'text', text: correction },
+            ],
+          },
+        ],
+        max_completion_tokens: Number(process.env.MIMO_DIRECTOR_LAYOUT_MAX_COMPLETION_TOKENS || 4096),
+        temperature: 0.1,
+        top_p: 0.9,
+        stream: false,
+        thinking: { type: 'disabled' },
+      },
+      timeoutMs: 180000,
+    });
+    previousText = extractText(result);
+    try {
+      const draft = validateDirectorLayoutCandidate(parseDirectorLayoutJson(previousText));
+      return json(res, 200, { draft, usage: result.usage || null });
+    } catch (error) {
+      previousIssues = Array.isArray(error?.issues) ? error.issues.slice(0, 12) : [error?.message || '布局 JSON 无效'];
+    }
+  }
+
+  return json(res, 502, {
+    error: 'DIRECTOR_LAYOUT_INVALID_MODEL_JSON',
+    message: '视觉模型两次返回的数据都不符合布局格式',
+    issues: previousIssues,
+  });
+};
+
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -1035,6 +1169,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && pathname === '/api/generate/video/poll') return await handleVideoPoll(req, res);
       if (req.method === 'POST' && pathname === '/api/generate/audio') return await handleAudioGeneration(req, res);
       if (req.method === 'POST' && pathname === '/api/generate/text') return await handleTextGeneration(req, res);
+      if (req.method === 'POST' && pathname === '/api/director-layout') return await handleDirectorLayoutGeneration(req, res);
       return json(res, 404, { error: 'NOT_FOUND' });
     }
 

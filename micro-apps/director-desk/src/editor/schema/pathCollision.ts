@@ -22,7 +22,15 @@ function getObstacleBounds(object: DirectorObject): Bounds {
 
 function getObstacles(objects: DirectorObject[]) {
   return objects.filter((object) =>
-    object.visible && !object.motionPath?.keyframes.length && (object.kind === "prop" || object.kind === "scene")
+    object.visible
+    && !object.motionPath?.keyframes.length
+    && (object.kind === "prop" || object.kind === "scene")
+    && (
+      !object.layoutSource
+      || (object.layoutSource.category !== "ground"
+        && object.layoutSource.category !== "door"
+        && object.layoutSource.category !== "window")
+    )
   );
 }
 

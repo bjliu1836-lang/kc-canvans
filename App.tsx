@@ -1415,6 +1415,19 @@ const CanvasWithSidebar: React.FC = () => {
       };
   }, [connections, nodes]);
 
+  const resolveDirectorDeskReferenceImages = useCallback((nodeId: string) => connections
+      .filter(connection => connection.targetId === nodeId)
+      .flatMap(connection => {
+          const sourceNode = nodes.find(node => node.id === connection.sourceId);
+          if (!sourceNode?.imageSrc) return [];
+          return [{
+              edgeId: connection.id,
+              sourceNodeId: sourceNode.id,
+              imageUrl: sourceNode.imageSrc,
+              fileName: `${sourceNode.title || '画布参考图'}.png`,
+          }];
+      }), [connections, nodes]);
+
   const postDirectorDeskSessionToIframe = useCallback(() => {
       if (!directorDeskSession) return;
       const targetWindow = directorDeskIframeRef.current?.contentWindow;
@@ -1435,7 +1448,15 @@ const CanvasWithSidebar: React.FC = () => {
               payload: panorama,
           }, window.location.origin);
       }
-  }, [directorDeskSession, isDark, resolveDirectorDeskPanorama]);
+
+      targetWindow.postMessage({
+          type: 'storyai:director-desk-reference-images',
+          payload: {
+              instanceId: directorDeskSession.instanceId,
+              images: resolveDirectorDeskReferenceImages(directorDeskSession.nodeId),
+          },
+      }, window.location.origin);
+  }, [directorDeskSession, isDark, resolveDirectorDeskPanorama, resolveDirectorDeskReferenceImages]);
 
   const openDirectorDesk = useCallback((nodeId: string) => {
       const node = nodes.find(item => item.id === nodeId);

@@ -51,6 +51,8 @@ import {
 import { parseImportedCharacterActionId } from "../schema/importedCharacterAction";
 import { normalizePerformanceProfileId, type PerformanceProfileId } from "../performance/performanceProfiles";
 import { getRuntimePlaybackProgress, setRuntimePlaybackProgress } from "../runtime/playbackRuntime";
+import { buildLayoutBatch } from "../schema/layoutDraft";
+import type { ApplyLayoutDraftInput, ApplyLayoutDraftResult } from "../schema/layoutDraft";
 
 export type TransformMode = "translate" | "rotate" | "scale";
 export type CameraPilotMode = "idle" | "pilot";
@@ -223,6 +225,7 @@ export interface DirectorActions {
   addPresetCharacter: (bodyType?: CharacterBodyType) => void;
   addCrowdCharacters: (input: CrowdCharactersInput) => string[];
   addGeometryPrimitive: (geometryType: GeometryPrimitiveType) => void;
+  applyLayoutDraft: (input: ApplyLayoutDraftInput) => ApplyLayoutDraftResult;
   addCameraShot: (snapshot?: CameraShotSnapshot) => string;
   ensureMotionCamera: (snapshot?: CameraShotSnapshot) => string;
   deleteSelectedObject: () => void;
@@ -539,6 +542,14 @@ function migrateDirectorProject(project: DirectorProject): DirectorProject {
     animationAssets: Array.isArray(project.animationAssets)
       ? project.animationAssets
       : [],
+    layoutBatches: Array.isArray(project.layoutBatches)
+      ? project.layoutBatches.map((batch) => ({
+          ...batch,
+          objectIds: Array.isArray(batch.objectIds)
+            ? batch.objectIds.filter((id): id is string => typeof id === "string")
+            : [],
+        }))
+      : [],
     cameras: project.cameras.map((camera) => ({
       ...camera,
       motionPath: normalizeCameraMotionPath(camera.motionPath, camera.target, camera),
@@ -751,6 +762,7 @@ export function createDefaultDirectorProject({
     cameras: [camera],
     activeCameraId: camera.id,
     panoramaAssetId: null,
+    layoutBatches: [],
   };
 }
 
@@ -2447,6 +2459,44 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
           },
         };
       }),
+    applyLayoutDraft: ({ draft, mode, replaceBatchId }) => {
+      let result: ApplyLayoutDraftResult = { batchId: "", objectIds: [] };
+      commitMutation((state) => {
+        const requestedBatchId = mode === "replace-batch" && replaceBatchId
+          ? replaceBatchId
+          : `layout_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+        const replacingIds = mode === "replace-batch" && replaceBatchId
+          ? new Set(
+              state.project.objects
+                .filter((object) => object.layoutSource?.batchId === replaceBatchId)
+                .map((object) => object.id)
+            )
+          : new Set<string>();
+        const retainedObjects = state.project.objects.filter((object) => !replacingIds.has(object.id));
+        const built = buildLayoutBatch(
+          draft,
+          requestedBatchId,
+          retainedObjects.map((object) => object.id),
+          state.project.scene.groundHeight
+        );
+        const retainedBatches = (state.project.layoutBatches ?? []).filter((batch) => batch.id !== requestedBatchId);
+        result = { batchId: requestedBatchId, objectIds: built.objects.map((object) => object.id) };
+
+        return {
+          ...state,
+          selectedObjectId: result.objectIds[result.objectIds.length - 1] ?? null,
+          selectedObjectIds: result.objectIds,
+          selectedCrowdId: null,
+          directorInspectorMode: "auto",
+          project: {
+            ...state.project,
+            objects: [...retainedObjects, ...built.objects],
+            layoutBatches: [...retainedBatches, built.batch],
+          },
+        };
+      });
+      return result;
+    },
     addCameraShot: (snapshot) => {
       let nextCameraId = "";
 

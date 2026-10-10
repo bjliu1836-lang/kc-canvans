@@ -44,6 +44,7 @@ import {
 import { VIEWPORT_OBJECT_LABEL_VERTICAL_GAP } from "../schema/viewportLabels";
 import type { TransformMode } from "../store/directorStore";
 import { useDirectorStore } from "../store/directorStore";
+import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
 import { CharacterModel } from "../runtime/CharacterModel";
 import { sampleCharacterActionControls } from "../presets/characterActionPresets";
 import { getGroundedLabelY } from "../runtime/mannequin/bodyTypes";
@@ -1598,6 +1599,8 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
   const characterRoutePlacementId = useDirectorStore((state) => state.characterRoutePlacementId);
   const selectObject = useDirectorStore((state) => state.selectObject);
   const selectCrowd = useDirectorStore((state) => state.selectCrowd);
+  const layoutDraft = useLayoutDraftPreviewStore((state) => state.draft);
+  const selectedLayoutComponentId = useLayoutDraftPreviewStore((state) => state.selectedComponentId);
   const interactive = renderMode === "interactive";
   const effectiveViewMode = renderMode === "clean-camera" ? "camera" : renderMode === "director-monitor" ? "director" : viewMode;
   const translationSnap = scene.snapToGrid ? 1 : null;
@@ -1688,8 +1691,36 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
           sceneRootRef={sceneRootRef}
         />
       ) : null}
+      {interactive && layoutDraft ? (
+        <group name="layout-draft-preview" userData={{ [HIDE_FROM_VIEWPORT_CAPTURE_KEY]: true }}>
+          {layoutDraft.components.filter((component) => component.visible).map((component) => (
+            <group
+              key={component.id}
+              position={component.position}
+              rotation={[0, component.rotationYDegrees * Math.PI / 180, 0]}
+              scale={component.size}
+            >
+              <mesh position={[0, 0.5, 0]}>
+                {component.primitive === "cylinder"
+                  ? <cylinderGeometry args={[0.5, 0.5, 1, 24]} />
+                  : <boxGeometry args={[1, 1, 1]} />}
+                <meshStandardMaterial
+                  color={component.uncertain ? "#D7A64A" : "#6F78FF"}
+                  depthWrite={false}
+                  opacity={component.id === selectedLayoutComponentId ? 0.58 : 0.34}
+                  transparent
+                />
+              </mesh>
+            </group>
+          ))}
+        </group>
+      ) : null}
       {objects
-        .filter((item) => item.visible && item.kind !== "camera")
+        .filter((item) => (
+          item.visible
+          && item.kind !== "camera"
+          && !(scene.showGround && item.layoutSource?.category === "ground")
+        ))
         .map((item) => {
           const asset = item.assetRefId ? assetsById.get(item.assetRefId) : undefined;
           const hasMotion = Boolean(item.motionPath?.keyframes?.length);

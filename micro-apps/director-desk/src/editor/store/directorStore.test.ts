@@ -7,6 +7,7 @@ import {
   DEFAULT_VIEWPORT_ZOOM_SENSITIVITY,
 } from "../schema/viewportSensitivity";
 import { getRuntimePlaybackProgress, setRuntimePlaybackProgress } from "../runtime/playbackRuntime";
+import type { LayoutDraft } from "../schema/layoutDraft";
 
 function createMemoryStorage(): Storage {
   const storage = new Map<string, string>();
@@ -44,6 +45,64 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+function createLayoutDraftFixture(): LayoutDraft {
+  return {
+    version: 1,
+    id: "draft_fixture",
+    sourceId: "canvas_image_1",
+    sourceFileName: "客厅.png",
+    createdAt: "2026-10-10T00:00:00.000Z",
+    scale: { mode: "estimated", confidence: 0.4 },
+    components: [{
+      id: "wall_01",
+      name: "后墙",
+      category: "wall",
+      primitive: "box",
+      position: [0, 0, -3],
+      size: [6, 2.8, 0.15],
+      rotationYDegrees: 0,
+      confidence: 0.8,
+      uncertain: false,
+      visible: true,
+    }],
+  };
+}
+
+it("adds and replaces one generated layout batch as one undoable transaction", () => {
+  const initialObjects = structuredClone(useDirectorStore.getState().project.objects);
+  const first = useDirectorStore.getState().applyLayoutDraft({ draft: createLayoutDraftFixture(), mode: "append" });
+  const afterAppend = useDirectorStore.getState();
+
+  expect(first.objectIds).toHaveLength(1);
+  expect(afterAppend.project.objects).toHaveLength(initialObjects.length + 1);
+  expect(afterAppend.project.layoutBatches?.[0]).toMatchObject({
+    id: first.batchId,
+    sourceId: "canvas_image_1",
+  });
+
+  const replacementDraft = createLayoutDraftFixture();
+  replacementDraft.components[0] = {
+    ...replacementDraft.components[0],
+    name: "已校正后墙",
+    size: [3, 2.8, 0.15],
+  };
+  useDirectorStore.getState().applyLayoutDraft({
+    draft: replacementDraft,
+    mode: "replace-batch",
+    replaceBatchId: first.batchId,
+  });
+  const afterReplace = useDirectorStore.getState();
+
+  expect(afterReplace.project.objects).toHaveLength(initialObjects.length + 1);
+  expect(afterReplace.project.objects.filter((object) => !object.layoutSource)).toEqual(initialObjects);
+  expect(afterReplace.project.objects.find((object) => object.layoutSource?.batchId === first.batchId))
+    .toMatchObject({ name: "已校正后墙", transform: { scale: [3, 2.8, 0.15] } });
+
+  useDirectorStore.getState().undo();
+  expect(useDirectorStore.getState().project.objects.find((object) => object.layoutSource?.batchId === first.batchId))
+    .toMatchObject({ name: "后墙", transform: { scale: [6, 2.8, 0.15] } });
 });
 
 it("seeds the demo with one mannequin role and one camera", () => {

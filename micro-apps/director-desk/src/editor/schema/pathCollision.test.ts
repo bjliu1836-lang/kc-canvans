@@ -53,4 +53,27 @@ describe("path collision", () => {
     expect(insideObstacle[1]).toBeGreaterThanOrEqual(0.18);
     expect(Math.abs(insideObstacle[0]) > 1.1 || Math.abs(insideObstacle[2]) > 1.1 || insideObstacle[1] > 2).toBe(true);
   });
+
+  it.each(["ground", "door", "window"] as const)("keeps generated %s components out of route obstacles", (category) => {
+    const { character, obstacle, scene } = createFixture();
+    const generated = {
+      ...obstacle,
+      layoutSource: {
+        batchId: "layout_1",
+        draftId: "draft_1",
+        sourceId: "image_1",
+        sourceFileName: "room.png",
+        componentId: `${category}_1`,
+        category,
+        confidence: 0.8,
+        uncertain: false,
+      },
+    };
+    const collisionScene = { ...scene, pathCollisionEnabled: true };
+    const transform = { ...character.transform, position: [0, 2, 0] as [number, number, number] };
+
+    expect(constrainObjectMotionTransform(character, transform, collisionScene, [character, generated]).position)
+      .toEqual([0, collisionScene.groundHeight, 0]);
+    expect(constrainCameraPosition([0, 0.5, 0], collisionScene, [generated])).toEqual([0, 0.5, 0]);
+  });
 });

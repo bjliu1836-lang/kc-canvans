@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   clearDirectorDeskHostBridge,
+  getHostReferenceImages,
   initDirectorDeskHostBridge,
 } from "./hostBridge";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
@@ -121,6 +122,45 @@ it("rejects host panorama messages with incomplete source metadata", () => {
   expect(useDirectorStore.getState().project.panoramaAssetId).toBeNull();
 });
 
+it("keeps connected reference images scoped to the active director instance", () => {
+  initDirectorDeskHostBridge();
+  window.dispatchEvent(new MessageEvent("message", {
+    data: { type: "storyai:director-desk-session", payload: { instanceId: "desk_a" } },
+    origin: window.location.origin,
+  }));
+  window.dispatchEvent(new MessageEvent("message", {
+    data: {
+      type: "storyai:director-desk-reference-images",
+      payload: {
+        instanceId: "desk_b",
+        images: [{ edgeId: "wrong", sourceNodeId: "image_b", imageUrl: "https://example.com/b.png", fileName: "B.png" }],
+      },
+    },
+    origin: window.location.origin,
+  }));
+  expect(getHostReferenceImages()).toEqual([]);
+
+  window.dispatchEvent(new MessageEvent("message", {
+    data: {
+      type: "storyai:director-desk-reference-images",
+      payload: {
+        instanceId: "desk_a",
+        images: [{ edgeId: "right", sourceNodeId: "image_a", imageUrl: "data:image/png;base64,a", fileName: "A.png" }],
+      },
+    },
+    origin: window.location.origin,
+  }));
+  expect(getHostReferenceImages()).toEqual([
+    { edgeId: "right", sourceNodeId: "image_a", imageUrl: "data:image/png;base64,a", fileName: "A.png" },
+  ]);
+
+  window.dispatchEvent(new MessageEvent("message", {
+    data: { type: "storyai:director-desk-session", payload: { instanceId: "desk_b" } },
+    origin: window.location.origin,
+  }));
+  expect(getHostReferenceImages()).toEqual([]);
+});
+
 it("switches director store persistence when the host sends a card session", () => {
   initDirectorDeskHostBridge();
 
@@ -150,7 +190,7 @@ it("switches director store persistence when the host sends a card session", () 
     })
   );
 
-  expect(useDirectorStore.getState().project.scene.backgroundColor).toBe("#000000");
+  expect(useDirectorStore.getState().project.scene.backgroundColor).toBe("#5A5C60");
 
   useDirectorStore.getState().updateScene({ backgroundColor: "#303640" });
 
