@@ -2641,6 +2641,29 @@ textarea:focus-visible {
   font-size: 0;
 }
 
+.reference-layout-characters {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgb(var(--border-rgb) / 0.25);
+}
+
+.reference-layout-characters-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: rgb(var(--text-muted-rgb));
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.reference-layout-characters-heading > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .reference-layout-editor {
   display: grid;
   gap: 7px;

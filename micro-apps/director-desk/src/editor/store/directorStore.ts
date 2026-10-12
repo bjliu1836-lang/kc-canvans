@@ -2538,7 +2538,10 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
               if (!batchIds.has(object.id)) return object;
               const [positionX, positionY, positionZ] = object.transform.position;
               const [scaleX, scaleY, scaleZ] = object.transform.scale;
-              const shouldSnapY = snapToGround && object.layoutSource?.category !== "ground";
+              // 贴地只作用于布景组件：地面自身和人物占位（可能坐在家具上）不参与
+              const shouldSnapY = snapToGround
+                && object.layoutSource?.category !== "ground"
+                && object.kind !== "character";
               return {
                 ...object,
                 transform: {

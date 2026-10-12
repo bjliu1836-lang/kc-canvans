@@ -222,6 +222,103 @@ it("shows category colors, hovers rows, focuses the viewport and snaps a floatin
   expect(useLayoutDraftPreviewStore.getState().draft?.components.find((c) => c.id === "sofa_01")?.position[1]).toBe(0);
 });
 
+it("shows the character section, edits a placeholder, and applies characters as roles", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      draft: {
+        ...fixtureDraft,
+        characters: [{
+          id: "char_01",
+          name: "人物甲",
+          position: [1.2, 0, 0.4],
+          height: 1.7,
+          rotationYDegrees: 90,
+          posture: "stand",
+          bodyTypeHint: "male",
+          confidence: 0.86,
+          uncertain: false,
+          visible: true,
+        }, {
+          id: "char_02",
+          name: "人物乙",
+          position: [0.2, 0.45, -0.1],
+          height: 1.62,
+          rotationYDegrees: 0,
+          posture: "sit",
+          bodyTypeHint: "female",
+          confidence: 0.55,
+          uncertain: true,
+          visible: true,
+        }],
+      },
+    }),
+  })));
+  const user = userEvent.setup();
+  render(<ReferenceLayoutPanel />);
+  act(() => {
+    window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+      detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "room.png" }] },
+    }));
+  });
+
+  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
+  expect(await screen.findByText("暂存预览 · 2 个组件")).toBeInTheDocument();
+
+  // 人物分区：两行、姿态与身高标签、待确认标记只属于人物乙
+  const characters = screen.getByLabelText("人物占位");
+  expect(within(characters).getByText(/人物 · 2 个/)).toBeInTheDocument();
+  expect(within(characters).getByText(/站立 · 1\.70m · 86%/)).toBeInTheDocument();
+  expect(within(characters).getByText(/坐姿 · 1\.62m · 55%/)).toBeInTheDocument();
+  expect(within(characters).getAllByText("待确认")).toHaveLength(1);
+  expect(document.querySelectorAll(".reference-layout-category-dot")).toHaveLength(4);
+
+  // 悬停人物行 → 预览 store 记录悬停的人物
+  fireEvent.mouseEnter(within(characters).getByRole("button", { name: /人物甲/ }));
+  expect(useLayoutDraftPreviewStore.getState().hoveredCharacterId).toBe("char_01");
+  fireEvent.mouseLeave(within(characters).getByRole("button", { name: /人物甲/ }));
+  expect(useLayoutDraftPreviewStore.getState().hoveredCharacterId).toBeNull();
+
+  // 点击人物行 → 选中人物（与组件选中互斥）+ 相机聚焦到人物中心
+  act(() => { useDirectorStore.getState().clearViewportFocusRequest(); });
+  expect(useDirectorStore.getState().viewportFocusRequest).toBeNull();
+  await user.click(within(characters).getByRole("button", { name: /人物甲/ }));
+  expect(useLayoutDraftPreviewStore.getState().selectedCharacterId).toBe("char_01");
+  expect(useLayoutDraftPreviewStore.getState().selectedComponentId).toBeNull();
+  expect(useDirectorStore.getState().viewportFocusRequest).toMatchObject({ target: [1.2, 0.85, 0.4] });
+
+  // 人物编辑器：改身高、切姿态
+  const heightInput = screen.getByLabelText("身高（米）");
+  expect(heightInput).toHaveValue(1.7);
+  fireEvent.change(heightInput, { target: { value: "1.8" } });
+  expect(useLayoutDraftPreviewStore.getState().draft?.characters[0].height).toBe(1.8);
+
+  await user.selectOptions(screen.getByLabelText("姿态"), "crouch");
+  expect(useLayoutDraftPreviewStore.getState().draft?.characters[0].posture).toBe("crouch");
+
+  // 应用：人物成为可编辑角色对象（含姿态与身高换算）
+  await user.click(screen.getByRole("button", { name: "添加到当前场景" }));
+  await waitFor(() => expect(useDirectorStore.getState().project.layoutBatches).toHaveLength(1));
+  const createdRoles = useDirectorStore.getState().project.objects
+    .filter((object) => object.kind === "character" && object.layoutSource);
+  expect(createdRoles).toHaveLength(2);
+  expect(createdRoles[0]).toMatchObject({
+    name: "人物甲",
+    bodyType: "mannequin",
+    characterRig: { rigType: "ue4-mannequin", posePresetId: "crouch" },
+    layoutSource: { category: "character", characterMeta: { posture: "crouch", height: 1.8 } },
+  });
+  expect(createdRoles[0].transform.position).toEqual([1.2, 0, 0.4]);
+  expect(createdRoles[1]).toMatchObject({
+    name: "人物乙",
+    bodyType: "female",
+    characterRig: { posePresetId: "sit" },
+  });
+  // 坐姿人物落在座面高度上
+  expect(createdRoles[1].transform.position[1]).toBe(0.45);
+});
+
 it("accepts a pasted screenshot or dropped file as the local reference image", async () => {
   const { container } = render(<ReferenceLayoutPanel />);
   const pastedFile = new File([new Uint8Array([137, 80, 78, 71])], "pasted.png", { type: "image/png" });

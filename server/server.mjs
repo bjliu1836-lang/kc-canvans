@@ -495,20 +495,39 @@ const MEDIA_ANALYSIS_SYSTEM_PROMPT = [
 ].join('\n');
 
 const DIRECTOR_LAYOUT_SYSTEM_PROMPT = [
-  '你是 3D 影视预演的室内粗布景分析器。',
-  '只依据一张参考图估计可编辑的粗布景，不要虚构图中不可见的精细结构。',
+  '你是 3D 影视预演的室内粗布景与人物占位分析器。',
+  '只依据一张参考图估计可编辑的粗布景和人物，不要虚构图中不可见的精细结构。',
+  '========== 第一部分：布景组件 components ==========',
   '只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet。',
   '只使用这些 primitive：box, cylinder。不要返回模型名、GLB、纹理或外部资产。',
   '坐标单位是米，Y 轴向上；position 是物体底面中心；size 顺序是宽、高、深，且每项必须大于 0。',
   '门洞附近的墙应拆成门洞左右或上方的墙段，不要用一整块墙堵住门洞。',
   '最多 30 个组件。无法确认的物体请降低 confidence 并设置 uncertain=true。',
-  '没有已知尺寸时使用常见室内尺度估计，scale.mode 固定为 estimated。',
+  '========== 第二部分：人物 characters ==========',
+  '识别图中所有人物，最多 8 个；人物要创建为可编辑的角色占位，只做站位与姿态，不要还原脸、服装和体型。',
+  'posture 只能取：stand（站）, sit（坐）, crouch（蹲）, kneel（跪）, lie（躺/卧）, unknown（看不清）。',
+  'bodyTypeHint 只能取：male, female, unknown。',
+  'position 是"身体与支撑面的接触中心"，Y 必须等于支撑面高度：站/蹲站地面时 Y=0，坐在沙发或椅子上时 Y=该座面高度（约 0.40~0.50），躺在床上时 Y=床面高度。绝对不要把所有人物的 Y 都写成 0。',
+  'rotationYDegrees 是人物面朝方向，0 表示面朝 +Z（朝向默认机位），90 表示面朝 +X，-90 表示面朝 -X，180 表示背对机位。',
+  '========== 尺度：最关键的要求 ==========',
+  '请以图中一名站立成年人的身高 1.7 米作为整张图的比例尺，用它反推所有家具和人物的真实尺寸。',
+  '人物和布景必须用同一把尺：成年人坐姿时 seat 到头顶约 0.9 米，座面高约 0.45 米，站立总高 1.6~1.8 米。',
+  '绝不能让人物和道具一样大：双人沙发宽约 2 米（约等于一个成年人躺下的长度），餐桌高 0.75 米（约到成年人腰部），标准门高 2.05 米（比成年人高出一个头）。',
+  'height 是人物估算身高，必须在 0.5 到 2.5 米之间；看不清身高时按成年人 1.7 米估计。',
+  '========== 输出格式 ==========',
+  'scale.mode 固定为 estimated。没有要创建的人物时输出空数组 characters: []，不要省略该字段。',
+  '无法确认的人物请降低 confidence 并设置 uncertain=true（例如被遮挡、只露出部分身体）。',
   '只输出一个 JSON 对象，不要 Markdown，不要解释。格式：',
-  '{"scale":{"mode":"estimated","confidence":0.4},"components":[{"id":"wall_01","name":"后墙","category":"wall","primitive":"box","position":[0,0,-3],"size":[6,2.8,0.15],"rotationYDegrees":0,"confidence":0.8,"uncertain":false,"notes":""}]}'
+  '{"scale":{"mode":"estimated","confidence":0.4},"components":[{"id":"wall_01","name":"后墙","category":"wall","primitive":"box","position":[0,0,-3],"size":[6,2.8,0.15],"rotationYDegrees":0,"confidence":0.8,"uncertain":false,"notes":""}],"characters":[{"id":"char_01","name":"人物甲","position":[-0.6,0.45,0.2],"height":1.7,"rotationYDegrees":15,"posture":"sit","bodyTypeHint":"male","confidence":0.7,"uncertain":false,"notes":"坐在沙发左侧"}]}'
 ].join('\n');
 
 const DIRECTOR_LAYOUT_CATEGORIES = new Set(['ground', 'wall', 'door', 'window', 'table', 'chair', 'sofa', 'cabinet']);
 const DIRECTOR_LAYOUT_PRIMITIVES = new Set(['box', 'cylinder']);
+const DIRECTOR_LAYOUT_POSTURES = new Set(['stand', 'sit', 'crouch', 'kneel', 'lie', 'unknown']);
+const DIRECTOR_LAYOUT_BODY_HINTS = new Set(['male', 'female', 'unknown']);
+const DIRECTOR_LAYOUT_CHARACTER_MAX_COUNT = 8;
+const DIRECTOR_LAYOUT_CHARACTER_MIN_HEIGHT = 0.5;
+const DIRECTOR_LAYOUT_CHARACTER_MAX_HEIGHT = 2.5;
 
 const parseDirectorLayoutJson = (text) => {
   const stripped = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -555,6 +574,44 @@ const validateDirectorLayoutCandidate = (candidate) => {
     else if (ids.has(id)) issues.push(`${label}的 id 重复`);
     ids.add(id);
   });
+
+  // characters 可选；存在则严格校验（客户端侧有宽容夹紧兜底，此处严格以便触发重试纠正）
+  const rawCharacters = candidate?.characters;
+  if (rawCharacters !== undefined && !Array.isArray(rawCharacters)) {
+    issues.push('characters 必须是数组');
+  }
+  const characters = Array.isArray(rawCharacters) ? rawCharacters : null;
+  if (characters && characters.length > DIRECTOR_LAYOUT_CHARACTER_MAX_COUNT) {
+    issues.push(`人物数量超过 ${DIRECTOR_LAYOUT_CHARACTER_MAX_COUNT} 个上限`);
+  }
+  const characterIds = new Set();
+  characters?.forEach((item, index) => {
+    const label = `第 ${index + 1} 个人物`;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      issues.push(`${label}不是对象`);
+      return;
+    }
+    const finiteTuple = (value) => Array.isArray(value) && value.length === 3
+      && value.every(number => typeof number === 'number' && Number.isFinite(number));
+    if (!finiteTuple(item.position)) issues.push(`${label}的位置必须是三个有限数字`);
+    if (typeof item.height !== 'number' || !Number.isFinite(item.height)
+      || item.height < DIRECTOR_LAYOUT_CHARACTER_MIN_HEIGHT || item.height > DIRECTOR_LAYOUT_CHARACTER_MAX_HEIGHT) {
+      issues.push(`${label}的身高必须是 ${DIRECTOR_LAYOUT_CHARACTER_MIN_HEIGHT} 到 ${DIRECTOR_LAYOUT_CHARACTER_MAX_HEIGHT} 米之间的数字`);
+    }
+    if (!DIRECTOR_LAYOUT_POSTURES.has(item.posture)) issues.push(`${label}包含未知姿态 ${String(item.posture)}`);
+    if (!DIRECTOR_LAYOUT_BODY_HINTS.has(item.bodyTypeHint)) issues.push(`${label}包含未知体型 ${String(item.bodyTypeHint)}`);
+    if (typeof item.rotationYDegrees !== 'number' || !Number.isFinite(item.rotationYDegrees)) {
+      issues.push(`${label}的朝向必须是有限数字`);
+    }
+    if (typeof item.confidence !== 'number' || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) {
+      issues.push(`${label}的置信度必须在 0 到 1 之间`);
+    }
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!id) issues.push(`${label}缺少 id`);
+    else if (characterIds.has(id)) issues.push(`${label}的 id 重复`);
+    characterIds.add(id);
+  });
+
   if (issues.length) {
     const error = new Error(issues[0]);
     error.issues = issues;
@@ -1072,11 +1129,11 @@ const handleDirectorLayoutGeneration = async (req, res) => {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const correction = attempt === 1
       ? [
-          '上一次输出未通过校验。请只修正 JSON 后重新完整输出。',
+          '上一次输出未通过校验。请只修正 JSON 后重新完整输出，必须同时包含 components 与 characters 两个字段。',
           `校验错误：${previousIssues.join('；')}`,
           `上一次输出：${previousText.slice(0, 12000)}`,
         ].join('\n')
-      : '分析这张参考图并输出粗布景 JSON。';
+      : '分析这张参考图，同时输出粗布景组件与人物占位的 JSON。';
     const result = await callTextModelApi({
       baseUrl,
       endpoint,
@@ -1093,7 +1150,7 @@ const handleDirectorLayoutGeneration = async (req, res) => {
             ],
           },
         ],
-        max_completion_tokens: Number(process.env.MIMO_DIRECTOR_LAYOUT_MAX_COMPLETION_TOKENS || 4096),
+        max_completion_tokens: Number(process.env.MIMO_DIRECTOR_LAYOUT_MAX_COMPLETION_TOKENS || 6144),
         temperature: 0.1,
         top_p: 0.9,
         stream: false,

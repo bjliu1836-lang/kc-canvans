@@ -1,4 +1,5 @@
 import type {
+  CharacterBodyType,
   DirectorLayoutBatch,
   DirectorLayoutCategory,
   DirectorObject,
@@ -18,6 +19,65 @@ export const LAYOUT_COMPONENT_CATEGORIES = [
 ] as const satisfies readonly DirectorLayoutCategory[];
 
 export const LAYOUT_COMPONENT_PRIMITIVES = ["box", "cylinder"] as const satisfies readonly GeometryPrimitiveType[];
+
+/* ------------------------------------------------------------------ */
+/* 人物占位（参考图识别的第二类产物）                                   */
+/* ------------------------------------------------------------------ */
+
+export const LAYOUT_CHARACTER_MAX_COUNT = 8;
+export const LAYOUT_CHARACTER_MIN_HEIGHT = 0.5;
+export const LAYOUT_CHARACTER_MAX_HEIGHT = 2.5;
+
+export const LAYOUT_CHARACTER_POSTURES = ["stand", "sit", "crouch", "kneel", "lie", "unknown"] as const;
+export type LayoutCharacterPosture = (typeof LAYOUT_CHARACTER_POSTURES)[number];
+
+export const LAYOUT_CHARACTER_BODY_HINTS = ["male", "female", "unknown"] as const;
+export type LayoutCharacterBodyHint = (typeof LAYOUT_CHARACTER_BODY_HINTS)[number];
+
+/** 姿态 → 现有姿态预设（mannequinPosePresets）的映射。 */
+export const LAYOUT_POSTURE_TO_POSE_PRESET: Record<LayoutCharacterPosture, string> = {
+  stand: "stand",
+  sit: "sit",
+  crouch: "crouch",
+  kneel: "kneel-one",
+  // 姿态预设暂无躺姿，映射为站立并要求调用方标记 uncertain
+  lie: "stand",
+  unknown: "stand",
+};
+
+/** 体型提示 → 内置素体。只决定素体外形，不做脸部/服装还原。 */
+export const LAYOUT_BODY_HINT_TO_BODY_TYPE: Record<LayoutCharacterBodyHint, CharacterBodyType> = {
+  male: "mannequin",
+  female: "female",
+  unknown: "mannequin",
+};
+
+/**
+ * 默认角色素体（rigType "ue4-mannequin"，transform.scale = 1）的世界高度（米）。
+ * 与视口标签锚点同源：getUE4GroundedLabelY("mannequin") - VIEWPORT_OBJECT_LABEL_VERTICAL_GAP
+ * = 2.04 - 0.18 ≈ 1.86。layoutDraft.test.ts 有同步断言，标签锚点调整时此值随之失效并报错。
+ * 注意：UE4 模型加载失败回退到程序化素体时实际高度不同，该边缘场景接受偏差。
+ */
+export const LAYOUT_CHARACTER_NATIVE_HEIGHT = 1.86;
+
+/** 角色占位统一使用默认角色蓝，与手动添加的角色一致。 */
+export const LAYOUT_CHARACTER_COLOR = "#4F8EF7";
+
+export interface LayoutDraftCharacter {
+  id: string;
+  name: string;
+  /** 身体与支撑面的接触中心：站立/蹲姿=脚底，坐姿=臀部在座面上的投影点；Y 即支撑面高度（地面 0，沙发约 0.45）。 */
+  position: [number, number, number];
+  /** 估算身高（与组件同单位；校准后为米）。 */
+  height: number;
+  rotationYDegrees: number;
+  posture: LayoutCharacterPosture;
+  bodyTypeHint: LayoutCharacterBodyHint;
+  confidence: number;
+  uncertain: boolean;
+  notes?: string;
+  visible: boolean;
+}
 
 export type LayoutAnchorDimension = "width" | "height";
 
@@ -90,6 +150,8 @@ export interface LayoutDraft {
     anchorDimension?: LayoutAnchorDimension;
   };
   components: LayoutDraftComponent[];
+  /** 参考图识别到的人物占位；旧数据/纯布景图为空数组。 */
+  characters: LayoutDraftCharacter[];
 }
 
 export interface LayoutDraftSource {
@@ -143,6 +205,83 @@ function parseJsonCandidate(value: unknown) {
 function normalizeHalfTurnDifference(left: number, right: number) {
   const difference = Math.abs(((left - right + 90) % 180 + 180) % 180 - 90);
   return difference;
+}
+
+function clampLayoutCharacterHeight(value: number) {
+  return Math.min(LAYOUT_CHARACTER_MAX_HEIGHT, Math.max(LAYOUT_CHARACTER_MIN_HEIGHT, value));
+}
+
+/**
+ * 规范化单个候选人物；结构非法（非对象/缺 id）返回 null 由调用方跳过，
+ * 取值范围外的数值做夹紧并标记 uncertain（单人数据问题不阻断整张草稿）。
+ */
+function normalizeLayoutCharacter(raw: unknown, index: number, seenIds: Set<string>): LayoutDraftCharacter | null {
+  const label = `第 ${index + 1} 个人物`;
+  if (!isRecord(raw)) return null;
+
+  const baseId = boundedString(raw.id, `char_${String(index + 1).padStart(2, "0")}`, 48)
+    .replace(/[^a-zA-Z0-9_-]/g, "_");
+  if (!baseId) return null;
+  if (seenIds.has(baseId)) return null;
+  seenIds.add(baseId);
+
+  const position: [number, number, number] = isFiniteTuple3(raw.position)
+    ? [...raw.position] as [number, number, number]
+    : [0, 0, 0];
+  const clampedPosition: [number, number, number] = [
+    Math.min(100, Math.max(-100, position[0])),
+    Math.min(5, Math.max(-1, position[1])),
+    Math.min(100, Math.max(-100, position[2])),
+  ];
+
+  const rawHeight = typeof raw.height === "number" && Number.isFinite(raw.height)
+    ? raw.height
+    : LAYOUT_CHARACTER_NATIVE_HEIGHT;
+  const height = clampLayoutCharacterHeight(rawHeight);
+
+  const rawPosture = raw.posture;
+  const posture: LayoutCharacterPosture = LAYOUT_CHARACTER_POSTURES.includes(rawPosture as LayoutCharacterPosture)
+    ? rawPosture as LayoutCharacterPosture
+    : "unknown";
+
+  const rawBodyHint = raw.bodyTypeHint;
+  const bodyTypeHint: LayoutCharacterBodyHint = LAYOUT_CHARACTER_BODY_HINTS.includes(rawBodyHint as LayoutCharacterBodyHint)
+    ? rawBodyHint as LayoutCharacterBodyHint
+    : "unknown";
+
+  const rotationYDegrees = typeof raw.rotationYDegrees === "number" && Number.isFinite(raw.rotationYDegrees)
+    ? raw.rotationYDegrees
+    : 0;
+  const confidence = typeof raw.confidence === "number" && Number.isFinite(raw.confidence)
+    ? Math.min(1, Math.max(0, raw.confidence))
+    : 0.4;
+
+  const positionWasInvalid = !isFiniteTuple3(raw.position);
+  const heightWasOutOfRange = rawHeight < LAYOUT_CHARACTER_MIN_HEIGHT || rawHeight > LAYOUT_CHARACTER_MAX_HEIGHT;
+  const postureWasUnknown = posture === "unknown" || posture === "lie";
+
+  return {
+    id: baseId,
+    name: boundedString(raw.name, `人物${index + 1}`),
+    position: clampedPosition,
+    height,
+    rotationYDegrees,
+    posture,
+    bodyTypeHint,
+    confidence,
+    uncertain: raw.uncertain === true
+      || confidence < 0.65
+      || positionWasInvalid
+      || heightWasOutOfRange
+      || postureWasUnknown,
+    notes: [
+      boundedString(raw.notes, "", 240),
+      positionWasInvalid ? "位置缺失，已置于原点" : "",
+      heightWasOutOfRange ? `身高已夹紧到 ${height} 米` : "",
+      posture === "lie" ? "卧姿暂用站立占位，请手动调整" : "",
+    ].filter(Boolean).join("；") || undefined,
+    visible: raw.visible !== false,
+  };
 }
 
 function carveDoorOpenings(components: LayoutDraftComponent[]) {
@@ -305,6 +444,13 @@ export function validateLayoutDraftCandidate(
 
   const normalizedComponents = components.filter((item): item is LayoutDraftComponent => Boolean(item));
 
+  // 人物解析：缺省为空数组（纯布景图合法）；超过上限截断而非报错；
+  // 单个结构非法的人物跳过，取值范围外夹紧并标记 uncertain。
+  const rawCharacters = Array.isArray(parsed.characters) ? parsed.characters.slice(0, LAYOUT_CHARACTER_MAX_COUNT) : [];
+  const characters = rawCharacters
+    .map((raw, index) => normalizeLayoutCharacter(raw, index, seenIds))
+    .filter((item): item is LayoutDraftCharacter => Boolean(item));
+
   return {
     version: 1,
     id: options.draftId ?? `draft_${Date.now().toString(36)}`,
@@ -316,6 +462,7 @@ export function validateLayoutDraftCandidate(
       confidence: scaleConfidence,
     },
     components: carveDoorOpenings(normalizedComponents),
+    characters,
   };
 }
 
@@ -347,6 +494,12 @@ export function calibrateLayoutDraft(
       ...component,
       position: component.position.map((value) => value * factor) as [number, number, number],
       size: component.size.map((value) => value * factor) as [number, number, number],
+    })),
+    // 人物与组件同一把尺：位置与身高同步缩放，校准后相对比例保持
+    characters: draft.characters.map((character) => ({
+      ...character,
+      position: character.position.map((value) => value * factor) as [number, number, number],
+      height: character.height * factor,
     })),
   };
 }
@@ -400,8 +553,49 @@ export function buildLayoutBatch(
     } satisfies DirectorObject;
   });
 
+  // 人物占位：按估算身高换算素体缩放（scale=height/NATIVE），与手动添加的角色同权
+  const characterObjects = draft.characters.map((character) => {
+    const id = uniqueId(`${sanitizeId(batchId)}_${sanitizeId(character.id)}`, usedIds);
+    const scaleFactor = character.height / LAYOUT_CHARACTER_NATIVE_HEIGHT;
+    return {
+      id,
+      name: character.name,
+      kind: "character" as const,
+      visible: character.visible,
+      locked: false,
+      bodyType: LAYOUT_BODY_HINT_TO_BODY_TYPE[character.bodyTypeHint],
+      color: LAYOUT_CHARACTER_COLOR,
+      transform: {
+        position: [...character.position] as [number, number, number],
+        rotation: [0, character.rotationYDegrees * Math.PI / 180, 0] as [number, number, number],
+        scale: [scaleFactor, scaleFactor, scaleFactor] as [number, number, number],
+      },
+      characterRig: {
+        rigType: "ue4-mannequin" as const,
+        posePresetId: LAYOUT_POSTURE_TO_POSE_PRESET[character.posture],
+        controls: {},
+      },
+      layoutSource: {
+        batchId,
+        draftId: draft.id,
+        sourceId: draft.sourceId,
+        sourceFileName: draft.sourceFileName,
+        componentId: character.id,
+        category: "character" as const,
+        confidence: character.confidence,
+        uncertain: character.uncertain,
+        characterMeta: {
+          posture: character.posture,
+          height: character.height,
+        },
+      },
+    } satisfies DirectorObject;
+  });
+
+  const allObjects = [...objects, ...characterObjects];
+
   return {
-    objects,
+    objects: allObjects,
     batch: {
       id: batchId,
       draftId: draft.id,
@@ -409,7 +603,7 @@ export function buildLayoutBatch(
       sourceFileName: draft.sourceFileName,
       createdAt: draft.createdAt,
       scale: { ...draft.scale },
-      objectIds: objects.map((object) => object.id),
+      objectIds: allObjects.map((object) => object.id),
     },
   };
 }

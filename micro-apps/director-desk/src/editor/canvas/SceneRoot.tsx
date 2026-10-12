@@ -1,4 +1,4 @@
-import { Html, Line, TransformControls, type TransformControlsProps } from "@react-three/drei";
+import { Edges, Html, Line, TransformControls, type TransformControlsProps } from "@react-three/drei";
 import { useLoader, type ThreeEvent } from "@react-three/fiber";
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react";
 import { Box3, Color, Matrix4, Quaternion, Vector3, type Group, type Object3D } from "three";
@@ -14,6 +14,7 @@ import type {
   DirectorCameraMotionKeyframe,
   DirectorObject,
   DirectorObjectMotionKeyframe,
+  DirectorLayoutCategory,
   GeometryPrimitiveType,
   SceneSettings,
 } from "../schema/directorProject";
@@ -50,7 +51,7 @@ import { sampleCharacterActionControls } from "../presets/characterActionPresets
 import { getGroundedLabelY } from "../runtime/mannequin/bodyTypes";
 import { constrainCameraPosition, constrainObjectMotionTransform } from "../schema/pathCollision";
 import { getUE4GroundedLabelY } from "../runtime/ue4Mannequin/ue4MannequinRig";
-import { LAYOUT_CATEGORY_COLORS } from "../schema/layoutDraft";
+import { LAYOUT_CATEGORY_COLORS, LAYOUT_CHARACTER_COLOR } from "../schema/layoutDraft";
 import { getEffectiveGroundOpacity } from "./panoramaMath";
 import { getCrowdAnchorTransform } from "../store/directorStore";
 import {
@@ -77,6 +78,40 @@ const VIEWPORT_CAMERA_WORLD_UP = new Vector3(0, 1, 0);
 const HIDE_FROM_VIEWPORT_CAPTURE_KEY = "hideFromViewportCapture";
 const AXIS_ONLY_GIZMO_MARKER = "axisOnlyGizmo";
 const TRANSLATE_PLANE_NAMES = new Set(["XY", "YZ", "XZ"]);
+const LAYOUT_DRAFT_PREVIEW_STYLE: Record<DirectorLayoutCategory, {
+  baseOpacity: number;
+  hoverOpacity: number;
+  selectedOpacity: number;
+  depthWrite: boolean;
+}> = {
+  ground: { baseOpacity: 0.26, hoverOpacity: 0.42, selectedOpacity: 0.38, depthWrite: false },
+  wall: { baseOpacity: 0.52, hoverOpacity: 0.76, selectedOpacity: 0.68, depthWrite: false },
+  door: { baseOpacity: 0.82, hoverOpacity: 0.96, selectedOpacity: 0.94, depthWrite: true },
+  window: { baseOpacity: 0.78, hoverOpacity: 0.94, selectedOpacity: 0.9, depthWrite: true },
+  table: { baseOpacity: 0.92, hoverOpacity: 1, selectedOpacity: 0.98, depthWrite: true },
+  chair: { baseOpacity: 0.92, hoverOpacity: 1, selectedOpacity: 0.98, depthWrite: true },
+  sofa: { baseOpacity: 0.92, hoverOpacity: 1, selectedOpacity: 0.98, depthWrite: true },
+  cabinet: { baseOpacity: 0.92, hoverOpacity: 1, selectedOpacity: 0.98, depthWrite: true },
+};
+
+export function getLayoutDraftPreviewStyle(
+  category: DirectorLayoutCategory,
+  state: { hovered: boolean; selected: boolean }
+) {
+  const style = LAYOUT_DRAFT_PREVIEW_STYLE[category];
+  const opacity = state.hovered
+    ? style.hoverOpacity
+    : state.selected
+      ? style.selectedOpacity
+      : style.baseOpacity;
+
+  return {
+    depthWrite: style.depthWrite,
+    opacity,
+    outlineColor: state.hovered || state.selected ? "#FFFFFF" : "#DCE8F8",
+    outlineWidth: state.hovered || state.selected ? 1.5 : 1,
+  };
+}
 type TransformControlsGizmoInternals = {
   gizmo: Record<string, Object3D>;
   picker: Record<string, Object3D>;
@@ -1603,6 +1638,8 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
   const layoutDraft = useLayoutDraftPreviewStore((state) => state.draft);
   const selectedLayoutComponentId = useLayoutDraftPreviewStore((state) => state.selectedComponentId);
   const hoveredLayoutComponentId = useLayoutDraftPreviewStore((state) => state.hoveredComponentId);
+  const selectedLayoutCharacterId = useLayoutDraftPreviewStore((state) => state.selectedCharacterId);
+  const hoveredLayoutCharacterId = useLayoutDraftPreviewStore((state) => state.hoveredCharacterId);
   const interactive = renderMode === "interactive";
   const effectiveViewMode = renderMode === "clean-camera" ? "camera" : renderMode === "director-monitor" ? "director" : viewMode;
   const translationSnap = scene.snapToGrid ? 1 : null;
@@ -1698,6 +1735,10 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
           {layoutDraft.components.filter((component) => component.visible).map((component) => {
             const isHovered = component.id === hoveredLayoutComponentId;
             const isSelected = component.id === selectedLayoutComponentId;
+            const previewStyle = getLayoutDraftPreviewStyle(component.category, {
+              hovered: isHovered,
+              selected: isSelected,
+            });
             return (
               <group
                 key={component.id}
@@ -1705,18 +1746,78 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
                 rotation={[0, component.rotationYDegrees * Math.PI / 180, 0]}
                 scale={component.size}
               >
-                <mesh position={[0, 0.5, 0]}>
+                <mesh name={`${component.id}-layout-draft-mesh`} position={[0, 0.5, 0]}>
                   {component.primitive === "cylinder"
                     ? <cylinderGeometry args={[0.5, 0.5, 1, 24]} />
                     : <boxGeometry args={[1, 1, 1]} />}
                   <meshStandardMaterial
                     color={LAYOUT_CATEGORY_COLORS[component.category]}
-                    depthWrite={false}
+                    depthWrite={previewStyle.depthWrite}
                     emissive={component.uncertain ? "#8a6a1e" : "#000000"}
                     emissiveIntensity={component.uncertain ? 0.18 : 0}
-                    opacity={isHovered ? 0.8 : isSelected ? 0.58 : 0.34}
+                    opacity={previewStyle.opacity}
+                    transparent={previewStyle.opacity < 1}
+                  />
+                  <Edges
+                    color={previewStyle.outlineColor}
+                    lineWidth={previewStyle.outlineWidth}
+                    name={`${component.id}-layout-draft-outline`}
+                    threshold={15}
+                  />
+                </mesh>
+              </group>
+            );
+          })}
+          {layoutDraft.characters.filter((character) => character.visible).map((character) => {
+            const isHovered = character.id === hoveredLayoutCharacterId;
+            const isSelected = character.id === selectedLayoutCharacterId;
+            // 轻量人形占位：总高按估算身高，蹲/坐姿压缩视觉高度；应用后才是真实素体
+            const visualHeight = character.height * (
+              character.posture === "crouch" ? 0.72 : character.posture === "sit" ? 0.88 : 1
+            );
+            const bodyWidth = visualHeight * 0.26;
+            const bodyDepth = visualHeight * 0.2;
+            const opacity = isHovered ? 0.8 : isSelected ? 0.58 : 0.34;
+            const outlineColor = isHovered || isSelected ? "#FFFFFF" : "#DCE8F8";
+            return (
+              <group
+                key={character.id}
+                name={`${character.id}-layout-draft-character`}
+                position={character.position}
+                rotation={[0, character.rotationYDegrees * Math.PI / 180, 0]}
+              >
+                {character.posture === "sit" ? (
+                  <mesh name={`${character.id}-layout-draft-seat`} position={[0, 0.012, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+                    <circleGeometry args={[bodyWidth * 1.5, 20]} />
+                    <meshStandardMaterial
+                      color={LAYOUT_CHARACTER_COLOR}
+                      emissive={character.uncertain ? "#8a6a1e" : "#000000"}
+                      emissiveIntensity={character.uncertain ? 0.18 : 0}
+                      opacity={opacity * 0.6}
+                      transparent
+                    />
+                  </mesh>
+                ) : null}
+                <mesh
+                  name={`${character.id}-layout-draft-body`}
+                  position={[0, visualHeight / 2, 0]}
+                  scale={[bodyWidth, visualHeight, bodyDepth]}
+                >
+                  <cylinderGeometry args={[0.5, 0.5, 1, 16]} />
+                  <meshStandardMaterial
+                    color={LAYOUT_CHARACTER_COLOR}
+                    depthWrite={false}
+                    emissive={character.uncertain ? "#8a6a1e" : "#000000"}
+                    emissiveIntensity={character.uncertain ? 0.18 : 0}
+                    opacity={opacity}
                     transparent
                   />
+                  <Edges color={outlineColor} lineWidth={isHovered || isSelected ? 1.5 : 1} threshold={15} />
+                </mesh>
+                {/* 面朝指示：身体前方的窄条 */}
+                <mesh position={[0, visualHeight * 0.72, bodyDepth * 0.75]} scale={[bodyWidth * 0.3, visualHeight * 0.12, bodyDepth * 0.3]}>
+                  <boxGeometry args={[1, 1, 1]} />
+                  <meshStandardMaterial color="#FFFFFF" opacity={opacity} transparent depthWrite={false} />
                 </mesh>
               </group>
             );

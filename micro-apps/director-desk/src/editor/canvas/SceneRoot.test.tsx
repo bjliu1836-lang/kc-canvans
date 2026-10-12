@@ -3,7 +3,9 @@ import { Box3, Vector3 } from "three";
 import { afterEach, beforeEach, vi } from "vitest";
 import { VIEWPORT_CAMERA_VISUAL_SCALE } from "../schema/cameraGeometry";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
-import { getImportedModelNormalization, SceneRoot } from "./SceneRoot";
+import type { LayoutDraft } from "../schema/layoutDraft";
+import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
+import { getImportedModelNormalization, getLayoutDraftPreviewStyle, SceneRoot } from "./SceneRoot";
 
 const mockCharacterModelShouldSuspend = vi.hoisted(() => ({ current: false }));
 
@@ -12,6 +14,25 @@ vi.mock("@react-three/drei", async () => {
 
   return {
     ...actual,
+    Edges: ({
+      color,
+      lineWidth,
+      name,
+      threshold,
+    }: {
+      color?: string;
+      lineWidth?: number;
+      name?: string;
+      threshold?: number;
+    }) => (
+      <div
+        data-color={color}
+        data-line-width={lineWidth}
+        data-name={name}
+        data-testid="layout-draft-outline"
+        data-threshold={threshold}
+      />
+    ),
     Html: ({
       center,
       children,
@@ -178,6 +199,11 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(() => null);
   mockCharacterModelShouldSuspend.current = false;
+  useLayoutDraftPreviewStore.setState({
+    draft: null,
+    hoveredComponentId: null,
+    selectedComponentId: null,
+  });
   const base = createInitialDirectorState();
   useDirectorStore.setState({
     ...useDirectorStore.getState(),
@@ -212,6 +238,90 @@ afterEach(() => {
 function getUniquePoints(points: Array<[number, number, number]>) {
   return Array.from(new Map(points.map((point) => [point.join(","), point])).values());
 }
+
+const layoutDraftFixture: LayoutDraft = {
+  version: 1,
+  id: "draft_preview_test",
+  sourceId: "source_preview_test",
+  sourceFileName: "客厅参考图.png",
+  createdAt: "2026-10-12T00:00:00.000Z",
+  scale: { mode: "estimated", confidence: 0.8 },
+  components: [
+    { id: "ground", name: "地面", category: "ground", primitive: "box", position: [0, 0, 0], size: [6, 0.05, 5], rotationYDegrees: 0, confidence: 0.9, uncertain: false, visible: true },
+    { id: "wall", name: "墙", category: "wall", primitive: "box", position: [0, 0, -2.5], size: [6, 2.8, 0.12], rotationYDegrees: 0, confidence: 0.9, uncertain: false, visible: true },
+    { id: "sofa", name: "沙发", category: "sofa", primitive: "box", position: [0, 0, 0], size: [2.2, 0.9, 0.9], rotationYDegrees: 0, confidence: 0.9, uncertain: false, visible: true },
+  ],
+  characters: [],
+};
+
+it("keeps draft furniture visually stronger than enclosing walls and ground", () => {
+  const sofa = getLayoutDraftPreviewStyle("sofa", { hovered: false, selected: false });
+  const wall = getLayoutDraftPreviewStyle("wall", { hovered: false, selected: false });
+  const ground = getLayoutDraftPreviewStyle("ground", { hovered: false, selected: false });
+
+  expect(sofa.opacity).toBeGreaterThan(0.9);
+  expect(sofa.opacity).toBeGreaterThan(wall.opacity);
+  expect(wall.opacity).toBeGreaterThan(ground.opacity);
+  expect(sofa.depthWrite).toBe(true);
+  expect(wall.depthWrite).toBe(false);
+});
+
+it("renders outlined layout draft components only in the interactive viewport", () => {
+  useLayoutDraftPreviewStore.getState().setDraft(layoutDraftFixture);
+
+  const { container, rerender } = render(<SceneRoot />);
+  expect(container.querySelector('group[name="layout-draft-preview"]')).toBeInTheDocument();
+  expect(screen.getAllByTestId("layout-draft-outline")).toHaveLength(3);
+  expect(screen.getAllByTestId("layout-draft-outline")[0]).toHaveAttribute("data-threshold", "15");
+  expect(container.querySelector('mesh[name="sofa-layout-draft-mesh"] meshstandardmaterial')).toHaveAttribute("opacity", "0.92");
+
+  rerender(<SceneRoot renderMode="clean-camera" />);
+  expect(container.querySelector('group[name="layout-draft-preview"]')).not.toBeInTheDocument();
+});
+
+it("renders lightweight character placeholders with posture and height in the draft preview", () => {
+  const draftWithCharacters: LayoutDraft = {
+    ...layoutDraftFixture,
+    characters: [
+      {
+        id: "char_01", name: "人物甲", position: [1, 0, 0.5], height: 1.7, rotationYDegrees: 90,
+        posture: "stand", bodyTypeHint: "male", confidence: 0.9, uncertain: false, visible: true,
+      },
+      {
+        id: "char_02", name: "人物乙", position: [0, 0.45, -0.5], height: 1.62, rotationYDegrees: 0,
+        posture: "sit", bodyTypeHint: "female", confidence: 0.5, uncertain: true, visible: true,
+      },
+    ],
+  };
+  useLayoutDraftPreviewStore.getState().setDraft(draftWithCharacters);
+
+  const { container } = render(<SceneRoot />);
+  const parseNumbers = (value: string | null | undefined) => (value || "").split(",").map(Number);
+
+  const standingGroup = container.querySelector('group[name="char_01-layout-draft-character"]');
+  const standingBody = container.querySelector('mesh[name="char_01-layout-draft-body"]');
+  const sittingGroup = container.querySelector('group[name="char_02-layout-draft-character"]');
+  const sittingBody = container.querySelector('mesh[name="char_02-layout-draft-body"]');
+  const seat = container.querySelector('mesh[name="char_02-layout-draft-seat"]');
+
+  expect(standingGroup).toBeInTheDocument();
+  expect(standingBody).toBeInTheDocument();
+  expect(sittingGroup).toBeInTheDocument();
+  expect(sittingBody).toBeInTheDocument();
+  // 坐姿人物有座面投影，站立人物没有
+  expect(seat).toBeInTheDocument();
+  expect(container.querySelector('mesh[name="char_01-layout-draft-seat"]')).not.toBeInTheDocument();
+
+  // 占位高度按估算身高：站立全高，坐姿压缩到 0.88 倍
+  expect(parseNumbers(standingBody?.getAttribute("scale"))[1]).toBeCloseTo(1.7);
+  expect(parseNumbers(sittingBody?.getAttribute("scale"))[1]).toBeCloseTo(1.62 * 0.88);
+  // 位置即接触面中心：站立人物脚底在原点高度，坐姿人物落在 0.45 座面上
+  expect(parseNumbers(standingGroup?.getAttribute("position"))).toEqual([1, 0, 0.5]);
+  expect(parseNumbers(sittingGroup?.getAttribute("position"))[1]).toBe(0.45);
+  // uncertain 人物用琥珀色自发光提示
+  expect(sittingBody?.querySelector("meshstandardmaterial")).toHaveAttribute("emissive", "#8a6a1e");
+  expect(standingBody?.querySelector("meshstandardmaterial")).toHaveAttribute("emissive", "#000000");
+});
 
 it("renders role labels while panorama background is managed by the viewport layer", () => {
   render(<SceneRoot />);

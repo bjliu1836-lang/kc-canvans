@@ -7,7 +7,7 @@ import {
   DEFAULT_VIEWPORT_ZOOM_SENSITIVITY,
 } from "../schema/viewportSensitivity";
 import { getRuntimePlaybackProgress, setRuntimePlaybackProgress } from "../runtime/playbackRuntime";
-import type { LayoutDraft } from "../schema/layoutDraft";
+import { LAYOUT_CHARACTER_NATIVE_HEIGHT, type LayoutDraft } from "../schema/layoutDraft";
 
 function createMemoryStorage(): Storage {
   const storage = new Map<string, string>();
@@ -67,6 +67,7 @@ function createLayoutDraftFixture(): LayoutDraft {
       uncertain: false,
       visible: true,
     }],
+    characters: [],
   };
 }
 
@@ -164,6 +165,120 @@ it("snaps a floating layout batch to the ground without moving the ground itself
 
   useDirectorStore.getState().undo();
   expect(findByCategory("wall").transform.position[1]).toBe(1.2);
+});
+
+function createLayoutDraftWithCharactersFixture(): LayoutDraft {
+  return {
+    ...createLayoutDraftFixture(),
+    characters: [{
+      id: "char_01",
+      name: "人物甲",
+      position: [1, 0, 0],
+      height: 1.7,
+      rotationYDegrees: 0,
+      posture: "stand",
+      bodyTypeHint: "male",
+      confidence: 0.86,
+      uncertain: false,
+      visible: true,
+    }, {
+      id: "char_02",
+      name: "人物乙",
+      position: [0, 0.45, 0],
+      height: 1.62,
+      rotationYDegrees: 0,
+      posture: "sit",
+      bodyTypeHint: "female",
+      confidence: 0.72,
+      uncertain: false,
+      visible: true,
+    }],
+  };
+}
+
+it("creates recognized characters as editable role objects in one batch", () => {
+  const first = useDirectorStore.getState().applyLayoutDraft({
+    draft: createLayoutDraftWithCharactersFixture(),
+    mode: "append",
+  });
+
+  expect(first.objectIds).toHaveLength(3);
+  const characters = useDirectorStore.getState().project.objects.filter((object) => (
+    object.kind === "character" && object.layoutSource?.batchId === first.batchId
+  ));
+  expect(characters).toHaveLength(2);
+  expect(characters[0]).toMatchObject({
+    name: "人物甲",
+    bodyType: "mannequin",
+    characterRig: { rigType: "ue4-mannequin", posePresetId: "stand" },
+    layoutSource: { category: "character" },
+  });
+  expect(characters[0].transform.position).toEqual([1, 0, 0]);
+  expect(characters[1]).toMatchObject({
+    name: "人物乙",
+    bodyType: "female",
+    characterRig: { posePresetId: "sit" },
+  });
+  // 坐姿人物保持座面高度
+  expect(characters[1].transform.position[1]).toBe(0.45);
+});
+
+it("scales and offsets recognized characters together with the batch", () => {
+  const first = useDirectorStore.getState().applyLayoutDraft({
+    draft: createLayoutDraftWithCharactersFixture(),
+    mode: "append",
+  });
+  const findCharacter = () => useDirectorStore.getState().project.objects
+    .find((object) => object.layoutSource?.category === "character")!;
+
+  const nativeScale = findCharacter().transform.scale[0];
+  expect(nativeScale).toBeCloseTo(1.7 / LAYOUT_CHARACTER_NATIVE_HEIGHT);
+
+  // 批次含 1 墙 + 2 角色，中心 X = (0 + 1 + 0) / 3、中心 Z = (0-3+0+0) / 3 = -1
+  useDirectorStore.getState().transformLayoutBatch(first.batchId, { scaleFactor: 2 });
+  expect(findCharacter().transform.position[0]).toBeCloseTo(5 / 3);
+  expect(findCharacter().transform.position[2]).toBeCloseTo(1);
+  expect(findCharacter().transform.scale[0]).toBeCloseTo(nativeScale * 2);
+
+  useDirectorStore.getState().transformLayoutBatch(first.batchId, { offsetX: 1, offsetZ: -1 });
+  expect(findCharacter().transform.position[0]).toBeCloseTo(8 / 3);
+  expect(findCharacter().transform.position[2]).toBe(0);
+});
+
+it("keeps characters in place when snapping the batch to the ground", () => {
+  const first = useDirectorStore.getState().applyLayoutDraft({
+    draft: createLayoutDraftWithCharactersFixture(),
+    mode: "append",
+  });
+  const sitting = useDirectorStore.getState().project.objects
+    .find((object) => object.layoutSource?.characterMeta?.posture === "sit")!;
+
+  useDirectorStore.getState().transformLayoutBatch(first.batchId, { snapToGround: true });
+
+  // 坐姿角色不被贴地拉下沙发；站立角色本就在地面上
+  expect(sitting.transform.position[1]).toBe(0.45);
+});
+
+it("replaces recognized characters when the batch is regenerated", () => {
+  const first = useDirectorStore.getState().applyLayoutDraft({
+    draft: createLayoutDraftWithCharactersFixture(),
+    mode: "append",
+  });
+  const replacement = createLayoutDraftWithCharactersFixture();
+  replacement.characters = replacement.characters.slice(0, 1);
+  replacement.characters[0] = { ...replacement.characters[0], name: "换人后" };
+
+  useDirectorStore.getState().applyLayoutDraft({
+    draft: replacement,
+    mode: "replace-batch",
+    replaceBatchId: first.batchId,
+  });
+
+  const characters = useDirectorStore.getState().project.objects.filter((object) => (
+    object.kind === "character" && object.layoutSource?.batchId === first.batchId
+  ));
+  expect(characters).toHaveLength(1);
+  expect(characters[0].name).toBe("换人后");
 });
 
 it("seeds the demo with one mannequin role and one camera", () => {

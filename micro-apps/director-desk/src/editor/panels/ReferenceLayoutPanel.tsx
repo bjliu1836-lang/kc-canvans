@@ -12,6 +12,7 @@ import {
   Scaling,
   Sparkles,
   Trash2,
+  Users,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -30,8 +31,14 @@ import {
   calibrateLayoutDraft,
   LAYOUT_ANCHOR_PRESETS,
   LAYOUT_CATEGORY_COLORS,
+  LAYOUT_CHARACTER_COLOR,
+  LAYOUT_CHARACTER_MAX_HEIGHT,
+  LAYOUT_CHARACTER_MIN_HEIGHT,
+  LAYOUT_CHARACTER_POSTURES,
   LayoutDraftValidationError,
   type LayoutAnchorDimension,
+  type LayoutCharacterPosture,
+  type LayoutDraftCharacter,
   type LayoutDraftComponent,
 } from "../schema/layoutDraft";
 import { useDirectorStore } from "../store/directorStore";
@@ -47,6 +54,15 @@ const CATEGORY_LABELS: Record<LayoutDraftComponent["category"], string> = {
   chair: "椅子",
   sofa: "沙发",
   cabinet: "柜子",
+};
+
+const POSTURE_LABELS: Record<LayoutCharacterPosture, string> = {
+  stand: "站立",
+  sit: "坐姿",
+  crouch: "蹲下",
+  kneel: "跪姿",
+  lie: "卧姿",
+  unknown: "姿态未知",
 };
 
 const DIMENSION_LABELS: Record<LayoutAnchorDimension, string> = {
@@ -99,6 +115,9 @@ export function ReferenceLayoutPanel() {
   const setDraft = useLayoutDraftPreviewStore((state) => state.setDraft);
   const selectComponent = useLayoutDraftPreviewStore((state) => state.selectComponent);
   const hoverComponent = useLayoutDraftPreviewStore((state) => state.hoverComponent);
+  const selectedCharacterId = useLayoutDraftPreviewStore((state) => state.selectedCharacterId);
+  const selectCharacter = useLayoutDraftPreviewStore((state) => state.selectCharacter);
+  const hoverCharacter = useLayoutDraftPreviewStore((state) => state.hoverCharacter);
   const [connectedImages, setConnectedImages] = useState(() => getHostReferenceImages().map(connectedImageToReference));
   const [localImage, setLocalImage] = useState<ReferenceLayoutImage | null>(retainedLocalImage);
   const [selectedSourceId, setSelectedSourceId] = useState<string>(retainedSelectedSourceId);
@@ -125,8 +144,11 @@ export function ReferenceLayoutPanel() {
   );
   const selectedImage = images.find((image) => image.sourceId === selectedSourceId) ?? images[0] ?? null;
   const selectedComponent = draft?.components.find((component) => component.id === selectedComponentId) ?? null;
+  const selectedCharacter = draft?.characters.find((character) => character.id === selectedCharacterId) ?? null;
   const anchorPreset = selectedComponent ? LAYOUT_ANCHOR_PRESETS[selectedComponent.category] : null;
   const uncertainCount = draft?.components.filter((component) => component.uncertain).length ?? 0;
+  const uncertainCharacterCount = draft?.characters.filter((character) => character.uncertain).length ?? 0;
+  const characterCount = draft?.characters.length ?? 0;
   const replaceBatchId = appliedBatchId && layoutBatches.some((batch) => batch.id === appliedBatchId)
     ? appliedBatchId
     : selectedImage
@@ -327,6 +349,54 @@ export function ReferenceLayoutPanel() {
       ...component,
       position: [component.position[0], groundHeight, component.position[2]] as [number, number, number],
     }));
+  }
+
+  function updateCharacter(id: string, updater: (character: LayoutDraftCharacter) => LayoutDraftCharacter) {
+    if (!draft) return;
+    editedRef.current = true;
+    setDraft({
+      ...draft,
+      characters: draft.characters.map((character) => character.id === id ? updater(character) : character),
+    });
+  }
+
+  function updateCharacterTuple(
+    character: LayoutDraftCharacter,
+    field: "position",
+    axis: 0 | 1 | 2,
+    value: string
+  ) {
+    const parsed = finiteDraftNumber(value);
+    if (parsed === null) return character;
+    const next = [...character[field]] as [number, number, number];
+    next[axis] = parsed;
+    return { ...character, [field]: next };
+  }
+
+  function snapSelectedCharacterToGround() {
+    if (!selectedCharacter || selectedCharacter.posture === "sit") return;
+    updateCharacter(selectedCharacter.id, (character) => ({
+      ...character,
+      position: [character.position[0], groundHeight, character.position[2]] as [number, number, number],
+    }));
+  }
+
+  function keepAllUncertainCharacters() {
+    if (!draft) return;
+    editedRef.current = true;
+    setDraft({
+      ...draft,
+      characters: draft.characters.map((character) => character.uncertain ? { ...character, uncertain: false } : character),
+    });
+  }
+
+  function dropAllUncertainCharacters() {
+    if (!draft) return;
+    editedRef.current = true;
+    setDraft({
+      ...draft,
+      characters: draft.characters.filter((character) => !character.uncertain),
+    });
   }
 
   function applyDraft(mode: "append" | "replace-batch") {
@@ -530,7 +600,101 @@ export function ReferenceLayoutPanel() {
                 </button>
               ))}
             </div>
-            {selectedComponent ? (
+            {characterCount > 0 ? (
+              <div className="reference-layout-characters" aria-label="人物占位">
+                <div className="reference-layout-characters-heading">
+                  <span><Users aria-hidden="true" size={13} />人物 · {characterCount} 个（站位与姿态占位）</span>
+                  {uncertainCharacterCount > 0 ? (
+                    <span className="reference-layout-adjust-heading-actions">
+                      <button type="button" onClick={keepAllUncertainCharacters}><CheckCheck aria-hidden="true" size={12} />全部保留</button>
+                      <button type="button" onClick={dropAllUncertainCharacters}><Trash2 aria-hidden="true" size={12} />删除待确认</button>
+                    </span>
+                  ) : null}
+                </div>
+                <div className="reference-layout-component-list">
+                  {draft?.characters.map((character) => (
+                    <button
+                      key={character.id}
+                      className={`reference-layout-component-row${selectedCharacterId === character.id ? " is-selected" : ""}`}
+                      type="button"
+                      onMouseEnter={() => hoverCharacter(character.id)}
+                      onMouseLeave={() => hoverCharacter(null)}
+                      onClick={() => {
+                        selectCharacter(character.id);
+                        requestViewportFocus([
+                          character.position[0],
+                          character.position[1] + character.height / 2,
+                          character.position[2],
+                        ]);
+                      }}
+                    >
+                      <i
+                        aria-hidden="true"
+                        className="reference-layout-category-dot"
+                        style={{ background: LAYOUT_CHARACTER_COLOR }}
+                        title="人物占位"
+                      />
+                      <span>{character.name}</span>
+                      <small>{POSTURE_LABELS[character.posture]} · {character.height.toFixed(2)}m · {Math.round(character.confidence * 100)}%</small>
+                      {character.uncertain ? <i>待确认</i> : null}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {selectedCharacter ? (
+              <div className="reference-layout-editor" aria-label={`编辑${selectedCharacter.name}`}>
+                <div className="reference-layout-editor-title">
+                  <input
+                    aria-label="人物名称"
+                    value={selectedCharacter.name}
+                    onChange={(event) => updateCharacter(selectedCharacter.id, (character) => ({ ...character, name: event.target.value.slice(0, 80) }))}
+                  />
+                  <button
+                    type="button"
+                    title="把脚底贴到地面（修正悬浮）"
+                    aria-label="贴地"
+                    disabled={selectedCharacter.posture === "sit" || selectedCharacter.position[1] === groundHeight}
+                    onClick={snapSelectedCharacterToGround}
+                  >
+                    <ArrowDownToLine aria-hidden="true" size={14} />
+                  </button>
+                  <button type="button" title={selectedCharacter.visible ? "隐藏人物" : "显示人物"} aria-label={selectedCharacter.visible ? "隐藏人物" : "显示人物"} onClick={() => updateCharacter(selectedCharacter.id, (character) => ({ ...character, visible: !character.visible }))}>
+                    {selectedCharacter.visible ? <Eye aria-hidden="true" size={14} /> : <EyeOff aria-hidden="true" size={14} />}
+                  </button>
+                  <button type="button" title="删除人物" aria-label="删除人物" onClick={() => { editedRef.current = true; setDraft({ ...draft, characters: draft.characters.filter((character) => character.id !== selectedCharacter.id) }); }}>
+                    <Trash2 aria-hidden="true" size={14} />
+                  </button>
+                </div>
+                <div className="reference-layout-field-grid">
+                  {(["X", "Y", "Z"] as const).map((axisLabel, axis) => (
+                    <label key={`character-position-${axisLabel}`}>位置 {axisLabel}<input aria-label={`位置 ${axisLabel}`} type="number" step="0.1" value={selectedCharacter.position[axis]} onChange={(event) => updateCharacter(selectedCharacter.id, (character) => updateCharacterTuple(character, "position", axis as 0 | 1 | 2, event.target.value))} /></label>
+                  ))}
+                  <label>身高（米）<input aria-label="身高（米）" type="number" min={LAYOUT_CHARACTER_MIN_HEIGHT} max={LAYOUT_CHARACTER_MAX_HEIGHT} step="0.05" value={selectedCharacter.height} onChange={(event) => {
+                    const value = finiteDraftNumber(event.target.value);
+                    if (value === null) return;
+                    updateCharacter(selectedCharacter.id, (character) => ({
+                      ...character,
+                      height: Math.min(LAYOUT_CHARACTER_MAX_HEIGHT, Math.max(LAYOUT_CHARACTER_MIN_HEIGHT, value)),
+                    }));
+                  }} /></label>
+                  <label className="reference-layout-rotation-field">面朝（度）<input aria-label="面朝（度）" type="number" step="15" value={selectedCharacter.rotationYDegrees} onChange={(event) => {
+                    const value = finiteDraftNumber(event.target.value);
+                    if (value !== null) updateCharacter(selectedCharacter.id, (character) => ({ ...character, rotationYDegrees: value }));
+                  }} /></label>
+                  <label>姿态
+                    <select aria-label="姿态" value={selectedCharacter.posture} onChange={(event) => updateCharacter(selectedCharacter.id, (character) => ({ ...character, posture: event.currentTarget.value as LayoutCharacterPosture }))}>
+                      {LAYOUT_CHARACTER_POSTURES.map((posture) => (
+                        <option key={posture} value={posture}>{POSTURE_LABELS[posture]}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <p className="reference-layout-anchor-hint">
+                  占位素体按「身高 ÷ 原生长度」缩放；坐姿人物的位置 Y 即座面高度，随家具调整。
+                </p>
+              </div>
+            ) : selectedComponent ? (
               <div className="reference-layout-editor" aria-label={`编辑${selectedComponent.name}`}>
                 <div className="reference-layout-editor-title">
                   <input
@@ -584,6 +748,9 @@ export function ReferenceLayoutPanel() {
               <button className="reference-layout-primary-button" disabled={!draft.components.length} type="button" onClick={() => applyDraft("append")}>添加到当前场景</button>
               <button className="reference-layout-secondary-button" disabled={!replaceBatchId || !draft.components.length} type="button" onClick={() => applyDraft("replace-batch")}>替换此生成批次</button>
             </div>
+            {characterCount > 0 ? (
+              <p className="reference-layout-anchor-hint">将同时创建 {characterCount} 个角色占位（内置素体 + 姿态），可像普通角色一样编辑、排走位。</p>
+            ) : null}
           </div>
         ) : null}
 
@@ -609,7 +776,7 @@ export function ReferenceLayoutPanel() {
             </div>
             <div className="reference-layout-adjust-row">
               <ArrowDownToLine aria-hidden="true" size={14} />
-              <span>悬浮的组件一键落回地面</span>
+              <span>悬浮的组件一键落回地面（角色除外）</span>
               <button type="button" onClick={snapBatchToGround}>整批贴地</button>
             </div>
             <p className="reference-layout-anchor-hint">缩放以布景中心为基准；每次操作可用 Ctrl/Cmd+Z 撤回。</p>

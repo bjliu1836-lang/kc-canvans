@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { MANNEQUIN_POSE_PRESETS } from "../presets/mannequinPosePresets";
+import { getUE4GroundedLabelY } from "../runtime/ue4Mannequin/ue4MannequinRig";
+import { VIEWPORT_OBJECT_LABEL_VERTICAL_GAP } from "./viewportLabels";
 import {
   buildLayoutBatch,
   calibrateLayoutDraft,
   LAYOUT_CATEGORY_COLORS,
+  LAYOUT_CHARACTER_COLOR,
+  LAYOUT_CHARACTER_NATIVE_HEIGHT,
+  LAYOUT_CHARACTER_POSTURES,
+  LAYOUT_POSTURE_TO_POSE_PRESET,
   LayoutDraftValidationError,
   validateLayoutDraftCandidate,
 } from "./layoutDraft";
@@ -22,6 +29,36 @@ function candidate() {
       rotationYDegrees: 0,
       confidence: 0.82,
       uncertain: false,
+    }],
+  };
+}
+
+function candidateWithCharacters() {
+  return {
+    ...candidate(),
+    characters: [{
+      id: "char_01",
+      name: "人物甲",
+      position: [1.2, 0, 0.4],
+      height: 1.7,
+      rotationYDegrees: 90,
+      posture: "stand",
+      bodyTypeHint: "male",
+      confidence: 0.86,
+      uncertain: false,
+      visible: true,
+    }, {
+      id: "char_02",
+      name: "人物乙",
+      position: [0.2, 0.45, -0.1],
+      height: 1.62,
+      rotationYDegrees: 180,
+      posture: "sit",
+      bodyTypeHint: "female",
+      confidence: 0.7,
+      uncertain: false,
+      notes: "坐在沙发上",
+      visible: true,
     }],
   };
 }
@@ -124,5 +161,130 @@ describe("layout draft validation", () => {
 
     expect(built.objects[0].transform.position).toEqual([0, 1.4, 0]);
     expect(built.objects[0].transform.position[1] + built.objects[0].transform.scale[1]).toBeCloseTo(1.5);
+  });
+});
+
+describe("layout draft characters", () => {
+  it("keeps characters absent for pure-layout images", () => {
+    const draft = validateLayoutDraftCandidate(candidate(), source);
+
+    expect(draft.characters).toEqual([]);
+  });
+
+  it("passes through valid characters and builds editable role objects", () => {
+    const draft = validateLayoutDraftCandidate(candidateWithCharacters(), source, {
+      draftId: "draft_chars",
+      createdAt: "2026-10-12T00:00:00.000Z",
+    });
+    const built = buildLayoutBatch(draft, "layout_chars", []);
+
+    expect(draft.characters).toHaveLength(2);
+    expect(draft.characters[0]).toMatchObject({
+      id: "char_01",
+      name: "人物甲",
+      posture: "stand",
+      height: 1.7,
+      position: [1.2, 0, 0.4],
+      uncertain: false,
+    });
+
+    const [wall, standing, sitting] = built.objects;
+    expect(built.batch.objectIds).toEqual([wall.id, standing.id, sitting.id]);
+
+    // 站立人物：身高换算成整体等比缩放，位置即接触面中心
+    expect(standing).toMatchObject({
+      kind: "character",
+      name: "人物甲",
+      bodyType: "mannequin",
+      color: LAYOUT_CHARACTER_COLOR,
+      characterRig: { rigType: "ue4-mannequin", posePresetId: "stand", controls: {} },
+      layoutSource: {
+        batchId: "layout_chars",
+        category: "character",
+        characterMeta: { posture: "stand", height: 1.7 },
+      },
+    });
+    expect(standing.transform.position).toEqual([1.2, 0, 0.4]);
+    expect(standing.transform.scale[0]).toBeCloseTo(1.7 / LAYOUT_CHARACTER_NATIVE_HEIGHT);
+    expect(standing.transform.scale[1]).toBeCloseTo(standing.transform.scale[0]);
+    expect(standing.transform.rotation[1]).toBeCloseTo(Math.PI / 2);
+
+    // 坐姿人物：位置直接落在座面高度上，姿态走坐姿预设，素体按体型提示选择
+    expect(sitting).toMatchObject({
+      kind: "character",
+      bodyType: "female",
+      characterRig: { posePresetId: "sit" },
+      layoutSource: { category: "character", characterMeta: { posture: "sit", height: 1.62 } },
+    });
+    expect(sitting.transform.position).toEqual([0.2, 0.45, -0.1]);
+    expect(sitting.transform.scale[0]).toBeCloseTo(1.62 / LAYOUT_CHARACTER_NATIVE_HEIGHT);
+  });
+
+  it("maps every posture onto an existing pose preset", () => {
+    LAYOUT_CHARACTER_POSTURES.forEach((posture) => {
+      const presetId = LAYOUT_POSTURE_TO_POSE_PRESET[posture];
+      expect(MANNEQUIN_POSE_PRESETS.some((preset) => preset.id === presetId)).toBe(true);
+    });
+  });
+
+  it("keeps the native height in sync with the grounded label anchor", () => {
+    expect(LAYOUT_CHARACTER_NATIVE_HEIGHT).toBeCloseTo(
+      getUE4GroundedLabelY("mannequin") - VIEWPORT_OBJECT_LABEL_VERTICAL_GAP,
+      5,
+    );
+  });
+
+  it("clamps out-of-range heights and marks them uncertain", () => {
+    const value = candidateWithCharacters();
+    value.characters[0] = { ...value.characters[0], height: 9 };
+    value.characters[1] = { ...value.characters[1], height: 0.1 };
+    const draft = validateLayoutDraftCandidate(value, source);
+
+    expect(draft.characters[0].height).toBe(2.5);
+    expect(draft.characters[0].uncertain).toBe(true);
+    expect(draft.characters[0].notes).toContain("身高已夹紧");
+    expect(draft.characters[1].height).toBe(0.5);
+    expect(draft.characters[1].uncertain).toBe(true);
+  });
+
+  it("falls back to unknown posture for unsupported values", () => {
+    const value = candidateWithCharacters();
+    value.characters[0] = { ...value.characters[0], posture: "handstand" };
+    const draft = validateLayoutDraftCandidate(value, source);
+
+    expect(draft.characters[0].posture).toBe("unknown");
+    expect(draft.characters[0].uncertain).toBe(true);
+  });
+
+  it("truncates characters beyond the cap instead of failing the draft", () => {
+    const value = candidateWithCharacters();
+    value.characters = Array.from({ length: 12 }, (_, index) => ({
+      ...value.characters[0],
+      id: `char_${index}`,
+    }));
+    const draft = validateLayoutDraftCandidate(value, source);
+
+    expect(draft.characters).toHaveLength(8);
+  });
+
+  it("skips characters that collide with component ids", () => {
+    const value = candidateWithCharacters();
+    value.characters[0] = { ...value.characters[0], id: "wall_01" };
+    const draft = validateLayoutDraftCandidate(value, source);
+
+    expect(draft.characters).toHaveLength(1);
+    expect(draft.characters[0].id).toBe("char_02");
+  });
+
+  it("scales character positions and heights together with components during calibration", () => {
+    const draft = validateLayoutDraftCandidate(candidateWithCharacters(), source, { draftId: "draft_chars" });
+    const calibrated = calibrateLayoutDraft(draft, "wall_01", 3);
+
+    expect(calibrated.scale.mode).toBe("anchored");
+    expect(calibrated.characters[0].height).toBeCloseTo(0.85);
+    expect(calibrated.characters[0].position).toEqual([0.6, 0, 0.2]);
+    expect(calibrated.characters[1].position).toEqual([0.1, 0.225, -0.05]);
+    // 原草稿不被修改
+    expect(draft.characters[0].height).toBe(1.7);
   });
 });

@@ -130,9 +130,14 @@ export interface DirectorObject {
     sourceId: string;
     sourceFileName: string;
     componentId: string;
-    category: DirectorLayoutCategory;
+    category: DirectorLayoutCategory | "character";
     confidence: number;
     uncertain: boolean;
+    /** category === "character" 时携带的占位元数据（姿态与估算身高）。 */
+    characterMeta?: {
+      posture: "stand" | "sit" | "crouch" | "kneel" | "lie" | "unknown";
+      height: number;
+    };
   };
 }
 
