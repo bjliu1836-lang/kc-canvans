@@ -23,7 +23,7 @@ const fixtureDraft = {
     name: "沙发（估计）",
     category: "sofa",
     primitive: "box",
-    position: [1, 0, 0],
+    position: [1, 0.6, 0],
     size: [2, 0.85, 0.9],
     rotationYDegrees: 0,
     confidence: 0.55,
@@ -178,6 +178,48 @@ it("scales the applied batch around its center from the adjust section", async (
   await user.click(within(adjust).getByRole("button", { name: "应用平移" }));
   expect(useDirectorStore.getState().project.objects.find((object) => object.name === "后墙")?.transform.position)
     .toEqual([0.5, 0, -4.5]);
+
+  // 整批贴地：悬浮的沙发落回地面，已在地面上的墙保持不动
+  const sofaBefore = useDirectorStore.getState().project.objects.find((object) => object.name === "沙发（估计）");
+  expect(sofaBefore?.transform.position[1]).toBeCloseTo(0.6);
+  await user.click(within(adjust).getByRole("button", { name: "整批贴地" }));
+  const sofaAfter = useDirectorStore.getState().project.objects.find((object) => object.name === "沙发（估计）");
+  expect(sofaAfter?.transform.position[1]).toBe(0);
+  expect(useDirectorStore.getState().project.objects.find((object) => object.name === "后墙")?.transform.position[1])
+    .toBe(0);
+});
+
+it("shows category colors, hovers rows, focuses the viewport and snaps a floating component", async () => {
+  const user = userEvent.setup();
+  render(<ReferenceLayoutPanel />);
+  act(() => {
+    window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+      detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "room.png" }] },
+    }));
+  });
+
+  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
+  expect(await screen.findByText("暂存预览 · 2 个组件")).toBeInTheDocument();
+
+  // 类别色标存在
+  expect(document.querySelectorAll(".reference-layout-category-dot")).toHaveLength(2);
+
+  // 悬停行 → 预览 store 记录悬停
+  fireEvent.mouseEnter(screen.getByRole("button", { name: /沙发（估计）/ }));
+  expect(useLayoutDraftPreviewStore.getState().hoveredComponentId).toBe("sofa_01");
+  fireEvent.mouseLeave(screen.getByRole("button", { name: /沙发（估计）/ }));
+  expect(useLayoutDraftPreviewStore.getState().hoveredComponentId).toBeNull();
+
+  // 点击行 → 选中 + 相机聚焦请求
+  expect(useDirectorStore.getState().viewportFocusRequest).toBeNull();
+  await user.click(screen.getByRole("button", { name: /沙发（估计）/ }));
+  expect(useLayoutDraftPreviewStore.getState().selectedComponentId).toBe("sofa_01");
+  expect(useDirectorStore.getState().viewportFocusRequest).toMatchObject({ target: [1, 1.025, 0] });
+
+  // 悬浮组件一键贴地
+  expect(useLayoutDraftPreviewStore.getState().draft?.components.find((c) => c.id === "sofa_01")?.position[1]).toBe(0.6);
+  await user.click(screen.getByRole("button", { name: "贴地" }));
+  expect(useLayoutDraftPreviewStore.getState().draft?.components.find((c) => c.id === "sofa_01")?.position[1]).toBe(0);
 });
 
 it("accepts a pasted screenshot or dropped file as the local reference image", async () => {

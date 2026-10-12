@@ -37,6 +37,18 @@ export const LAYOUT_ANCHOR_PRESETS: Record<DirectorLayoutCategory, {
   cabinet: { dimension: "height", meters: 1.8, hint: "柜体高度" },
 };
 
+/** 各类组件的语义配色，预览与应用后保持一致，帮助用户分辨谁是谁。 */
+export const LAYOUT_CATEGORY_COLORS: Record<DirectorLayoutCategory, string> = {
+  ground: "#7A8494",
+  wall: "#8FA3C4",
+  door: "#C9A06C",
+  window: "#7FD4E8",
+  table: "#B98A5E",
+  chair: "#D4A6A0",
+  sofa: "#6F9E8F",
+  cabinet: "#A88BB5",
+};
+
 export interface LayoutBatchTransformPatch {
   /** 以布景中心为基准的整体缩放倍数，1 表示不变。 */
   scaleFactor?: number;
@@ -44,6 +56,8 @@ export interface LayoutBatchTransformPatch {
   offsetX?: number;
   /** 沿 Z 轴整体平移（米）。 */
   offsetZ?: number;
+  /** 把批次内所有悬浮组件的底面贴到地面（地面组件自身除外）。 */
+  snapToGround?: boolean;
 }
 
 export interface LayoutDraftComponent {
@@ -365,7 +379,7 @@ export function buildLayoutBatch(
       visible: component.visible,
       locked: false,
       geometryType: component.primitive,
-      color: component.uncertain ? "#D7A64A" : "#8C93A8",
+      color: LAYOUT_CATEGORY_COLORS[component.category],
       transform: {
         position: component.category === "ground"
           ? [component.position[0], groundHeight - component.size[1], component.position[2]]

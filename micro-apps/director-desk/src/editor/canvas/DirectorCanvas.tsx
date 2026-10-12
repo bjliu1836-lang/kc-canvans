@@ -1017,6 +1017,8 @@ export function DirectorCanvas() {
   const recordCameraMotionSnapshot = useDirectorStore((state) => state.recordCameraMotionSnapshot);
   const startCameraPilot = useDirectorStore((state) => state.startCameraPilot);
   const stopCameraPilot = useDirectorStore((state) => state.stopCameraPilot);
+  const viewportFocusRequest = useDirectorStore((state) => state.viewportFocusRequest);
+  const clearViewportFocusRequest = useDirectorStore((state) => state.clearViewportFocusRequest);
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const viewportContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1413,6 +1415,30 @@ export function DirectorCanvas() {
     }
     updateDirectorViewSnapshot(snapshot, true);
   }
+
+  // 消费一次性聚焦请求：保持当前视线方向，把视点平移到目标附近
+  useEffect(() => {
+    if (!viewportFocusRequest || viewMode !== "director" || isCameraPiloting) return;
+
+    const current = viewportCameraSnapshotRef.current;
+    const target = new Vector3(...viewportFocusRequest.target);
+    const direction = new Vector3(
+      current.position[0] - current.target[0],
+      current.position[1] - current.target[1],
+      current.position[2] - current.target[2]
+    );
+    if (direction.lengthSq() === 0) direction.set(0, 1.6, 6);
+    const distance = Math.min(14, Math.max(3.5, direction.length() * 0.9));
+    const position = target.clone().add(direction.normalize().multiplyScalar(distance));
+    position.y = Math.max(position.y, 1);
+
+    updateDirectorViewSnapshot({
+      position: [position.x, position.y, position.z],
+      target: [target.x, target.y, target.z],
+      fov: current.fov,
+    }, true);
+    clearViewportFocusRequest();
+  }, [viewportFocusRequest, viewMode, isCameraPiloting, clearViewportFocusRequest]);
 
   function recordPilotSnapshot(snapshot = viewportCameraSnapshotRef.current) {
     if (!activeCamera) return;

@@ -171,6 +171,8 @@ interface DirectorInternalState {
   cameraPilotLockedTargetId: string | null;
   cameraPilotLockedPoint: [number, number, number] | null;
   cameraPilotFollowTarget: boolean;
+  /** 一次性视口聚焦请求：DirectorCanvas 消费后清空。 */
+  viewportFocusRequest: { target: [number, number, number]; id: number } | null;
 }
 
 export interface DirectorActions {
@@ -227,6 +229,9 @@ export interface DirectorActions {
   addGeometryPrimitive: (geometryType: GeometryPrimitiveType) => void;
   applyLayoutDraft: (input: ApplyLayoutDraftInput) => ApplyLayoutDraftResult;
   transformLayoutBatch: (batchId: string, patch: LayoutBatchTransformPatch) => number;
+  /** 请求导演台视口把镜头对准某个世界坐标（列表行点击联动用）。 */
+  requestViewportFocus: (target: [number, number, number]) => void;
+  clearViewportFocusRequest: () => void;
   addCameraShot: (snapshot?: CameraShotSnapshot) => string;
   ensureMotionCamera: (snapshot?: CameraShotSnapshot) => string;
   deleteSelectedObject: () => void;
@@ -704,6 +709,7 @@ function createRuntimeStateFromPersistedState(state: DirectorState, sceneInstanc
     cameraPilotLockedTargetId: null,
     cameraPilotLockedPoint: null,
     cameraPilotFollowTarget: false,
+    viewportFocusRequest: null,
   };
 }
 
@@ -2504,13 +2510,15 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         : 1;
       const offsetX = typeof patch.offsetX === "number" && Number.isFinite(patch.offsetX) ? patch.offsetX : 0;
       const offsetZ = typeof patch.offsetZ === "number" && Number.isFinite(patch.offsetZ) ? patch.offsetZ : 0;
-      if (scaleFactor === 1 && offsetX === 0 && offsetZ === 0) return 0;
+      const snapToGround = patch.snapToGround === true;
+      if (scaleFactor === 1 && offsetX === 0 && offsetZ === 0 && !snapToGround) return 0;
 
       let transformed = 0;
       commitMutation((state) => {
         const batchObjects = state.project.objects.filter((object) => object.layoutSource?.batchId === batchId);
         if (!batchObjects.length) return state;
         transformed = batchObjects.length;
+        const groundHeight = state.project.scene.groundHeight;
 
         let centerX = 0;
         let centerZ = 0;
@@ -2530,13 +2538,14 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
               if (!batchIds.has(object.id)) return object;
               const [positionX, positionY, positionZ] = object.transform.position;
               const [scaleX, scaleY, scaleZ] = object.transform.scale;
+              const shouldSnapY = snapToGround && object.layoutSource?.category !== "ground";
               return {
                 ...object,
                 transform: {
                   ...object.transform,
                   position: [
                     centerX + (positionX - centerX) * scaleFactor + offsetX,
-                    positionY,
+                    shouldSnapY ? groundHeight : positionY,
                     centerZ + (positionZ - centerZ) * scaleFactor + offsetZ,
                   ] as [number, number, number],
                   scale: [
@@ -2551,6 +2560,14 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         };
       });
       return transformed;
+    },
+    requestViewportFocus: (target) => {
+      set((state) => ({
+        viewportFocusRequest: { target, id: (state.viewportFocusRequest?.id ?? 0) + 1 },
+      }));
+    },
+    clearViewportFocusRequest: () => {
+      set({ viewportFocusRequest: null });
     },
     addCameraShot: (snapshot) => {
       let nextCameraId = "";

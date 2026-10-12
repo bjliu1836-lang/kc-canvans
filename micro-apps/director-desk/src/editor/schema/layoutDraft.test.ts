@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildLayoutBatch,
   calibrateLayoutDraft,
+  LAYOUT_CATEGORY_COLORS,
   LayoutDraftValidationError,
   validateLayoutDraftCandidate,
 } from "./layoutDraft";
@@ -37,6 +38,7 @@ describe("layout draft validation", () => {
       geometryType: "box",
       transform: { position: [0, 0, -3], scale: [6, 2.8, 0.15] },
       layoutSource: { batchId: "layout_fixed", category: "wall" },
+      color: LAYOUT_CATEGORY_COLORS.wall,
     });
   });
 

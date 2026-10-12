@@ -135,6 +135,37 @@ it("ignores batch transforms for unknown batches and no-op patches", () => {
   expect(useDirectorStore.getState().undoStack.length).toBe(undoDepth);
 });
 
+it("snaps a floating layout batch to the ground without moving the ground itself", () => {
+  const floatingDraft = createLayoutDraftFixture();
+  floatingDraft.components[0] = {
+    ...floatingDraft.components[0],
+    position: [0, 1.2, -3],
+  };
+  floatingDraft.components.push({
+    ...floatingDraft.components[0],
+    id: "ground_01",
+    name: "地面",
+    category: "ground",
+    position: [0, 0, 0],
+    size: [6, 0.1, 6],
+  });
+  const first = useDirectorStore.getState().applyLayoutDraft({ draft: floatingDraft, mode: "append" });
+  const findByCategory = (category: string) => useDirectorStore.getState().project.objects
+    .find((object) => object.layoutSource?.category === category)!;
+
+  expect(findByCategory("wall").transform.position[1]).toBe(1.2);
+  const groundY = findByCategory("ground").transform.position[1];
+  expect(groundY).toBeCloseTo(-0.1);
+
+  const count = useDirectorStore.getState().transformLayoutBatch(first.batchId, { snapToGround: true });
+  expect(count).toBe(2);
+  expect(findByCategory("wall").transform.position[1]).toBe(0);
+  expect(findByCategory("ground").transform.position[1]).toBeCloseTo(groundY);
+
+  useDirectorStore.getState().undo();
+  expect(findByCategory("wall").transform.position[1]).toBe(1.2);
+});
+
 it("seeds the demo with one mannequin role and one camera", () => {
   const state = createInitialDirectorState();
   const defaultCharacter = state.project.objects.find((item) => item.kind === "character");

@@ -1,4 +1,5 @@
 import {
+  ArrowDownToLine,
   Box,
   CheckCheck,
   Eye,
@@ -28,6 +29,7 @@ import {
 import {
   calibrateLayoutDraft,
   LAYOUT_ANCHOR_PRESETS,
+  LAYOUT_CATEGORY_COLORS,
   LayoutDraftValidationError,
   type LayoutAnchorDimension,
   type LayoutDraftComponent,
@@ -88,11 +90,15 @@ export function ReferenceLayoutPanel() {
   const transformLayoutBatch = useDirectorStore((state) => state.transformLayoutBatch);
   const selectObject = useDirectorStore((state) => state.selectObject);
   const toggleObjectSelection = useDirectorStore((state) => state.toggleObjectSelection);
+  const requestViewportFocus = useDirectorStore((state) => state.requestViewportFocus);
+  const groundHeight = useDirectorStore((state) => state.project.scene.groundHeight);
+  const sceneObjects = useDirectorStore((state) => state.project.objects);
   const layoutBatches = useDirectorStore((state) => state.project.layoutBatches ?? []);
   const draft = useLayoutDraftPreviewStore((state) => state.draft);
   const selectedComponentId = useLayoutDraftPreviewStore((state) => state.selectedComponentId);
   const setDraft = useLayoutDraftPreviewStore((state) => state.setDraft);
   const selectComponent = useLayoutDraftPreviewStore((state) => state.selectComponent);
+  const hoverComponent = useLayoutDraftPreviewStore((state) => state.hoverComponent);
   const [connectedImages, setConnectedImages] = useState(() => getHostReferenceImages().map(connectedImageToReference));
   const [localImage, setLocalImage] = useState<ReferenceLayoutImage | null>(retainedLocalImage);
   const [selectedSourceId, setSelectedSourceId] = useState<string>(retainedSelectedSourceId);
@@ -315,6 +321,14 @@ export function ReferenceLayoutPanel() {
     });
   }
 
+  function snapSelectedToGround() {
+    if (!draft || !selectedComponent || selectedComponent.category === "ground") return;
+    updateComponent(selectedComponent.id, (component) => ({
+      ...component,
+      position: [component.position[0], groundHeight, component.position[2]] as [number, number, number],
+    }));
+  }
+
   function applyDraft(mode: "append" | "replace-batch") {
     if (!draft) return;
     const result = applyLayoutDraft({
@@ -334,6 +348,36 @@ export function ReferenceLayoutPanel() {
     const [firstId, ...restIds] = activeBatch.objectIds;
     selectObject(firstId ?? null);
     restIds.forEach((id) => toggleObjectSelection(id));
+    focusBatchCenter();
+  }
+
+  function focusBatchCenter() {
+    if (!activeBatch) return;
+    const batchObjects = sceneObjects.filter((object) => object.layoutSource?.batchId === activeBatch.id);
+    if (!batchObjects.length) return;
+    const bounds = batchObjects.reduce(
+      (acc, object) => {
+        const [x, y, z] = object.transform.position;
+        const [sx, sy, sz] = object.transform.scale;
+        return {
+          minX: Math.min(acc.minX, x - sx / 2), maxX: Math.max(acc.maxX, x + sx / 2),
+          minY: Math.min(acc.minY, y), maxY: Math.max(acc.maxY, y + sy),
+          minZ: Math.min(acc.minZ, z - sz / 2), maxZ: Math.max(acc.maxZ, z + sz / 2),
+        };
+      },
+      { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity }
+    );
+    requestViewportFocus([
+      (bounds.minX + bounds.maxX) / 2,
+      (bounds.minY + bounds.maxY) / 2,
+      (bounds.minZ + bounds.maxZ) / 2,
+    ]);
+  }
+
+  function snapBatchToGround() {
+    if (!activeBatch) return;
+    const count = transformLayoutBatch(activeBatch.id, { snapToGround: true });
+    if (count) setError(null);
   }
 
   function applyBatchScale() {
@@ -463,8 +507,23 @@ export function ReferenceLayoutPanel() {
                   key={component.id}
                   className={`reference-layout-component-row${selectedComponentId === component.id ? " is-selected" : ""}`}
                   type="button"
-                  onClick={() => selectComponent(component.id)}
+                  onMouseEnter={() => hoverComponent(component.id)}
+                  onMouseLeave={() => hoverComponent(null)}
+                  onClick={() => {
+                    selectComponent(component.id);
+                    requestViewportFocus([
+                      component.position[0],
+                      component.position[1] + component.size[1] / 2,
+                      component.position[2],
+                    ]);
+                  }}
                 >
+                  <i
+                    aria-hidden="true"
+                    className="reference-layout-category-dot"
+                    style={{ background: LAYOUT_CATEGORY_COLORS[component.category] }}
+                    title={CATEGORY_LABELS[component.category]}
+                  />
                   <span>{component.name}</span>
                   <small>{CATEGORY_LABELS[component.category]} · {Math.round(component.confidence * 100)}%</small>
                   {component.uncertain ? <i>待确认</i> : null}
@@ -479,6 +538,15 @@ export function ReferenceLayoutPanel() {
                     value={selectedComponent.name}
                     onChange={(event) => updateComponent(selectedComponent.id, (component) => ({ ...component, name: event.target.value.slice(0, 80) }))}
                   />
+                  <button
+                    type="button"
+                    title="把底面贴到地面（修正悬浮）"
+                    aria-label="贴地"
+                    disabled={selectedComponent.category === "ground" || selectedComponent.position[1] === groundHeight}
+                    onClick={snapSelectedToGround}
+                  >
+                    <ArrowDownToLine aria-hidden="true" size={14} />
+                  </button>
                   <button type="button" title={selectedComponent.visible ? "隐藏组件" : "显示组件"} aria-label={selectedComponent.visible ? "隐藏组件" : "显示组件"} onClick={() => updateComponent(selectedComponent.id, (component) => ({ ...component, visible: !component.visible }))}>
                     {selectedComponent.visible ? <Eye aria-hidden="true" size={14} /> : <EyeOff aria-hidden="true" size={14} />}
                   </button>
@@ -523,7 +591,10 @@ export function ReferenceLayoutPanel() {
           <div className="reference-layout-adjust" aria-label="布景整体调整">
             <div className="reference-layout-adjust-heading">
               <span><Move aria-hidden="true" size={14} />布景调整 · {activeBatch.sourceFileName}</span>
-              <button type="button" onClick={selectWholeBatch}>选中整组</button>
+              <span className="reference-layout-adjust-heading-actions">
+                <button type="button" onClick={focusBatchCenter}>看向整组</button>
+                <button type="button" onClick={selectWholeBatch}>选中整组</button>
+              </span>
             </div>
             <div className="reference-layout-adjust-row">
               <Scaling aria-hidden="true" size={14} />
@@ -535,6 +606,11 @@ export function ReferenceLayoutPanel() {
               <label>平移 X<input aria-label="整体平移 X" type="number" step="0.1" value={batchOffsetX} onChange={(event) => setBatchOffsetX(event.target.value)} /></label>
               <label>平移 Z<input aria-label="整体平移 Z" type="number" step="0.1" value={batchOffsetZ} onChange={(event) => setBatchOffsetZ(event.target.value)} /></label>
               <button type="button" onClick={applyBatchOffset}>应用平移</button>
+            </div>
+            <div className="reference-layout-adjust-row">
+              <ArrowDownToLine aria-hidden="true" size={14} />
+              <span>悬浮的组件一键落回地面</span>
+              <button type="button" onClick={snapBatchToGround}>整批贴地</button>
             </div>
             <p className="reference-layout-anchor-hint">缩放以布景中心为基准；每次操作可用 Ctrl/Cmd+Z 撤回。</p>
           </div>
