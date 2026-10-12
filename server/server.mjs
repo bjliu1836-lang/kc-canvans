@@ -1134,7 +1134,14 @@ const serveStatic = (req, res) => {
   let filePath = path.join(distDir, safePath === '/' ? 'index.html' : safePath);
   if (!filePath.startsWith(distDir)) return json(res, 403, { error: 'FORBIDDEN' });
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    filePath = path.join(distDir, 'index.html');
+    // 目录请求（如 /director-desk/）：若该目录自带 index.html 则优先返回它，
+    // 与 Cloudflare Pages 的目录索引行为一致；否则回退到 SPA 入口。
+    const dirIndex = path.join(filePath, 'index.html');
+    if (fs.existsSync(dirIndex) && fs.statSync(dirIndex).isFile()) {
+      filePath = dirIndex;
+    } else {
+      filePath = path.join(distDir, 'index.html');
+    }
   }
   const ext = path.extname(filePath);
   res.writeHead(200, { 'Content-Type': contentTypes[ext] || 'application/octet-stream' });
