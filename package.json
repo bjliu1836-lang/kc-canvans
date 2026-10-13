@@ -9,7 +9,7 @@
     "build:director-desk": "npm --prefix micro-apps/director-desk ci && npm --prefix micro-apps/director-desk run build",
     "build": "npm run build:director-desk && npm run clean && vite build",
     "preview": "vite preview",
-    "deploy:cloudflare": "npm run build && npx wrangler deploy",
+    "deploy:cloudflare": "npm run build && npx wrangler deploy --keep-vars",
     "server": "node server/server.mjs",
     "start": "node server/server.mjs"
   },

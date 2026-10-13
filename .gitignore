@@ -13,6 +13,10 @@ dist-ssr
 *.local
 .tmp-media
 
+# Build and tooling artifacts
+tsconfig.tsbuildinfo
+.wrangler
+
 # Environment variables
 .env
 .env.*

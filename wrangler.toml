@@ -1,4 +1,4 @@
-name = "canvans"
+name = "kc-canvans"
 main = "./worker/index.js"
 compatibility_date = "2026-05-28"
 
