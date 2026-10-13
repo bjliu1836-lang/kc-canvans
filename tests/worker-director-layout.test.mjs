@@ -133,6 +133,32 @@ test('director-layout returns a validated draft without a retry', async (t) => {
   assert.deepEqual(await response.json(), { draft: validDraft, usage: { total_tokens: 42 } });
 });
 
+test('director-layout sends the spatial and uniform-scale contract to the configured model', async (t) => {
+  const token = await login();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const payload = JSON.parse(init.body);
+    const systemPrompt = payload.messages[0].content;
+    assert.match(systemPrompt, /无人图：只根据可见建筑、家具和空间关系选择尺度锚点，不要虚构人物/);
+    assert.match(systemPrompt, /人物、家具和空间共用同一把尺/);
+    assert.match(systemPrompt, /整张图只能使用一次统一的比例尺/);
+    assert.match(systemPrompt, /(?:不要|不能)把屏幕二维左右、上下或像素距离直接当作世界距离或米/);
+    assert.match(systemPrompt, /床不是合法 category/);
+    assert.match(systemPrompt, /只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet/);
+    return Response.json({ choices: [{ message: { content: JSON.stringify(validDraft) } }] });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const response = await call('/api/director-layout', {
+    method: 'POST',
+    token,
+    env: { ...baseEnv, DIRECTOR_LAYOUT_API_KEY: 'test-key' },
+    body: { image: { url: 'https://example.com/empty-room.png' } },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).draft, validDraft);
+});
+
 test('director-layout corrects invalid model JSON once and then succeeds', async (t) => {
   const token = await login();
   let modelCalls = 0;
