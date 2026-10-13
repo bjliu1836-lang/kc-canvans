@@ -1,0 +1,22 @@
+{
+  "apiFixtureCalls": 1,
+  "checks": {
+    "enterOpensViewer": true,
+    "viewerCoversViewport": true,
+    "imageInsideViewport": true,
+    "tabTrappedOnClose": true,
+    "escapeClosesAndReturnsFocus": true,
+    "closeButtonWorks": true,
+    "backdropCloses": true,
+    "sourceSwitchClosesViewer": true,
+    "scopeSwitchClosesViewer": true,
+    "realResponseRendered": true,
+    "characterSupportMismatchVisible": true,
+    "seizaVisible": true,
+    "prayerVisible": true,
+    "wallCenterYWarningVisible": true,
+    "deleteInInputKeepsLayout": true,
+    "applySucceeds": true
+  },
+  "consoleErrors": []
+}

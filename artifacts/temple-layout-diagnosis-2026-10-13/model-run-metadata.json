@@ -1,0 +1,44 @@
+{
+  "referenceImageSha256": "9e2b4e4bdb8395b7eb4e17359b766430d486e635224f163d39f64bdd17cf668c",
+  "providerBaseUrl": "https://api.deepseek.com/v1",
+  "localConfiguredModelId": "deepseek-flash",
+  "userEnteredDeploymentLabel": "deppseek-flash",
+  "deploymentAliasMappingVerified": false,
+  "oldServiceRun": {
+    "endpoint": "http://127.0.0.1:8787/api/director-layout",
+    "processId": 42128,
+    "processStartedAt": "2026-10-12T17:25:48+08:00",
+    "processCommand": "node server/server.mjs",
+    "responseFile": "old-service-response.json",
+    "componentCount": 13,
+    "charactersField": "missing",
+    "categories": ["cabinet", "ground", "sofa", "wall", "window"],
+    "usage": {"promptTokens": 1259, "completionTokens": 943, "totalTokens": 2202},
+    "attributionBoundary": "The long-running process predates commit 0942838 and the current working-tree prompt, so this response cannot evaluate the current prompt or current DeepSeek capability."
+  },
+  "testedCurrentPromptRun": {
+    "endpoint": "http://127.0.0.1:8788/api/director-layout",
+    "temporaryServiceStopped": true,
+    "responseFile": "current-prompt-response.json",
+    "testedSystemPromptFile": "tested-system-prompt.txt",
+    "testedSystemPromptSha256": "03d2f384408486e7f686a2e6cadbf51f8566151b56fb058ab841daa1a8dd342f",
+    "componentCount": 19,
+    "characterCount": 1,
+    "categories": ["cabinet", "ground", "pillar", "prop", "wall", "window"],
+    "usage": {"promptTokens": 2463, "completionTokens": 2366, "totalTokens": 4829},
+    "observedSuccesses": [
+      "pillar category",
+      "Buddha represented as prop rather than character",
+      "incense burner, vases, and candle stands represented as elevated props",
+      "real person represented as kneel/seiza with prayer gesture",
+      "person faces the Buddha on the back wall"
+    ],
+    "observedContractViolation": "Some structural Y values use geometric-center semantics: ground=-0.05, 3m walls=1.5, while the contract says position is the bottom-center contact point."
+  },
+  "finalUncalledPrompt": {
+    "systemPromptFile": "final-system-prompt.txt",
+    "systemPromptSha256": "f41aac54157208a756314d9aa70ab5cd7f8051bc78c9dfc35e45a72edc06131b",
+    "changeAfterTestedRun": "Added an explicit wall/pillar bottom-center Y example, preserved elevated window/table-prop semantics, and added validated supportComponentId relations for confirmed horizontal supports.",
+    "paidModelCalledAfterChange": false
+  }
+}

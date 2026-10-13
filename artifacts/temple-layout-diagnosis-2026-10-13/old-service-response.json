@@ -1,0 +1,280 @@
+{
+  "draft": {
+    "scale": {
+      "mode": "estimated",
+      "confidence": 0.4
+    },
+    "components": [
+      {
+        "id": "ground_01",
+        "name": "地面",
+        "category": "ground",
+        "primitive": "box",
+        "position": [
+          0,
+          0,
+          0
+        ],
+        "size": [
+          8,
+          0.1,
+          8
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.85,
+        "uncertain": false,
+        "notes": "深色石砖地面"
+      },
+      {
+        "id": "wall_01",
+        "name": "后墙",
+        "category": "wall",
+        "primitive": "box",
+        "position": [
+          0,
+          0,
+          -4
+        ],
+        "size": [
+          8,
+          3,
+          0.15
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.8,
+        "uncertain": false,
+        "notes": "佛龛背景墙"
+      },
+      {
+        "id": "wall_02",
+        "name": "左墙",
+        "category": "wall",
+        "primitive": "box",
+        "position": [
+          -4,
+          0,
+          0
+        ],
+        "size": [
+          0.15,
+          3,
+          8
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.75,
+        "uncertain": false,
+        "notes": "左侧带窗墙"
+      },
+      {
+        "id": "wall_03",
+        "name": "右墙",
+        "category": "wall",
+        "primitive": "box",
+        "position": [
+          4,
+          0,
+          0
+        ],
+        "size": [
+          0.15,
+          3,
+          8
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.7,
+        "uncertain": true,
+        "notes": "右侧墙，图中不可见"
+      },
+      {
+        "id": "window_01",
+        "name": "左侧窗",
+        "category": "window",
+        "primitive": "box",
+        "position": [
+          -3.9,
+          1.5,
+          -1.5
+        ],
+        "size": [
+          0.1,
+          2,
+          2.5
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.7,
+        "uncertain": true,
+        "notes": "木格窗"
+      },
+      {
+        "id": "window_02",
+        "name": "左侧窗2",
+        "category": "window",
+        "primitive": "box",
+        "position": [
+          -3.9,
+          1.5,
+          1.5
+        ],
+        "size": [
+          0.1,
+          2,
+          2.5
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.65,
+        "uncertain": true,
+        "notes": "木格窗"
+      },
+      {
+        "id": "cabinet_01",
+        "name": "供桌",
+        "category": "cabinet",
+        "primitive": "box",
+        "position": [
+          0,
+          0,
+          -3.2
+        ],
+        "size": [
+          5,
+          1.1,
+          0.8
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.85,
+        "uncertain": false,
+        "notes": "长条雕花供桌"
+      },
+      {
+        "id": "cabinet_02",
+        "name": "左侧矮柜",
+        "category": "cabinet",
+        "primitive": "box",
+        "position": [
+          -3.2,
+          0,
+          -2.5
+        ],
+        "size": [
+          1.5,
+          0.9,
+          0.6
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.7,
+        "uncertain": true,
+        "notes": "左侧木柜"
+      },
+      {
+        "id": "cabinet_03",
+        "name": "小香几",
+        "category": "cabinet",
+        "primitive": "box",
+        "position": [
+          0.5,
+          0,
+          -2
+        ],
+        "size": [
+          0.8,
+          0.6,
+          0.6
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.75,
+        "uncertain": false,
+        "notes": "供桌前小几"
+      },
+      {
+        "id": "sofa_01",
+        "name": "坐垫",
+        "category": "sofa",
+        "primitive": "box",
+        "position": [
+          0,
+          0.05,
+          0.5
+        ],
+        "size": [
+          1.2,
+          0.15,
+          1.2
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.8,
+        "uncertain": false,
+        "notes": "跪拜用方形坐垫"
+      },
+      {
+        "id": "sofa_02",
+        "name": "坐垫2",
+        "category": "sofa",
+        "primitive": "box",
+        "position": [
+          -2,
+          0.05,
+          1
+        ],
+        "size": [
+          1.2,
+          0.15,
+          1.2
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.7,
+        "uncertain": true,
+        "notes": "左侧坐垫"
+      },
+      {
+        "id": "sofa_03",
+        "name": "坐垫3",
+        "category": "sofa",
+        "primitive": "box",
+        "position": [
+          -3,
+          0.05,
+          2.5
+        ],
+        "size": [
+          1.2,
+          0.15,
+          1.2
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.65,
+        "uncertain": true,
+        "notes": "左前坐垫"
+      },
+      {
+        "id": "sofa_04",
+        "name": "坐垫4",
+        "category": "sofa",
+        "primitive": "box",
+        "position": [
+          2,
+          0.05,
+          2.5
+        ],
+        "size": [
+          1.2,
+          0.15,
+          1.2
+        ],
+        "rotationYDegrees": 0,
+        "confidence": 0.6,
+        "uncertain": true,
+        "notes": "右前坐垫"
+      }
+    ]
+  },
+  "usage": {
+    "prompt_tokens": 1259,
+    "completion_tokens": 943,
+    "total_tokens": 2202,
+    "prompt_tokens_details": {
+      "cached_tokens": 128
+    },
+    "prompt_cache_hit_tokens": 128,
+    "prompt_cache_miss_tokens": 1131
+  }
+}

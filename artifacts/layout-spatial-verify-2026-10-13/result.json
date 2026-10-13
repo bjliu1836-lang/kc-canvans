@@ -1,0 +1,16 @@
+{
+  "realModelCall": {
+    "attempted": false,
+    "reason": "No safely reusable application auth token; local server MIMO configuration is not the deployed DIRECTOR_LAYOUT channel"
+  },
+  "targetedTest": {
+    "file": "artifacts/layout-spatial-verify-2026-10-13/layout-spatial-chain.test.ts",
+    "filesPassed": 1,
+    "testsPassed": 2
+  },
+  "existingRegression": {
+    "filesPassed": 2,
+    "testsPassed": 24
+  },
+  "implementationChanged": false
+}

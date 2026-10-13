@@ -1,0 +1,13 @@
+{
+  "purpose": "Temporary side-angle visual inspection only; yaw 90 is not the raw model pose.",
+  "appUrl": "http://127.0.0.1:4174/director-desk/index.html",
+  "apiFixtureCalls": 1,
+  "originalYaw": 180,
+  "inspectionYaw": 90,
+  "kneelVariant": "seiza",
+  "handGesture": "prayer",
+  "propAnchorBlank": true,
+  "pillarAnchorBlank": true,
+  "legacyWallAnchorPreserved": true,
+  "consoleErrors": []
+}
