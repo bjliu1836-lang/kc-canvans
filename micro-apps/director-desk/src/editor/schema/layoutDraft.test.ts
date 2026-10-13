@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { MANNEQUIN_POSE_PRESETS } from "../presets/mannequinPosePresets";
-import { getUE4GroundedLabelY } from "../runtime/ue4Mannequin/ue4MannequinRig";
+import {
+  getUE4GroundedLabelY,
+  getUE4SeatedPelvisSupportHeight,
+} from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { VIEWPORT_OBJECT_LABEL_VERTICAL_GAP } from "./viewportLabels";
 import {
   buildLayoutBatch,
   calibrateLayoutDraft,
+  getLayoutCharacterCanonicalHeight,
   LAYOUT_CATEGORY_COLORS,
   LAYOUT_CHARACTER_COLOR,
   LAYOUT_CHARACTER_NATIVE_HEIGHT,
@@ -209,15 +213,24 @@ describe("layout draft characters", () => {
     expect(standing.transform.scale[1]).toBeCloseTo(standing.transform.scale[0]);
     expect(standing.transform.rotation[1]).toBeCloseTo(Math.PI / 2);
 
-    // 坐姿人物：位置直接落在座面高度上，姿态走坐姿预设，素体按体型提示选择
+    // 坐姿人物：草稿位置保留座面高度，渲染 root 按实际 female 骨盆座面锚点下移
     expect(sitting).toMatchObject({
       kind: "character",
       bodyType: "female",
       characterRig: { posePresetId: "sit" },
       layoutSource: { category: "character", characterMeta: { posture: "sit", height: 1.62 } },
     });
-    expect(sitting.transform.position).toEqual([0.2, 0.45, -0.1]);
-    expect(sitting.transform.scale[0]).toBeCloseTo(1.62 / LAYOUT_CHARACTER_NATIVE_HEIGHT);
+    const femaleScale = 1.62 / getLayoutCharacterCanonicalHeight("female");
+    expect(sitting.transform.position[0]).toBe(0.2);
+    expect(sitting.transform.position[1]).toBeCloseTo(
+      0.45 - getUE4SeatedPelvisSupportHeight("female") * femaleScale,
+    );
+    expect(sitting.transform.position[2]).toBe(-0.1);
+    expect(sitting.transform.scale[0]).toBeCloseTo(femaleScale);
+    expect(sitting.characterRig?.controls).toMatchObject({
+      "leftHip.pitch": 80,
+      "rightKnee.bend": 90,
+    });
   });
 
   it("maps every posture onto an existing pose preset", () => {

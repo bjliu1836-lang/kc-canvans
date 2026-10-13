@@ -51,7 +51,10 @@ import { sampleCharacterActionControls } from "../presets/characterActionPresets
 import { getGroundedLabelY } from "../runtime/mannequin/bodyTypes";
 import { constrainCameraPosition, constrainObjectMotionTransform } from "../schema/pathCollision";
 import { getUE4GroundedLabelY } from "../runtime/ue4Mannequin/ue4MannequinRig";
-import { LAYOUT_CATEGORY_COLORS, LAYOUT_CHARACTER_COLOR } from "../schema/layoutDraft";
+import {
+  createLayoutCharacterRenderAdapter,
+  LAYOUT_CATEGORY_COLORS,
+} from "../schema/layoutDraft";
 import { getEffectiveGroundOpacity } from "./panoramaMath";
 import { getCrowdAnchorTransform } from "../store/directorStore";
 import {
@@ -1771,53 +1774,35 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
           {layoutDraft.characters.filter((character) => character.visible).map((character) => {
             const isHovered = character.id === hoveredLayoutCharacterId;
             const isSelected = character.id === selectedLayoutCharacterId;
-            // 轻量人形占位：总高按估算身高，蹲/坐姿压缩视觉高度；应用后才是真实素体
-            const visualHeight = character.height * (
-              character.posture === "crouch" ? 0.72 : character.posture === "sit" ? 0.88 : 1
-            );
-            const bodyWidth = visualHeight * 0.26;
-            const bodyDepth = visualHeight * 0.2;
-            const opacity = isHovered ? 0.8 : isSelected ? 0.58 : 0.34;
-            const outlineColor = isHovered || isSelected ? "#FFFFFF" : "#DCE8F8";
+            const adapter = createLayoutCharacterRenderAdapter(character);
+            const markerColor = character.uncertain ? "#D9A441" : isHovered || isSelected ? "#FFFFFF" : "#7FB2FF";
             return (
               <group
                 key={character.id}
                 name={`${character.id}-layout-draft-character`}
-                position={character.position}
-                rotation={[0, character.rotationYDegrees * Math.PI / 180, 0]}
+                position={adapter.transform.position}
+                rotation={adapter.transform.rotation}
+                scale={adapter.transform.scale}
               >
-                {character.posture === "sit" ? (
-                  <mesh name={`${character.id}-layout-draft-seat`} position={[0, 0.012, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-                    <circleGeometry args={[bodyWidth * 1.5, 20]} />
-                    <meshStandardMaterial
-                      color={LAYOUT_CHARACTER_COLOR}
-                      emissive={character.uncertain ? "#8a6a1e" : "#000000"}
-                      emissiveIntensity={character.uncertain ? 0.18 : 0}
-                      opacity={opacity * 0.6}
-                      transparent
-                    />
-                  </mesh>
-                ) : null}
+                <Suspense fallback={null}>
+                  <CharacterModel
+                    bodyType={adapter.bodyType}
+                    color={adapter.color}
+                    rigState={adapter.characterRig}
+                  />
+                </Suspense>
                 <mesh
-                  name={`${character.id}-layout-draft-body`}
-                  position={[0, visualHeight / 2, 0]}
-                  scale={[bodyWidth, visualHeight, bodyDepth]}
+                  name={`${character.id}-layout-draft-character-marker`}
+                  position={[0, 0.015, 0]}
+                  rotation={[-Math.PI / 2, 0, 0]}
                 >
-                  <cylinderGeometry args={[0.5, 0.5, 1, 16]} />
-                  <meshStandardMaterial
-                    color={LAYOUT_CHARACTER_COLOR}
-                    depthWrite={false}
-                    emissive={character.uncertain ? "#8a6a1e" : "#000000"}
-                    emissiveIntensity={character.uncertain ? 0.18 : 0}
-                    opacity={opacity}
+                  <ringGeometry args={[0.42, 0.5, 32]} />
+                  <meshBasicMaterial
+                    color={markerColor}
+                    depthTest={false}
+                    opacity={isHovered || isSelected ? 0.95 : 0.62}
                     transparent
                   />
-                  <Edges color={outlineColor} lineWidth={isHovered || isSelected ? 1.5 : 1} threshold={15} />
-                </mesh>
-                {/* 面朝指示：身体前方的窄条 */}
-                <mesh position={[0, visualHeight * 0.72, bodyDepth * 0.75]} scale={[bodyWidth * 0.3, visualHeight * 0.12, bodyDepth * 0.3]}>
-                  <boxGeometry args={[1, 1, 1]} />
-                  <meshStandardMaterial color="#FFFFFF" opacity={opacity} transparent depthWrite={false} />
                 </mesh>
               </group>
             );

@@ -5,6 +5,12 @@ import type {
   DirectorObject,
   GeometryPrimitiveType,
 } from "./directorProject";
+import { MANNEQUIN_POSE_PRESETS } from "../presets/mannequinPosePresets";
+import {
+  getUE4GroundedLabelY,
+  getUE4SeatedPelvisSupportHeight,
+} from "../runtime/ue4Mannequin/ue4MannequinRig";
+import { VIEWPORT_OBJECT_LABEL_VERTICAL_GAP } from "./viewportLabels";
 
 export const LAYOUT_DRAFT_MAX_COMPONENTS = 30;
 export const LAYOUT_COMPONENT_CATEGORIES = [
@@ -58,7 +64,11 @@ export const LAYOUT_BODY_HINT_TO_BODY_TYPE: Record<LayoutCharacterBodyHint, Char
  * = 2.04 - 0.18 ≈ 1.86。layoutDraft.test.ts 有同步断言，标签锚点调整时此值随之失效并报错。
  * 注意：UE4 模型加载失败回退到程序化素体时实际高度不同，该边缘场景接受偏差。
  */
-export const LAYOUT_CHARACTER_NATIVE_HEIGHT = 1.86;
+export const LAYOUT_CHARACTER_NATIVE_HEIGHT = getUE4GroundedLabelY("mannequin") - VIEWPORT_OBJECT_LABEL_VERTICAL_GAP;
+
+export function getLayoutCharacterCanonicalHeight(bodyType: CharacterBodyType) {
+  return getUE4GroundedLabelY(bodyType) - VIEWPORT_OBJECT_LABEL_VERTICAL_GAP;
+}
 
 /** 角色占位统一使用默认角色蓝，与手动添加的角色一致。 */
 export const LAYOUT_CHARACTER_COLOR = "#4F8EF7";
@@ -516,6 +526,34 @@ function uniqueId(base: string, used: Set<string>) {
   return id;
 }
 
+/** 草稿预览与正式入场共用的人物渲染适配，避免体型、姿态和身高换算分叉。 */
+export function createLayoutCharacterRenderAdapter(character: LayoutDraftCharacter) {
+  const bodyType = LAYOUT_BODY_HINT_TO_BODY_TYPE[character.bodyTypeHint];
+  const posePresetId = LAYOUT_POSTURE_TO_POSE_PRESET[character.posture];
+  const posePreset = MANNEQUIN_POSE_PRESETS.find((preset) => preset.id === posePresetId);
+  const canonicalHeight = getLayoutCharacterCanonicalHeight(bodyType);
+  const scaleFactor = character.height / canonicalHeight;
+  const rootPosition = [...character.position] as [number, number, number];
+  if (character.posture === "sit") {
+    rootPosition[1] -= getUE4SeatedPelvisSupportHeight(bodyType) * scaleFactor;
+  }
+
+  return {
+    bodyType,
+    color: LAYOUT_CHARACTER_COLOR,
+    transform: {
+      position: rootPosition,
+      rotation: [0, character.rotationYDegrees * Math.PI / 180, 0] as [number, number, number],
+      scale: [scaleFactor, scaleFactor, scaleFactor] as [number, number, number],
+    },
+    characterRig: {
+      rigType: "ue4-mannequin" as const,
+      posePresetId,
+      controls: posePreset ? { ...posePreset.controls } : {},
+    },
+  };
+}
+
 export function buildLayoutBatch(
   draft: LayoutDraft,
   batchId: string,
@@ -556,25 +594,14 @@ export function buildLayoutBatch(
   // 人物占位：按估算身高换算素体缩放（scale=height/NATIVE），与手动添加的角色同权
   const characterObjects = draft.characters.map((character) => {
     const id = uniqueId(`${sanitizeId(batchId)}_${sanitizeId(character.id)}`, usedIds);
-    const scaleFactor = character.height / LAYOUT_CHARACTER_NATIVE_HEIGHT;
+    const adapter = createLayoutCharacterRenderAdapter(character);
     return {
       id,
       name: character.name,
       kind: "character" as const,
       visible: character.visible,
       locked: false,
-      bodyType: LAYOUT_BODY_HINT_TO_BODY_TYPE[character.bodyTypeHint],
-      color: LAYOUT_CHARACTER_COLOR,
-      transform: {
-        position: [...character.position] as [number, number, number],
-        rotation: [0, character.rotationYDegrees * Math.PI / 180, 0] as [number, number, number],
-        scale: [scaleFactor, scaleFactor, scaleFactor] as [number, number, number],
-      },
-      characterRig: {
-        rigType: "ue4-mannequin" as const,
-        posePresetId: LAYOUT_POSTURE_TO_POSE_PRESET[character.posture],
-        controls: {},
-      },
+      ...adapter,
       layoutSource: {
         batchId,
         draftId: draft.id,

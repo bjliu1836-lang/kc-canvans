@@ -1783,6 +1783,50 @@ textarea:focus-visible {
   font-family: "PingFang SC", "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+.right-panel-stack {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.right-sidebar button.pending-layout-resume-button {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 7px;
+  width: calc(100% - 16px);
+  min-height: 38px;
+  margin: 8px 8px 0;
+  padding: 8px 10px;
+  border: 1px solid rgb(var(--accent-rgb) / 0.42);
+  border-radius: 8px;
+  color: rgb(var(--text-rgb));
+  background: rgb(var(--accent-rgb) / 0.12);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.16);
+  text-align: left;
+}
+
+.right-sidebar button.pending-layout-resume-button:hover,
+.right-sidebar button.pending-layout-resume-button:focus-visible {
+  border-color: rgb(var(--accent-rgb) / 0.72);
+  background: rgb(var(--accent-rgb) / 0.2);
+}
+
+.pending-layout-resume-button span {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.pending-layout-resume-button small {
+  color: rgb(var(--text-dim-rgb));
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .right-sidebar .right-inspector {
   gap: 0;
   background: rgb(var(--panel-rgb));

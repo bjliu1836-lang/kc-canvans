@@ -1,3 +1,8 @@
+// @ts-expect-error Vitest executes this asset-drift check in Node; the app build intentionally omits Node globals.
+import { readFile } from "node:fs/promises";
+import { Euler, Object3D, Quaternion, Vector3 } from "three";
+import { MANNEQUIN_POSE_PRESETS } from "../../presets/mannequinPosePresets";
+import type { CharacterBodyType } from "../mannequin/bodyTypes";
 import {
   UE4_MANNEQUIN_BONE_MAP,
   UE4_MANNEQUIN_MODEL_URL,
@@ -6,8 +11,63 @@ import {
   getUE4ModelScale,
   getUE4NeutralPoseBoneRotations,
   getUE4PoseBoneRotations,
+  getUE4SeatedPelvisSupportHeight,
   resolveDirectorAssetUrl,
 } from "./ue4MannequinRig";
+
+declare const process: { cwd(): string };
+
+async function measureSeatedPelvisSupportHeight(bodyType: CharacterBodyType) {
+  const bytes = await readFile(`${process.cwd()}/public/models/ue-mannequin-retopology.glb`);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const jsonLength = view.getUint32(12, true);
+  const json = JSON.parse(
+    new TextDecoder().decode(bytes.subarray(20, 20 + jsonLength)).replace(/\0+$/, ""),
+  ) as {
+    scene?: number;
+    scenes: Array<{ nodes?: number[] }>;
+    nodes: Array<{
+      name?: string;
+      children?: number[];
+      translation?: [number, number, number];
+      rotation?: [number, number, number, number];
+      scale?: [number, number, number];
+      matrix?: number[];
+    }>;
+  };
+  const nodes = json.nodes.map((node, index) => {
+    const object = new Object3D();
+    object.name = (node.name ?? String(index)).replace(/ /g, "_");
+    if (node.translation) object.position.fromArray(node.translation);
+    if (node.rotation) object.quaternion.fromArray(node.rotation);
+    if (node.scale) object.scale.fromArray(node.scale);
+    if (node.matrix) object.matrix.fromArray(node.matrix).decompose(object.position, object.quaternion, object.scale);
+    return object;
+  });
+  json.nodes.forEach((node, index) => node.children?.forEach((child) => nodes[index].add(nodes[child])));
+  const root = new Object3D();
+  json.scenes[json.scene ?? 0].nodes?.forEach((node) => root.add(nodes[node]));
+  const byName = (name: string) => {
+    const object = nodes.find((node) => node.name === name);
+    if (!object) throw new Error(`内置 UE4 素体缺少骨骼 ${name}`);
+    return object;
+  };
+
+  const bodyScales = getUE4BodyBoneScales(bodyType);
+  Object.entries(bodyScales).forEach(([name, scale]) => byName(name).scale.multiply(new Vector3(...scale)));
+  const sitControls = MANNEQUIN_POSE_PRESETS.find((preset) => preset.id === "sit")?.controls;
+  if (!sitControls) throw new Error("缺少 sit 姿态预设");
+  const poseRotations = getUE4PoseBoneRotations(sitControls, bodyType);
+  Object.entries(poseRotations).forEach(([name, rotation]) => {
+    byName(name).quaternion.multiply(new Quaternion().setFromEuler(new Euler(...rotation)));
+  });
+  root.updateMatrixWorld(true);
+
+  const pelvisY = byName(UE4_MANNEQUIN_BONE_MAP.body).getWorldPosition(new Vector3()).y;
+  const leftFootY = byName(UE4_MANNEQUIN_BONE_MAP.leftFoot).getWorldPosition(new Vector3()).y;
+  const rightFootY = byName(UE4_MANNEQUIN_BONE_MAP.rightFoot).getWorldPosition(new Vector3()).y;
+  return (pelvisY - Math.min(leftFootY, rightFootY)) * getUE4ModelScale(bodyType)[1];
+}
 
 it("points to the built-in rigged GLB asset", () => {
   expect(UE4_MANNEQUIN_MODEL_URL).toBe(resolveDirectorAssetUrl(import.meta.env.BASE_URL, "models/ue-mannequin-retopology.glb"));
@@ -90,6 +150,15 @@ it("keeps role labels above the retopology GLB body", () => {
   expect(getUE4GroundedLabelY("mannequin")).toBeLessThan(2.3);
   expect(getUE4GroundedLabelY("teen")).toBeLessThan(getUE4GroundedLabelY("mannequin"));
   expect(getUE4GroundedLabelY("chibi")).toBeLessThan(getUE4GroundedLabelY("child"));
+});
+
+it("keeps seated support anchors calibrated to the bundled GLB skeleton and sit controls", async () => {
+  await Promise.all((["mannequin", "female"] as const).map(async (bodyType) => {
+    expect(getUE4SeatedPelvisSupportHeight(bodyType)).toBeCloseTo(
+      await measureSeatedPelvisSupportHeight(bodyType),
+      3,
+    );
+  }));
 });
 
 it("maps existing director pose controls to retopology Bip001 bone rotations", () => {

@@ -7,6 +7,7 @@ import {
   DEFAULT_VIEWPORT_ZOOM_SENSITIVITY,
 } from "../schema/viewportSensitivity";
 import { getRuntimePlaybackProgress, setRuntimePlaybackProgress } from "../runtime/playbackRuntime";
+import { getUE4SeatedPelvisSupportHeight } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { LAYOUT_CHARACTER_NATIVE_HEIGHT, type LayoutDraft } from "../schema/layoutDraft";
 
 function createMemoryStorage(): Storage {
@@ -219,8 +220,11 @@ it("creates recognized characters as editable role objects in one batch", () => 
     bodyType: "female",
     characterRig: { posePresetId: "sit" },
   });
-  // 坐姿人物保持座面高度
-  expect(characters[1].transform.position[1]).toBe(0.45);
+  // 坐姿人物的骨盆座面锚点保持在 0.45m
+  expect(
+    characters[1].transform.position[1]
+    + getUE4SeatedPelvisSupportHeight("female") * characters[1].transform.scale[1],
+  ).toBeCloseTo(0.45);
 });
 
 it("scales and offsets recognized characters together with the batch", () => {
@@ -255,8 +259,11 @@ it("keeps characters in place when snapping the batch to the ground", () => {
 
   useDirectorStore.getState().transformLayoutBatch(first.batchId, { snapToGround: true });
 
-  // 坐姿角色不被贴地拉下沙发；站立角色本就在地面上
-  expect(sitting.transform.position[1]).toBe(0.45);
+  // 坐姿角色不被贴地拉下沙发；骨盆座面锚点仍为 0.45m
+  expect(
+    sitting.transform.position[1]
+    + getUE4SeatedPelvisSupportHeight("female") * sitting.transform.scale[1],
+  ).toBeCloseTo(0.45);
 });
 
 it("replaces recognized characters when the batch is regenerated", () => {

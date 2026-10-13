@@ -4,6 +4,7 @@ import { afterEach, beforeEach, vi } from "vitest";
 import { VIEWPORT_CAMERA_VISUAL_SCALE } from "../schema/cameraGeometry";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
 import type { LayoutDraft } from "../schema/layoutDraft";
+import { getUE4SeatedPelvisSupportHeight } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
 import { getImportedModelNormalization, getLayoutDraftPreviewStyle, SceneRoot } from "./SceneRoot";
 
@@ -164,7 +165,7 @@ vi.mock("../runtime/CharacterModel", async () => {
       onLabelAnchorYChange?: (anchorY: number) => void;
       motionWalking?: boolean;
       externalAnimation?: { url: string; clipName: string } | null;
-      rigState?: { rigType?: string };
+      rigState?: { rigType?: string; posePresetId?: string | null; controls?: Record<string, number> };
       runtimeMotion?: { duration: number };
     }) => {
       if (mockCharacterModelShouldSuspend.current) {
@@ -187,6 +188,8 @@ vi.mock("../runtime/CharacterModel", async () => {
           data-external-animation-url={externalAnimation?.url}
           data-external-clip-name={externalAnimation?.clipName}
           data-rig-type={rigState?.rigType}
+          data-pose-preset-id={rigState?.posePresetId ?? ""}
+          data-pose-controls={JSON.stringify(rigState?.controls ?? {})}
           data-runtime-duration={runtimeMotion?.duration}
           data-testid="mock-character-model"
         />
@@ -279,7 +282,7 @@ it("renders outlined layout draft components only in the interactive viewport", 
   expect(container.querySelector('group[name="layout-draft-preview"]')).not.toBeInTheDocument();
 });
 
-it("renders lightweight character placeholders with posture and height in the draft preview", () => {
+it("renders draft people through the same character model adapter used after apply", () => {
   const draftWithCharacters: LayoutDraft = {
     ...layoutDraftFixture,
     characters: [
@@ -299,28 +302,34 @@ it("renders lightweight character placeholders with posture and height in the dr
   const parseNumbers = (value: string | null | undefined) => (value || "").split(",").map(Number);
 
   const standingGroup = container.querySelector('group[name="char_01-layout-draft-character"]');
-  const standingBody = container.querySelector('mesh[name="char_01-layout-draft-body"]');
   const sittingGroup = container.querySelector('group[name="char_02-layout-draft-character"]');
-  const sittingBody = container.querySelector('mesh[name="char_02-layout-draft-body"]');
-  const seat = container.querySelector('mesh[name="char_02-layout-draft-seat"]');
+  const standingModel = standingGroup?.querySelector('[data-testid="mock-character-model"]');
+  const sittingModel = sittingGroup?.querySelector('[data-testid="mock-character-model"]');
+  const sittingMarker = sittingGroup?.querySelector('mesh[name="char_02-layout-draft-character-marker"] meshbasicmaterial');
 
   expect(standingGroup).toBeInTheDocument();
-  expect(standingBody).toBeInTheDocument();
   expect(sittingGroup).toBeInTheDocument();
-  expect(sittingBody).toBeInTheDocument();
-  // 坐姿人物有座面投影，站立人物没有
-  expect(seat).toBeInTheDocument();
-  expect(container.querySelector('mesh[name="char_01-layout-draft-seat"]')).not.toBeInTheDocument();
+  expect(standingModel).toHaveAttribute("data-body-type", "mannequin");
+  expect(standingModel).toHaveAttribute("data-rig-type", "ue4-mannequin");
+  expect(standingModel).toHaveAttribute("data-pose-preset-id", "stand");
+  expect(sittingModel).toHaveAttribute("data-body-type", "female");
+  expect(sittingModel).toHaveAttribute("data-pose-preset-id", "sit");
+  expect(JSON.parse(sittingModel?.getAttribute("data-pose-controls") || "{}")).toMatchObject({
+    "leftHip.pitch": 80,
+    "rightKnee.bend": 90,
+  });
 
-  // 占位高度按估算身高：站立全高，坐姿压缩到 0.88 倍
-  expect(parseNumbers(standingBody?.getAttribute("scale"))[1]).toBeCloseTo(1.7);
-  expect(parseNumbers(sittingBody?.getAttribute("scale"))[1]).toBeCloseTo(1.62 * 0.88);
-  // 位置即接触面中心：站立人物脚底在原点高度，坐姿人物落在 0.45 座面上
+  // 站/坐预览与正式对象均按各自内置素体的原生身高进行统一缩放。
+  expect(parseNumbers(standingGroup?.getAttribute("scale"))[1]).toBeCloseTo(1.7 / 1.86);
+  expect(parseNumbers(sittingGroup?.getAttribute("scale"))[1]).toBeCloseTo(1.62 / 1.8);
   expect(parseNumbers(standingGroup?.getAttribute("position"))).toEqual([1, 0, 0.5]);
-  expect(parseNumbers(sittingGroup?.getAttribute("position"))[1]).toBe(0.45);
-  // uncertain 人物用琥珀色自发光提示
-  expect(sittingBody?.querySelector("meshstandardmaterial")).toHaveAttribute("emissive", "#8a6a1e");
-  expect(standingBody?.querySelector("meshstandardmaterial")).toHaveAttribute("emissive", "#000000");
+  const sittingScale = parseNumbers(sittingGroup?.getAttribute("scale"))[1];
+  expect(
+    parseNumbers(sittingGroup?.getAttribute("position"))[1]
+    + getUE4SeatedPelvisSupportHeight("female") * sittingScale,
+  ).toBeCloseTo(0.45);
+  expect(sittingMarker).toHaveAttribute("color", "#D9A441");
+  expect(container.querySelector('mesh[name="char_01-layout-draft-body"]')).not.toBeInTheDocument();
 });
 
 it("renders role labels while panorama background is managed by the viewport layer", () => {

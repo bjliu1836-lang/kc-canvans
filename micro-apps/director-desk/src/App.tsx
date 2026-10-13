@@ -10,6 +10,7 @@ import {
   initDirectorDeskHostBridge,
 } from "./editor/io/hostBridge";
 import { useDirectorStore } from "./editor/store/directorStore";
+import { useLayoutDraftPreviewStore } from "./editor/store/layoutDraftPreviewStore";
 import {
   createDirectorDeskRecord,
   deleteDirectorDeskRecord,
@@ -209,6 +210,7 @@ export default function App() {
     setDirectorDeskView({ records: nextRecords, activeDeskId: id, screen: "editor" });
     writeActiveDirectorDeskId(id);
     updateUrlDirectorDeskInstanceId(id);
+    useLayoutDraftPreviewStore.getState().openScope(id);
     if (loadScene) {
       useDirectorStore.getState().openScopedScene(id);
     }

@@ -184,6 +184,15 @@ export function getUE4GroundedLabelY(bodyType?: CharacterBodyType): number {
   }
 }
 
+/**
+ * 现有 sit controls 下，内置 GLB 骨盆座面锚点相对双脚支撑面的原生高度（米）。
+ * 仅覆盖参考图人物当前支持的 mannequin / female canonical 体型；对应资产骨架的测量测试
+ * 会在模型、骨骼缩放或 sit controls 改动后提示这里需要重新校准。
+ */
+export function getUE4SeatedPelvisSupportHeight(bodyType: CharacterBodyType): number {
+  return bodyType === "female" ? 0.4075 : 0.4328;
+}
+
 export function getUE4NeutralPoseBoneRotations(): UE4BoneRotationMap {
   return {
     Bip001_L_UpperArm_08: [0, degreesToRadians(25), 0],

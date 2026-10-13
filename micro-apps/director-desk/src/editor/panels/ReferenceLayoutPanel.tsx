@@ -78,9 +78,33 @@ const STAGE_LABELS: Record<GenerationStage, string> = {
   validating: "校验布局数据…",
 };
 
-let retainedLocalImage: ReferenceLayoutImage | null = null;
-let retainedSelectedSourceId = "";
-let retainedAppliedBatchId: string | null = null;
+interface RetainedReferenceLayoutPanelState {
+  localImage: ReferenceLayoutImage | null;
+  selectedSourceId: string;
+  appliedBatchId: string | null;
+}
+
+const retainedPanelStateByScope = new Map<string, RetainedReferenceLayoutPanelState>();
+
+function getPanelScopeKey(scopeId: string | null) {
+  return scopeId || "standalone";
+}
+
+function getRetainedPanelState(scopeId: string | null) {
+  return retainedPanelStateByScope.get(getPanelScopeKey(scopeId)) ?? {
+    localImage: null,
+    selectedSourceId: "",
+    appliedBatchId: null,
+  };
+}
+
+function updateRetainedPanelState(
+  scopeId: string | null,
+  patch: Partial<RetainedReferenceLayoutPanelState>
+) {
+  const key = getPanelScopeKey(scopeId);
+  retainedPanelStateByScope.set(key, { ...getRetainedPanelState(scopeId), ...patch });
+}
 
 function connectedImageToReference(image: HostReferenceImage): ReferenceLayoutImage {
   return {
@@ -110,24 +134,29 @@ export function ReferenceLayoutPanel() {
   const groundHeight = useDirectorStore((state) => state.project.scene.groundHeight);
   const sceneObjects = useDirectorStore((state) => state.project.objects);
   const layoutBatches = useDirectorStore((state) => state.project.layoutBatches ?? []);
+  const scopeId = useLayoutDraftPreviewStore((state) => state.scopeId);
   const draft = useLayoutDraftPreviewStore((state) => state.draft);
+  const draftEdited = useLayoutDraftPreviewStore((state) => state.draftEdited);
   const selectedComponentId = useLayoutDraftPreviewStore((state) => state.selectedComponentId);
   const setDraft = useLayoutDraftPreviewStore((state) => state.setDraft);
+  const openDraftScope = useLayoutDraftPreviewStore((state) => state.openScope);
+  const discardDraft = useLayoutDraftPreviewStore((state) => state.discardDraft);
   const selectComponent = useLayoutDraftPreviewStore((state) => state.selectComponent);
   const hoverComponent = useLayoutDraftPreviewStore((state) => state.hoverComponent);
   const selectedCharacterId = useLayoutDraftPreviewStore((state) => state.selectedCharacterId);
   const selectCharacter = useLayoutDraftPreviewStore((state) => state.selectCharacter);
   const hoverCharacter = useLayoutDraftPreviewStore((state) => state.hoverCharacter);
+  const initialRetainedPanelState = getRetainedPanelState(scopeId);
   const [connectedImages, setConnectedImages] = useState(() => getHostReferenceImages().map(connectedImageToReference));
-  const [localImage, setLocalImage] = useState<ReferenceLayoutImage | null>(retainedLocalImage);
-  const [selectedSourceId, setSelectedSourceId] = useState<string>(retainedSelectedSourceId);
+  const [localImage, setLocalImage] = useState<ReferenceLayoutImage | null>(initialRetainedPanelState.localImage);
+  const [selectedSourceId, setSelectedSourceId] = useState<string>(initialRetainedPanelState.selectedSourceId);
   const [generating, setGenerating] = useState(false);
   const [stage, setStage] = useState<GenerationStage | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [anchorWidth, setAnchorWidth] = useState("");
   const [anchorDimension, setAnchorDimension] = useState<LayoutAnchorDimension>("width");
-  const [appliedBatchId, setAppliedBatchId] = useState<string | null>(retainedAppliedBatchId);
+  const [appliedBatchId, setAppliedBatchId] = useState<string | null>(initialRetainedPanelState.appliedBatchId);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [batchScale, setBatchScale] = useState("1.2");
@@ -136,7 +165,7 @@ export function ReferenceLayoutPanel() {
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
-  const editedRef = useRef(false);
+  const activeScopeRef = useRef(scopeId);
 
   const images = useMemo(
     () => [localImage, ...connectedImages].filter((image): image is ReferenceLayoutImage => Boolean(image)),
@@ -182,7 +211,7 @@ export function ReferenceLayoutPanel() {
       if (!file) return;
       event.preventDefault();
       void readReferenceImageFile(file).then((image) => {
-        retainedLocalImage = image;
+        updateRetainedPanelState(scopeId, { localImage: image, selectedSourceId: image.sourceId });
         setLocalImage(image);
         chooseSource(image.sourceId);
       }).catch((reason) => setError(reason instanceof Error ? reason.message : "参考图读取失败"));
@@ -190,7 +219,23 @@ export function ReferenceLayoutPanel() {
     document.addEventListener("paste", handlePaste);
     return () => document.removeEventListener("paste", handlePaste);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [scopeId]);
+
+  useEffect(() => {
+    if (activeScopeRef.current === scopeId) return;
+    abortRef.current?.abort();
+    requestIdRef.current += 1;
+    const retained = getRetainedPanelState(scopeId);
+    activeScopeRef.current = scopeId;
+    setGenerating(false);
+    setStage(null);
+    setError(null);
+    setLocalImage(retained.localImage);
+    setConnectedImages(getHostReferenceImages().map(connectedImageToReference));
+    setSelectedSourceId(retained.selectedSourceId);
+    setAppliedBatchId(retained.appliedBatchId);
+    setConfirmRegenerate(false);
+  }, [scopeId]);
 
   useEffect(() => {
     const updateConnectedImages = (event: Event) => {
@@ -199,22 +244,16 @@ export function ReferenceLayoutPanel() {
       setConnectedImages(next);
       setSelectedSourceId((current) => current || next[0]?.sourceId || "");
     };
-    const resetForInstance = () => {
+    const resetForInstance = (event: Event) => {
+      const instanceId = (event as CustomEvent<{ instanceId?: string }>).detail?.instanceId ?? null;
+      openDraftScope(instanceId);
       abortRef.current?.abort();
       requestIdRef.current += 1;
       setGenerating(false);
       setStage(null);
       setError(null);
-      setLocalImage(null);
       setConnectedImages([]);
-      setSelectedSourceId("");
-      setAppliedBatchId(null);
       setConfirmRegenerate(false);
-      editedRef.current = false;
-      retainedLocalImage = null;
-      retainedSelectedSourceId = "";
-      retainedAppliedBatchId = null;
-      setDraft(null);
     };
     window.addEventListener(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, updateConnectedImages);
     window.addEventListener(DIRECTOR_DESK_SESSION_OPENED_EVENT, resetForInstance);
@@ -222,16 +261,15 @@ export function ReferenceLayoutPanel() {
       window.removeEventListener(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, updateConnectedImages);
       window.removeEventListener(DIRECTOR_DESK_SESSION_OPENED_EVENT, resetForInstance);
       abortRef.current?.abort();
-      setDraft(null);
     };
-  }, [setDraft]);
+  }, [openDraftScope]);
 
   useEffect(() => {
     if (!selectedSourceId && images[0]) {
-      retainedSelectedSourceId = images[0].sourceId;
+      updateRetainedPanelState(scopeId, { selectedSourceId: images[0].sourceId });
       setSelectedSourceId(images[0].sourceId);
     }
-  }, [images, selectedSourceId]);
+  }, [images, scopeId, selectedSourceId]);
 
   function chooseSource(sourceId: string) {
     abortRef.current?.abort();
@@ -239,19 +277,17 @@ export function ReferenceLayoutPanel() {
     setGenerating(false);
     setStage(null);
     setSelectedSourceId(sourceId);
-    retainedSelectedSourceId = sourceId;
-    setDraft(null);
+    updateRetainedPanelState(scopeId, { selectedSourceId: sourceId });
     setError(null);
     setAnchorWidth("");
     setAppliedBatchId(null);
-    retainedAppliedBatchId = null;
+    updateRetainedPanelState(scopeId, { appliedBatchId: null });
     setConfirmRegenerate(false);
-    editedRef.current = false;
   }
 
-  async function generateLayout() {
+  async function generateLayout(forceReplaceEditedDraft = false) {
     if (!selectedImage || generating) return;
-    if (draft && editedRef.current) {
+    if (draft && draftEdited && !forceReplaceEditedDraft) {
       setConfirmRegenerate(true);
       return;
     }
@@ -269,8 +305,7 @@ export function ReferenceLayoutPanel() {
       const nextDraft = await requestReferenceLayout(selectedImage, controller.signal);
       if (requestId !== requestIdRef.current || controller.signal.aborted) return;
       setStage("validating");
-      setDraft(nextDraft);
-      editedRef.current = false;
+      setDraft(nextDraft, { edited: false });
       setAnchorWidth("");
     } catch (reason) {
       if (controller.signal.aborted || requestId !== requestIdRef.current) return;
@@ -293,11 +328,10 @@ export function ReferenceLayoutPanel() {
 
   function updateComponent(id: string, updater: (component: LayoutDraftComponent) => LayoutDraftComponent) {
     if (!draft) return;
-    editedRef.current = true;
     setDraft({
       ...draft,
       components: draft.components.map((component) => component.id === id ? updater(component) : component),
-    });
+    }, { edited: true });
   }
 
   function updateTuple(
@@ -317,8 +351,7 @@ export function ReferenceLayoutPanel() {
     if (!draft || !selectedComponent) return;
     const parsed = finiteDraftNumber(anchorWidth);
     try {
-      setDraft(calibrateLayoutDraft(draft, selectedComponent.id, parsed ?? Number.NaN, anchorDimension));
-      editedRef.current = true;
+      setDraft(calibrateLayoutDraft(draft, selectedComponent.id, parsed ?? Number.NaN, anchorDimension), { edited: true });
       setError(null);
     } catch (reason) {
       setError(reason instanceof LayoutDraftValidationError ? reason.message : "尺寸校正失败");
@@ -327,20 +360,18 @@ export function ReferenceLayoutPanel() {
 
   function keepAllUncertain() {
     if (!draft) return;
-    editedRef.current = true;
     setDraft({
       ...draft,
       components: draft.components.map((component) => component.uncertain ? { ...component, uncertain: false } : component),
-    });
+    }, { edited: true });
   }
 
   function dropAllUncertain() {
     if (!draft) return;
-    editedRef.current = true;
     setDraft({
       ...draft,
       components: draft.components.filter((component) => !component.uncertain),
-    });
+    }, { edited: true });
   }
 
   function snapSelectedToGround() {
@@ -353,11 +384,10 @@ export function ReferenceLayoutPanel() {
 
   function updateCharacter(id: string, updater: (character: LayoutDraftCharacter) => LayoutDraftCharacter) {
     if (!draft) return;
-    editedRef.current = true;
     setDraft({
       ...draft,
       characters: draft.characters.map((character) => character.id === id ? updater(character) : character),
-    });
+    }, { edited: true });
   }
 
   function updateCharacterTuple(
@@ -383,20 +413,18 @@ export function ReferenceLayoutPanel() {
 
   function keepAllUncertainCharacters() {
     if (!draft) return;
-    editedRef.current = true;
     setDraft({
       ...draft,
       characters: draft.characters.map((character) => character.uncertain ? { ...character, uncertain: false } : character),
-    });
+    }, { edited: true });
   }
 
   function dropAllUncertainCharacters() {
     if (!draft) return;
-    editedRef.current = true;
     setDraft({
       ...draft,
       characters: draft.characters.filter((character) => !character.uncertain),
-    });
+    }, { edited: true });
   }
 
   function applyDraft(mode: "append" | "replace-batch") {
@@ -407,9 +435,8 @@ export function ReferenceLayoutPanel() {
       replaceBatchId: mode === "replace-batch" ? replaceBatchId : null,
     });
     setAppliedBatchId(result.batchId);
-    retainedAppliedBatchId = result.batchId;
+    updateRetainedPanelState(scopeId, { appliedBatchId: result.batchId });
     setDraft(null);
-    editedRef.current = false;
     setError(null);
   }
 
@@ -476,14 +503,14 @@ export function ReferenceLayoutPanel() {
 
   function handleImageFile(file: File) {
     void readReferenceImageFile(file).then((image) => {
-      retainedLocalImage = image;
+      updateRetainedPanelState(scopeId, { localImage: image, selectedSourceId: image.sourceId });
       setLocalImage(image);
       chooseSource(image.sourceId);
     }).catch((reason) => setError(reason instanceof Error ? reason.message : "参考图读取失败"));
   }
 
   return (
-    <InspectorSection title="参考图粗布景">
+    <InspectorSection title={draft ? "待应用布景" : "参考图粗布景"}>
       <div
         className={`reference-layout-panel${dragOver ? " is-dragover" : ""}`}
         onKeyDown={(event) => event.stopPropagation()}
@@ -552,7 +579,7 @@ export function ReferenceLayoutPanel() {
         {confirmRegenerate ? (
           <div className="reference-layout-confirm-row" role="alert">
             <span>已手动修改过当前预览，重新生成将丢弃这些修改。</span>
-            <button type="button" onClick={() => { editedRef.current = false; setConfirmRegenerate(false); void generateLayout(); }}>仍要重新生成</button>
+            <button type="button" onClick={() => { setConfirmRegenerate(false); void generateLayout(true); }}>仍要重新生成</button>
             <button type="button" onClick={() => setConfirmRegenerate(false)}>保留修改</button>
           </div>
         ) : null}
@@ -561,7 +588,7 @@ export function ReferenceLayoutPanel() {
         {draft ? (
           <div className="reference-layout-draft" aria-label="粗布景暂存预览">
             <div className="reference-layout-draft-heading">
-              <span><Box aria-hidden="true" size={14} />暂存预览 · {draft.components.length} 个组件</span>
+              <span><Box aria-hidden="true" size={14} />待应用布景 · {draft.components.length} 个组件 / {characterCount} 个人物</span>
               <em>{draft.scale.mode === "anchored" ? "已按已知尺寸校正" : "未锚定 · 尺度为估计"}</em>
             </div>
             {uncertainCount > 0 ? (
@@ -662,7 +689,7 @@ export function ReferenceLayoutPanel() {
                   <button type="button" title={selectedCharacter.visible ? "隐藏人物" : "显示人物"} aria-label={selectedCharacter.visible ? "隐藏人物" : "显示人物"} onClick={() => updateCharacter(selectedCharacter.id, (character) => ({ ...character, visible: !character.visible }))}>
                     {selectedCharacter.visible ? <Eye aria-hidden="true" size={14} /> : <EyeOff aria-hidden="true" size={14} />}
                   </button>
-                  <button type="button" title="删除人物" aria-label="删除人物" onClick={() => { editedRef.current = true; setDraft({ ...draft, characters: draft.characters.filter((character) => character.id !== selectedCharacter.id) }); }}>
+                  <button type="button" title="删除人物" aria-label="删除人物" onClick={() => setDraft({ ...draft, characters: draft.characters.filter((character) => character.id !== selectedCharacter.id) }, { edited: true })}>
                     <Trash2 aria-hidden="true" size={14} />
                   </button>
                 </div>
@@ -714,7 +741,7 @@ export function ReferenceLayoutPanel() {
                   <button type="button" title={selectedComponent.visible ? "隐藏组件" : "显示组件"} aria-label={selectedComponent.visible ? "隐藏组件" : "显示组件"} onClick={() => updateComponent(selectedComponent.id, (component) => ({ ...component, visible: !component.visible }))}>
                     {selectedComponent.visible ? <Eye aria-hidden="true" size={14} /> : <EyeOff aria-hidden="true" size={14} />}
                   </button>
-                  <button type="button" title="删除组件" aria-label="删除组件" onClick={() => { editedRef.current = true; setDraft({ ...draft, components: draft.components.filter((component) => component.id !== selectedComponent.id) }); }}>
+                  <button type="button" title="删除组件" aria-label="删除组件" onClick={() => setDraft({ ...draft, components: draft.components.filter((component) => component.id !== selectedComponent.id) }, { edited: true })}>
                     <Trash2 aria-hidden="true" size={14} />
                   </button>
                 </div>
@@ -745,8 +772,9 @@ export function ReferenceLayoutPanel() {
               </div>
             ) : null}
             <div className="reference-layout-commit-row">
-              <button className="reference-layout-primary-button" disabled={!draft.components.length} type="button" onClick={() => applyDraft("append")}>添加到当前场景</button>
-              <button className="reference-layout-secondary-button" disabled={!replaceBatchId || !draft.components.length} type="button" onClick={() => applyDraft("replace-batch")}>替换此生成批次</button>
+              <button className="reference-layout-primary-button" disabled={!draft.components.length && !characterCount} type="button" onClick={() => applyDraft("append")}>添加到当前场景</button>
+              <button className="reference-layout-secondary-button" disabled={!replaceBatchId || (!draft.components.length && !characterCount)} type="button" onClick={() => applyDraft("replace-batch")}>替换此生成批次</button>
+              <button className="reference-layout-secondary-button" type="button" onClick={() => { discardDraft(); setError(null); }}>丢弃草稿</button>
             </div>
             {characterCount > 0 ? (
               <p className="reference-layout-anchor-hint">将同时创建 {characterCount} 个角色占位（内置素体 + 姿态），可像普通角色一样编辑、排走位。</p>

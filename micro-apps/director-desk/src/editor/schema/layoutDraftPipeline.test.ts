@@ -8,6 +8,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
+import { getUE4SeatedPelvisSupportHeight } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import {
   buildLayoutBatch,
   calibrateLayoutDraft,
@@ -155,12 +156,17 @@ describe("参考图人物识别全链路", () => {
     const first = characters()[0]!;
     expect(first.layoutSource?.category).toBe("character");
     expect(first.transform.scale[0]).toBeCloseTo(1.72 / LAYOUT_CHARACTER_NATIVE_HEIGHT);
-    expect(first.transform.position[1]).toBe(0.45);
+    expect(first.transform.position[1] + getUE4SeatedPelvisSupportHeight("mannequin") * first.transform.scale[1])
+      .toBeCloseTo(0.45);
     expect(first.characterRig?.posePresetId).toBe("sit");
 
-    // 整批贴地：坐姿人物保持在座面上，站立的布景正常落地
+    // 整批贴地：坐姿人物的骨盆座面锚点保持在 0.45m，站立的布景正常落地
     useDirectorStore.getState().transformLayoutBatch(batchId, { snapToGround: true });
-    expect(characters()[0]!.transform.position[1]).toBe(0.45);
+    const sittingAfterSnap = characters()[0]!;
+    expect(
+      sittingAfterSnap.transform.position[1]
+      + getUE4SeatedPelvisSupportHeight("mannequin") * sittingAfterSnap.transform.scale[1],
+    ).toBeCloseTo(0.45);
   });
 
   it("无人物时向后兼容：旧格式（只有 components）依然产出纯布景批次", () => {

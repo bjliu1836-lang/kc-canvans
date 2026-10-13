@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, vi } from "vitest";
 import { DIRECTOR_DESK_REFERENCE_IMAGES_EVENT } from "../io/hostBridge";
+import { getUE4SeatedPelvisSupportHeight } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
 import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
 import { ReferenceLayoutPanel } from "./ReferenceLayoutPanel";
@@ -32,12 +33,21 @@ const fixtureDraft = {
 };
 
 beforeEach(() => {
+  localStorage.clear();
   useDirectorStore.setState({
     ...useDirectorStore.getState(),
     ...createInitialDirectorState(),
     undoStack: [],
   });
-  useLayoutDraftPreviewStore.setState({ draft: null, selectedComponentId: null });
+  useLayoutDraftPreviewStore.setState({
+    scopeId: null,
+    draft: null,
+    draftEdited: false,
+    selectedComponentId: null,
+    hoveredComponentId: null,
+    selectedCharacterId: null,
+    hoveredCharacterId: null,
+  });
   vi.stubGlobal("fetch", vi.fn(async () => ({
     ok: true,
     status: 200,
@@ -67,7 +77,7 @@ it("edits a controlled layout fixture in preview and commits it as one generated
 
   expect(await screen.findByAltText("当前粗布景参考图")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "生成粗布景" }));
-  expect(await screen.findByText("暂存预览 · 2 个组件")).toBeInTheDocument();
+  expect(await screen.findByText(/待应用布景 · 2 个组件/)).toBeInTheDocument();
   expect(screen.getByText("待确认")).toBeInTheDocument();
 
   const positionX = screen.getByLabelText("位置 X");
@@ -128,11 +138,11 @@ it("keeps or drops every uncertain component with the batch actions", async () =
   });
 
   await user.click(screen.getByRole("button", { name: "生成粗布景" }));
-  expect(await screen.findByText("暂存预览 · 2 个组件")).toBeInTheDocument();
+  expect(await screen.findByText(/待应用布景 · 2 个组件/)).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "全部保留" }));
   expect(screen.queryByText("待确认")).not.toBeInTheDocument();
-  expect(screen.getByText("暂存预览 · 2 个组件")).toBeInTheDocument();
+  expect(screen.getByText(/待应用布景 · 2 个组件/)).toBeInTheDocument();
 
   // 手动修改后重新生成必须二次确认，确认前不发请求
   await user.click(screen.getByRole("button", { name: "重新生成" }));
@@ -145,10 +155,10 @@ it("keeps or drops every uncertain component with the batch actions", async () =
   await user.click(screen.getByRole("button", { name: "重新生成" }));
   await user.click(await screen.findByRole("button", { name: "仍要重新生成" }));
   await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2));
-  expect(await screen.findByText("暂存预览 · 2 个组件")).toBeInTheDocument();
+  expect(await screen.findByText(/待应用布景 · 2 个组件/)).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "删除待确认" }));
-  expect(screen.getByText("暂存预览 · 1 个组件")).toBeInTheDocument();
+  expect(screen.getByText(/待应用布景 · 1 个组件/)).toBeInTheDocument();
 });
 
 it("scales the applied batch around its center from the adjust section", async () => {
@@ -161,7 +171,7 @@ it("scales the applied batch around its center from the adjust section", async (
   });
 
   await user.click(screen.getByRole("button", { name: "生成粗布景" }));
-  expect(await screen.findByText("暂存预览 · 2 个组件")).toBeInTheDocument();
+  expect(await screen.findByText(/待应用布景 · 2 个组件/)).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "添加到当前场景" }));
 
   const adjust = await screen.findByLabelText("布景整体调整");
@@ -199,7 +209,7 @@ it("shows category colors, hovers rows, focuses the viewport and snaps a floatin
   });
 
   await user.click(screen.getByRole("button", { name: "生成粗布景" }));
-  expect(await screen.findByText("暂存预览 · 2 个组件")).toBeInTheDocument();
+  expect(await screen.findByText(/待应用布景 · 2 个组件/)).toBeInTheDocument();
 
   // 类别色标存在
   expect(document.querySelectorAll(".reference-layout-category-dot")).toHaveLength(2);
@@ -264,7 +274,7 @@ it("shows the character section, edits a placeholder, and applies characters as 
   });
 
   await user.click(screen.getByRole("button", { name: "生成粗布景" }));
-  expect(await screen.findByText("暂存预览 · 2 个组件")).toBeInTheDocument();
+  expect(await screen.findByText(/待应用布景 · 2 个组件/)).toBeInTheDocument();
 
   // 人物分区：两行、姿态与身高标签、待确认标记只属于人物乙
   const characters = screen.getByLabelText("人物占位");
@@ -315,8 +325,11 @@ it("shows the character section, edits a placeholder, and applies characters as 
     bodyType: "female",
     characterRig: { posePresetId: "sit" },
   });
-  // 坐姿人物落在座面高度上
-  expect(createdRoles[1].transform.position[1]).toBe(0.45);
+  // 坐姿人物的骨盆座面锚点落在草稿给出的 0.45m 座面高度上
+  expect(
+    createdRoles[1].transform.position[1]
+    + getUE4SeatedPelvisSupportHeight("female") * createdRoles[1].transform.scale[1],
+  ).toBeCloseTo(0.45);
 });
 
 it("accepts a pasted screenshot or dropped file as the local reference image", async () => {
@@ -333,4 +346,26 @@ it("accepts a pasted screenshot or dropped file as the local reference image", a
   fireEvent.drop(panel as Element, { dataTransfer: { files: [droppedFile] } });
 
   await waitFor(() => expect(screen.getAllByText("dropped.png").length).toBeGreaterThan(0));
+});
+
+it("keeps a successful draft when the scene panel unmounts and discards it only from the explicit action", async () => {
+  const user = userEvent.setup();
+  const view = render(<ReferenceLayoutPanel />);
+  act(() => {
+    window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+      detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "room.png" }] },
+    }));
+  });
+
+  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
+  expect(await screen.findByText(/待应用布景 · 2 个组件/)).toBeInTheDocument();
+  const generatedDraft = useLayoutDraftPreviewStore.getState().draft;
+
+  view.unmount();
+  expect(useLayoutDraftPreviewStore.getState().draft).toEqual(generatedDraft);
+
+  render(<ReferenceLayoutPanel />);
+  expect(screen.getByRole("heading", { name: "待应用布景" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "丢弃草稿" }));
+  expect(useLayoutDraftPreviewStore.getState().draft).toBeNull();
 });
