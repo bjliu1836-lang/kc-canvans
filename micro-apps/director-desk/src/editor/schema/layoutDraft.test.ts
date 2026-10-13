@@ -5,10 +5,13 @@ import {
   getUE4SeatedPelvisSupportHeight,
 } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { VIEWPORT_OBJECT_LABEL_VERTICAL_GAP } from "./viewportLabels";
+import templeCurrentModelDraft from "./__fixtures__/temple-current-model-draft.json";
 import {
   buildLayoutBatch,
   calibrateLayoutDraft,
+  createLayoutCharacterRenderAdapter,
   getLayoutCharacterCanonicalHeight,
+  getLayoutComponentRenderPosition,
   LAYOUT_CATEGORY_COLORS,
   LAYOUT_CHARACTER_COLOR,
   LAYOUT_CHARACTER_NATIVE_HEIGHT,
@@ -166,6 +169,76 @@ describe("layout draft validation", () => {
     expect(built.objects[0].transform.position).toEqual([0, 1.4, 0]);
     expect(built.objects[0].transform.position[1] + built.objects[0].transform.scale[1]).toBeCloseTo(1.5);
   });
+
+  it("keeps preview and apply ground placement identical for the real temple response", () => {
+    const draft = validateLayoutDraftCandidate(templeCurrentModelDraft, source, { draftId: "temple_real_raw" });
+    const ground = draft.components.find((component) => component.id === "ground_01")!;
+    const previewPosition = getLayoutComponentRenderPosition(ground, 0);
+    const built = buildLayoutBatch(draft, "temple_real_raw", [], 0);
+    const appliedGround = built.objects.find((object) => object.layoutSource?.componentId === "ground_01")!;
+
+    expect(ground.position[1]).toBe(-0.05);
+    expect(previewPosition).toEqual([0, -0.1, 0]);
+    expect(appliedGround.transform.position).toEqual(previewPosition);
+    expect(previewPosition[1] + ground.size[1]).toBeCloseTo(0);
+  });
+
+  it("surfaces mixed center/bottom Y semantics from the real temple response without flattening valid props", () => {
+    const draft = validateLayoutDraftCandidate(templeCurrentModelDraft, source, { draftId: "temple_diagnostics" });
+    const backWall = draft.components.find((component) => component.id === "wall_back_01")!;
+    const vase = draft.components.find((component) => component.id === "prop_vase_01")!;
+    const character = draft.characters[0];
+
+    expect(backWall.position[1]).toBe(1.5);
+    expect(backWall.uncertain).toBe(true);
+    expect(backWall.notes).toContain("可能是合法悬空墙段/台上柱，也可能误用了几何中心 Y");
+    expect(vase.position[1]).toBe(1.15);
+    expect(character.position[1]).toBe(0.12);
+    expect(character.uncertain).toBe(true);
+    expect(character.notes).toContain("prop_cushion_01 顶面 Y=0.18 不一致");
+
+    const revalidated = validateLayoutDraftCandidate(draft, source, { draftId: "temple_diagnostics_again" });
+    expect(revalidated.components.find((component) => component.id === "wall_back_01")!.notes!.match(/误用了几何中心 Y/g)).toHaveLength(1);
+    expect(revalidated.components.find((component) => component.id === "wall_back_01")!.notes!.length).toBeLessThanOrEqual(240);
+  });
+
+  it("resolves explicit support top-down only when horizontal footprints overlap", () => {
+    const value: any = candidateWithCharacters();
+    value.components = [
+      {
+        id: "ground_01", name: "地面", category: "ground", primitive: "box",
+        position: [0, -0.05, 0], size: [8, 0.1, 8], rotationYDegrees: 0,
+        confidence: 0.9, uncertain: false,
+      },
+      {
+        id: "cushion_01", name: "坐垫", category: "prop", primitive: "box",
+        position: [0, 0.06, 0], size: [0.8, 0.12, 0.8], rotationYDegrees: 0,
+        supportComponentId: "ground_01", confidence: 0.9, uncertain: false,
+      },
+      {
+        id: "far_prop", name: "远处道具", category: "prop", primitive: "box",
+        position: [4, 0.4, 4], size: [0.2, 0.2, 0.2], rotationYDegrees: 0,
+        supportComponentId: "cushion_01", confidence: 0.9, uncertain: false,
+      },
+    ];
+    value.characters = [{
+      ...value.characters[0],
+      id: "char_kneel",
+      posture: "kneel",
+      kneelVariant: "seiza",
+      position: [0, 0.06, 0],
+      supportComponentId: "cushion_01",
+    }];
+
+    const draft = validateLayoutDraftCandidate(value, source);
+    const cushion = draft.components.find((component) => component.id === "cushion_01")!;
+    const farProp = draft.components.find((component) => component.id === "far_prop")!;
+    expect(cushion.position[1]).toBe(0);
+    expect(draft.characters[0].position[1]).toBe(0.12);
+    expect(farProp.position[1]).toBe(0.4);
+    expect(farProp.uncertain).toBe(true);
+    expect(farProp.notes).toContain("水平足迹不重叠");
+  });
 });
 
 describe("layout draft characters", () => {
@@ -238,6 +311,54 @@ describe("layout draft characters", () => {
       const presetId = LAYOUT_POSTURE_TO_POSE_PRESET[posture];
       expect(MANNEQUIN_POSE_PRESETS.some((preset) => preset.id === presetId)).toBe(true);
     });
+  });
+
+  it("keeps legacy kneel drafts on one knee and maps explicit variants including seiza", () => {
+    const value = candidateWithCharacters() as ReturnType<typeof candidateWithCharacters> & { characters: Array<Record<string, unknown>> };
+    value.characters[0] = {
+      ...value.characters[0],
+      posture: "kneel",
+      kneelVariant: "seiza",
+      handGesture: "prayer",
+      position: [0.2, 0.12, 0.4],
+    };
+    value.characters[1] = {
+      ...value.characters[1],
+      posture: "kneel",
+      kneelVariant: undefined,
+      position: [1, 0, 0],
+    };
+    const draft = validateLayoutDraftCandidate(value, source);
+    const seiza = createLayoutCharacterRenderAdapter(draft.characters[0]);
+    const legacy = createLayoutCharacterRenderAdapter(draft.characters[1]);
+
+    expect(draft.characters[0].kneelVariant).toBe("seiza");
+    expect(seiza.characterRig.posePresetId).toBe("seiza");
+    expect(seiza.transform.position[1]).toBeCloseTo(0.12);
+    expect(seiza.characterRig.controls).toMatchObject({
+      "leftHip.pitch": 68,
+      "rightKnee.bend": 142,
+      "leftElbow.bend": 96,
+      "rightElbow.bend": 96,
+    });
+    expect(legacy.characterRig.posePresetId).toBe("kneel-one");
+  });
+
+  it("accepts pillar and supported prop placement above the floor", () => {
+    const value = candidateWithCharacters();
+    value.components.push({
+      id: "pillar_01", name: "立柱", category: "pillar", primitive: "cylinder",
+      position: [-1.2, 0, -2], size: [0.4, 2.8, 0.4], rotationYDegrees: 0,
+      confidence: 0.9, uncertain: false,
+    }, {
+      id: "incense_01", name: "香炉", category: "prop", primitive: "cylinder",
+      position: [0.4, 0.82, -2.4], size: [0.45, 0.35, 0.45], rotationYDegrees: 0,
+      confidence: 0.82, uncertain: false,
+    });
+
+    const draft = validateLayoutDraftCandidate(value, source);
+    expect(draft.components.find((item) => item.category === "pillar")?.size[1]).toBe(2.8);
+    expect(draft.components.find((item) => item.category === "prop")?.position[1]).toBe(0.82);
   });
 
   it("keeps the native height in sync with the grounded label anchor", () => {

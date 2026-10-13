@@ -33,7 +33,9 @@ const draftFixture: LayoutDraft = {
     position: [-0.72, 0.46, 0.31],
     height: 1.73,
     rotationYDegrees: -35,
-    posture: "sit",
+    posture: "kneel",
+    kneelVariant: "seiza",
+    handGesture: "prayer",
     bodyTypeHint: "female",
     confidence: 0.81,
     uncertain: false,
@@ -67,6 +69,11 @@ it("restores an edited semantic draft exactly when returning to its instance sco
 
   useLayoutDraftPreviewStore.getState().openScope("desk_restore");
   expect(useLayoutDraftPreviewStore.getState().draft).toEqual(draftFixture);
+  expect(useLayoutDraftPreviewStore.getState().draft?.characters[0]).toMatchObject({
+    posture: "kneel",
+    kneelVariant: "seiza",
+    handGesture: "prayer",
+  });
   expect(useLayoutDraftPreviewStore.getState().draftEdited).toBe(true);
   expect(useLayoutDraftPreviewStore.getState().selectedCharacterId).toBe("char_01");
 });

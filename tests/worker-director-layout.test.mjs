@@ -33,6 +33,7 @@ const login = async () => {
 
 const validDraft = {
   scale: { mode: 'estimated', confidence: 0.8 },
+  characters: [],
   components: [{
     id: 'wall_01',
     name: '后墙',
@@ -144,7 +145,15 @@ test('director-layout sends the spatial and uniform-scale contract to the config
     assert.match(systemPrompt, /整张图只能使用一次统一的比例尺/);
     assert.match(systemPrompt, /(?:不要|不能)把屏幕二维左右、上下或像素距离直接当作世界距离或米/);
     assert.match(systemPrompt, /床不是合法 category/);
-    assert.match(systemPrompt, /只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet/);
+    assert.match(systemPrompt, /只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet, pillar, prop/);
+    assert.match(systemPrompt, /桌台上的香炉、花瓶、雕像等 prop 的 Y=承载台面高度/);
+    assert.match(systemPrompt, /落地 wall、pillar 的 position\.y 通常等于地面高度 0，而不是 size\[1\]\/2/);
+    assert.match(systemPrompt, /window、桌面 prop 等悬空物体仍写真实支撑面高度，不得统一贴地/);
+    assert.match(systemPrompt, /supportComponentId=承载组件 id/);
+    assert.match(systemPrompt, /不要用 wall\/window\/door\/pillar 作为水平支撑/);
+    assert.match(systemPrompt, /chair\/sofa 的包围盒顶通常不是座面/);
+    assert.match(systemPrompt, /kneelVariant：one-knee（单膝跪）, two-knee（双膝直身跪）, seiza/);
+    assert.match(systemPrompt, /佛像.*不得写入 characters/);
     return Response.json({ choices: [{ message: { content: JSON.stringify(validDraft) } }] });
   };
   t.after(() => { globalThis.fetch = originalFetch; });
@@ -179,6 +188,39 @@ test('director-layout corrects invalid model JSON once and then succeeds', async
     token,
     env: { ...baseEnv, MIMO_API_KEY: 'fallback-key' },
     body: { image: { url: 'https://example.com/reference.png' } },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(modelCalls, 2);
+  assert.deepEqual((await response.json()).draft, validDraft);
+});
+
+test('director-layout rejects a cyclic support graph and requests one correction', async (t) => {
+  const token = await login();
+  let modelCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    modelCalls += 1;
+    if (modelCalls === 1) {
+      const cyclicDraft = {
+        ...validDraft,
+        components: [
+          { ...validDraft.components[0], id: 'prop_a', category: 'prop', supportComponentId: 'prop_b' },
+          { ...validDraft.components[0], id: 'prop_b', category: 'prop', supportComponentId: 'prop_a' },
+        ],
+      };
+      return Response.json({ choices: [{ message: { content: JSON.stringify(cyclicDraft) } }] });
+    }
+    const payload = JSON.parse(init.body);
+    assert.match(payload.messages[1].content[1].text, /支撑关系形成循环/);
+    return Response.json({ choices: [{ message: { content: JSON.stringify(validDraft) } }] });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const response = await call('/api/director-layout', {
+    method: 'POST',
+    token,
+    env: { ...baseEnv, DIRECTOR_LAYOUT_API_KEY: 'test-key' },
+    body: { image: { url: 'https://example.com/support-cycle.png' } },
   });
   assert.equal(response.status, 200);
   assert.equal(modelCalls, 2);
@@ -273,12 +315,20 @@ test('director-layout rejects an out-of-range character height and retries', asy
   assert.deepEqual((await response.json()).draft, draftWithCharacters);
 });
 
-test('director-layout accepts a scene-only draft without a characters field', async (t) => {
+test('director-layout corrects a fresh model response that omits characters', async (t) => {
   const token = await login();
+  let modelCalls = 0;
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({
-    choices: [{ message: { content: JSON.stringify(validDraft) } }],
-  });
+  globalThis.fetch = async (_url, init) => {
+    modelCalls += 1;
+    if (modelCalls === 1) {
+      const { characters: _characters, ...withoutCharacters } = validDraft;
+      return Response.json({ choices: [{ message: { content: JSON.stringify(withoutCharacters) } }] });
+    }
+    const payload = JSON.parse(init.body);
+    assert.match(payload.messages[1].content[1].text, /缺少 characters 数组/);
+    return Response.json({ choices: [{ message: { content: JSON.stringify(validDraft) } }] });
+  };
   t.after(() => { globalThis.fetch = originalFetch; });
 
   const response = await call('/api/director-layout', {
@@ -288,7 +338,8 @@ test('director-layout accepts a scene-only draft without a characters field', as
     body: { image: { url: 'https://example.com/empty-room.png' } },
   });
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).draft.characters, undefined);
+  assert.equal(modelCalls, 2);
+  assert.deepEqual((await response.json()).draft.characters, []);
 });
 
 test('director-layout stops after two invalid model responses', async (t) => {

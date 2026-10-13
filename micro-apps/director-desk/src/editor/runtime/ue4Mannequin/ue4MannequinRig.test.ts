@@ -198,6 +198,33 @@ it("maps existing director pose controls to retopology Bip001 bone rotations", (
   expect(rotations.Bip001_R_Calf_062[2]).toBeLessThan(0);
 });
 
+it("lets adult UE4 knee bones reach seiza flexion without relaxing other joint limits", () => {
+  const rotations = getUE4PoseBoneRotations(
+    {
+      "leftKnee.bend": 142,
+      "rightKnee.bend": 200,
+      "leftElbow.bend": 142,
+    },
+    "female",
+  );
+
+  expect(rotations.Bip001_L_Calf_058[2]).toBeCloseTo((-142 * Math.PI) / 180);
+  expect(rotations.Bip001_R_Calf_062[2]).toBeCloseTo((-165 * Math.PI) / 180);
+  expect(rotations.Bip001_L_Forearm_09[2]).toBeCloseTo((-90 * Math.PI) / 180);
+
+  const compact = getUE4PoseBoneRotations({ "leftKnee.bend": 142 }, "chibi");
+  expect(compact.Bip001_L_Calf_058[2]).toBeCloseTo((-58 * Math.PI) / 180);
+});
+
+it("keeps the existing 90 degree sit knee rotation unchanged", () => {
+  const sit = MANNEQUIN_POSE_PRESETS.find((preset) => preset.id === "sit");
+  if (!sit) throw new Error("缺少 sit 姿态预设");
+
+  const rotations = getUE4PoseBoneRotations(sit.controls, "female");
+  expect(rotations.Bip001_L_Calf_058[2]).toBeCloseTo(-Math.PI / 2);
+  expect(rotations.Bip001_R_Calf_062[2]).toBeCloseTo(-Math.PI / 2);
+});
+
 it("maps foot pitch controls for grounded kneel and lunge poses", () => {
   const rotations = getUE4PoseBoneRotations(
     {

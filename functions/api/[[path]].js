@@ -482,19 +482,25 @@ const DIRECTOR_LAYOUT_SYSTEM_PROMPT = [
   '你是 3D 影视预演的室内粗布景与人物占位分析器。',
   '只依据一张参考图估计可编辑的粗布景和人物，不要虚构图中不可见的精细结构。',
   '========== 第一部分：布景组件 components ==========',
-  '只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet。',
+  '只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet, pillar, prop。pillar 表示从支撑面延伸到顶面的柱；prop 表示香炉、花瓶、雕像等需要占位的非家具物件。',
   '只使用这些 primitive：box, cylinder。不要返回模型名、GLB、纹理或外部资产。',
   '床不是合法 category：如图中有床，床体用 sofa + box 表示，床头板用独立 cabinet + box 表示；在 name/notes 标明“床体”或“床头板”，不要输出 bed。',
   '共享右手世界基准以参考机位为准：+X 为画面右，+Y 向上，+Z 朝观察者/默认机位，-Z 为后墙方向。透视倾斜时，依据墙线和消失方向判断房间轴；不要把屏幕二维左右、上下或像素距离直接当作世界距离或米。',
-  '坐标单位是米；position 是物体底面中心；size 顺序是局部宽、高、深，且每项必须大于 0。yaw=0 时局部 width 沿 +X、local depth 沿 +Z；正 rotationYDegrees 使 local +Z 转向 +X。size 只写局部尺寸，rotationYDegrees 只写朝向，不能把宽深旋转两次。',
+  '坐标单位是米；position 是物体底面中心，也是物体与支撑面的接触中心：落地物体 Y=地面高度，桌台上的香炉、花瓶、雕像等 prop 的 Y=承载台面高度，不能把所有组件 Y 都写成 0。size 顺序是局部宽、高、深，且每项必须大于 0。yaw=0 时局部 width 沿 +X、local depth 沿 +Z；正 rotationYDegrees 使 local +Z 转向 +X。size 只写局部尺寸，rotationYDegrees 只写朝向，不能把宽深旋转两次。',
+  '提交前逐项检查 Y 语义：落地 wall、pillar 的 position.y 通常等于地面高度 0，而不是 size[1]/2；例如 3 米高的落地墙应写 position.y=0、size[1]=3，不能写 position.y=1.5。window、桌面 prop 等悬空物体仍写真实支撑面高度，不得统一贴地。',
   '柜体或有开口面的家具，局部正面/开放面定义为 local +Z；床体的床头定义在 local -Z，床头板与床体分别输出并邻近该端。普通 box 的前后或 +/-180 度视觉不可区分时，在 notes 写明朝向依据或不确定性，不要假装可从对称外形恢复。',
-  '先识别空间关系，再填写坐标：门、窗依附所在墙面；门洞附近的墙应拆成门洞左右或上方的墙段，不要用一整块墙堵住门洞；家具长轴、柜开放面、床头端与相邻墙/家具的关系要自洽。床头柜（cabinet）应靠近床头端，并按图判断其在床的哪一侧。以上是一般关系规则，不能硬编码为某个卧室。',
+  '先识别空间关系，再填写坐标：门、窗依附所在墙面；柱应从可见支撑面延伸到顶面；门洞附近的墙应拆成门洞左右或上方的墙段，不要用一整块墙堵住门洞；家具长轴、柜开放面、床头端与相邻墙/家具的关系要自洽；承载于桌台的 prop 必须保持与对应台面的垂直层次。床头柜（cabinet）应靠近床头端，并按图判断其在床的哪一侧。以上是一般关系规则，不能硬编码为某个房间。',
+  '组件明确承载在另一组件的水平顶面时，输出 supportComponentId=承载组件 id；只允许引用 ground、table、cabinet、prop。不要用 wall/window/door/pillar 作为水平支撑。chair/sofa 的包围盒顶通常不是座面，坐姿人物不要引用整个 chair/sofa；没有独立可确认座面组件时省略 supportComponentId，并直接填写观察到的座面 Y。',
   '最多 30 个组件。无法确认的物体请降低 confidence 并设置 uncertain=true。',
   '========== 第二部分：人物 characters ==========',
   '识别图中所有人物，最多 8 个；人物要创建为可编辑的角色占位，只做站位与姿态，不要还原脸、服装和体型。',
   'posture 只能取：stand（站）, sit（坐）, crouch（蹲）, kneel（跪）, lie（躺/卧）, unknown（看不清）。',
+  'posture=kneel 时必须额外输出 kneelVariant：one-knee（单膝跪）, two-knee（双膝直身跪）, seiza（双腿收在臀下、臀部落向脚跟的跪坐）。不要把 seiza 误写成向前迈腿的 one-knee。其他 posture 不要输出 kneelVariant。',
+  '人物明确双手合十时输出 handGesture="prayer"；其他手势或看不清时省略 handGesture，不要用跪姿默认推断合十。',
   'bodyTypeHint 只能取：male, female, unknown。',
-  'position 是"身体与支撑面的接触中心"，Y 必须等于支撑面高度：站/蹲站地面时 Y=0，坐在沙发或椅子上时 Y=该座面高度（约 0.40~0.50），躺在床上时 Y=床面高度。绝对不要把所有人物的 Y 都写成 0。',
+  'position 是"身体与支撑面的接触中心"，Y 必须等于支撑面高度：站/蹲/跪在地面或坐垫时 Y=对应地面或坐垫顶面高度，坐在沙发或椅子上时 Y=该座面高度（约 0.40~0.50），躺在床上时 Y=床面高度。绝对不要把所有人物的 Y 都写成 0。',
+  '人物站、蹲、跪在明确的 ground 或独立平台/坐垫 prop 上时，也输出 supportComponentId=该承载组件 id。引用必须存在、不能引用自身、不能形成循环。',
+  '雕像、佛像、画像中的人物和玩偶属于 prop 或背景，不得写入 characters；只有画面中的真人/表演角色才创建人物占位。',
   'rotationYDegrees 是人物面朝方向，0 表示面朝 +Z（朝向默认机位），90 表示面朝 +X，-90 表示面朝 -X，180 表示背对机位。',
   '========== 尺度：最关键的要求 ==========',
   '整张图只能使用一次统一的比例尺（uniform scale）。先依据深度、遮挡、地面、墙线和可见连接关系估计三维比例：原图中约 1:10 的关系不能被常识改成 1:5；远处物体像素更小可能来自透视，不等于它在三维中更小。禁止逐个物体按常见尺寸重新缩放。',
@@ -505,12 +511,15 @@ const DIRECTOR_LAYOUT_SYSTEM_PROMPT = [
   'scale.mode 固定为 estimated。没有要创建的人物时输出空数组 characters: []，不要省略该字段。',
   '无法确认的人物请降低 confidence 并设置 uncertain=true（例如被遮挡、只露出部分身体）。',
   '只输出一个 JSON 对象，不要 Markdown，不要解释。格式：',
-  '{"scale":{"mode":"estimated","confidence":0.4},"components":[{"id":"wall_01","name":"后墙","category":"wall","primitive":"box","position":[0,0,-3],"size":[6,2.8,0.15],"rotationYDegrees":0,"confidence":0.8,"uncertain":false,"notes":""}],"characters":[{"id":"char_01","name":"人物甲","position":[-0.6,0.45,0.2],"height":1.7,"rotationYDegrees":15,"posture":"sit","bodyTypeHint":"male","confidence":0.7,"uncertain":false,"notes":"坐在沙发左侧"}]}'
+  '{"scale":{"mode":"estimated","confidence":0.4},"components":[{"id":"pillar_01","name":"立柱","category":"pillar","primitive":"cylinder","position":[0,0,-3],"size":[0.45,2.8,0.45],"rotationYDegrees":0,"confidence":0.8,"uncertain":false,"notes":""}],"characters":[{"id":"char_01","name":"人物甲","position":[-0.6,0.12,0.2],"height":1.7,"rotationYDegrees":15,"posture":"kneel","kneelVariant":"seiza","handGesture":"prayer","bodyTypeHint":"female","confidence":0.7,"uncertain":false,"notes":"跪坐在坐垫上"}]}'
 ].join('\n');
 
-const DIRECTOR_LAYOUT_CATEGORIES = new Set(['ground', 'wall', 'door', 'window', 'table', 'chair', 'sofa', 'cabinet']);
+const DIRECTOR_LAYOUT_CATEGORIES = new Set(['ground', 'wall', 'door', 'window', 'table', 'chair', 'sofa', 'cabinet', 'pillar', 'prop']);
 const DIRECTOR_LAYOUT_PRIMITIVES = new Set(['box', 'cylinder']);
+const DIRECTOR_LAYOUT_HORIZONTAL_SUPPORT_CATEGORIES = new Set(['ground', 'table', 'cabinet', 'prop']);
 const DIRECTOR_LAYOUT_POSTURES = new Set(['stand', 'sit', 'crouch', 'kneel', 'lie', 'unknown']);
+const DIRECTOR_LAYOUT_KNEEL_VARIANTS = new Set(['one-knee', 'two-knee', 'seiza']);
+const DIRECTOR_LAYOUT_HAND_GESTURES = new Set(['prayer']);
 const DIRECTOR_LAYOUT_BODY_HINTS = new Set(['male', 'female', 'unknown']);
 const DIRECTOR_LAYOUT_CHARACTER_MAX_COUNT = 8;
 const DIRECTOR_LAYOUT_CHARACTER_MIN_HEIGHT = 0.5;
@@ -561,12 +570,51 @@ const validateDirectorLayoutCandidate = (candidate) => {
     else if (ids.has(id)) issues.push(`${label}的 id 重复`);
     ids.add(id);
   });
+  const componentById = new Map((components || [])
+    .filter(item => item && typeof item === 'object' && typeof item.id === 'string' && item.id.trim())
+    .map(item => [item.id.trim(), item]));
+  const supportFootprintContains = (position, support) => {
+    if (!Array.isArray(position) || position.length !== 3 || !position.every(Number.isFinite)
+      || !Array.isArray(support?.position) || support.position.length !== 3 || !support.position.every(Number.isFinite)
+      || !Array.isArray(support?.size) || support.size.length !== 3 || !support.size.every(Number.isFinite)) return false;
+    const radians = Number(support.rotationYDegrees || 0) * Math.PI / 180;
+    const dx = position[0] - support.position[0];
+    const dz = position[2] - support.position[2];
+    const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
+    const localZ = Math.sin(radians) * dx + Math.cos(radians) * dz;
+    return Math.abs(localX) <= support.size[0] / 2 + 0.04 && Math.abs(localZ) <= support.size[2] / 2 + 0.04;
+  };
+  components?.forEach((item, index) => {
+    if (!item || typeof item !== 'object' || item.supportComponentId === undefined) return;
+    const label = `第 ${index + 1} 个组件`;
+    const supportId = typeof item.supportComponentId === 'string' ? item.supportComponentId.trim() : '';
+    if (!supportId) issues.push(`${label}的 supportComponentId 必须是非空字符串`);
+    else if (supportId === item.id) issues.push(`${label}不能把自身作为支撑组件`);
+    else if (!componentById.has(supportId)) issues.push(`${label}引用了不存在的支撑组件 ${supportId}`);
+    else if (!DIRECTOR_LAYOUT_HORIZONTAL_SUPPORT_CATEGORIES.has(componentById.get(supportId).category)) {
+      issues.push(`${label}引用的 ${supportId} 不是可按包围盒顶面计算的水平支撑`);
+    } else if (!supportFootprintContains(item.position, componentById.get(supportId))) {
+      issues.push(`${label}与支撑组件 ${supportId} 的水平足迹不重叠`);
+    }
+  });
+  const supportVisitState = new Map();
+  const visitSupport = (id) => {
+    const state = supportVisitState.get(id);
+    if (state === 'visiting') return true;
+    if (state === 'done') return false;
+    supportVisitState.set(id, 'visiting');
+    const supportId = componentById.get(id)?.supportComponentId;
+    const cyclic = typeof supportId === 'string' && componentById.has(supportId) && visitSupport(supportId);
+    supportVisitState.set(id, 'done');
+    return cyclic;
+  };
+  componentById.forEach((_item, id) => {
+    if (visitSupport(id)) issues.push(`组件 ${id} 的支撑关系形成循环`);
+  });
 
-  // characters 可选；存在则严格校验（客户端 schema 有宽容夹紧兜底，此处严格以便触发重试纠正）
+  // 新模型响应必须显式给出 characters（无人图为 []）；客户端仍兼容旧草稿缺字段。
   const rawCharacters = candidate?.characters;
-  if (rawCharacters !== undefined && !Array.isArray(rawCharacters)) {
-    issues.push('characters 必须是数组');
-  }
+  if (!Array.isArray(rawCharacters)) issues.push('布局结果缺少 characters 数组');
   const characters = Array.isArray(rawCharacters) ? rawCharacters : null;
   if (characters && characters.length > DIRECTOR_LAYOUT_CHARACTER_MAX_COUNT) {
     issues.push(`人物数量超过 ${DIRECTOR_LAYOUT_CHARACTER_MAX_COUNT} 个上限`);
@@ -586,6 +634,26 @@ const validateDirectorLayoutCandidate = (candidate) => {
       issues.push(`${label}的身高必须是 ${DIRECTOR_LAYOUT_CHARACTER_MIN_HEIGHT} 到 ${DIRECTOR_LAYOUT_CHARACTER_MAX_HEIGHT} 米之间的数字`);
     }
     if (!DIRECTOR_LAYOUT_POSTURES.has(item.posture)) issues.push(`${label}包含未知姿态 ${String(item.posture)}`);
+    if (item.posture === 'kneel' && !DIRECTOR_LAYOUT_KNEEL_VARIANTS.has(item.kneelVariant)) {
+      issues.push(`${label}的跪姿缺少有效 kneelVariant`);
+    }
+    if (item.kneelVariant !== undefined && !DIRECTOR_LAYOUT_KNEEL_VARIANTS.has(item.kneelVariant)) {
+      issues.push(`${label}包含未知跪姿细分 ${String(item.kneelVariant)}`);
+    }
+    if (item.handGesture !== undefined && !DIRECTOR_LAYOUT_HAND_GESTURES.has(item.handGesture)) {
+      issues.push(`${label}包含未知手势 ${String(item.handGesture)}`);
+    }
+    if (item.supportComponentId !== undefined) {
+      const supportId = typeof item.supportComponentId === 'string' ? item.supportComponentId.trim() : '';
+      const support = componentById.get(supportId);
+      if (!supportId) issues.push(`${label}的 supportComponentId 必须是非空字符串`);
+      else if (!support) issues.push(`${label}引用了不存在的支撑组件 ${supportId}`);
+      else if (!DIRECTOR_LAYOUT_HORIZONTAL_SUPPORT_CATEGORIES.has(support.category)) {
+        issues.push(`${label}引用的 ${supportId} 不是可按包围盒顶面计算的水平支撑`);
+      } else if (!supportFootprintContains(item.position, support)) {
+        issues.push(`${label}与支撑组件 ${supportId} 的水平足迹不重叠`);
+      }
+    }
     if (!DIRECTOR_LAYOUT_BODY_HINTS.has(item.bodyTypeHint)) issues.push(`${label}包含未知体型 ${String(item.bodyTypeHint)}`);
     if (typeof item.rotationYDegrees !== 'number' || !Number.isFinite(item.rotationYDegrees)) {
       issues.push(`${label}的朝向必须是有限数字`);

@@ -19,6 +19,7 @@ const fixtureDraft = {
     rotationYDegrees: 0,
     confidence: 0.82,
     uncertain: false,
+    notes: "后墙位置待确认",
   }, {
     id: "sofa_01",
     name: "沙发（估计）",
@@ -38,6 +39,7 @@ beforeEach(() => {
     ...useDirectorStore.getState(),
     ...createInitialDirectorState(),
     undoStack: [],
+    viewportFocusRequest: null,
   });
   useLayoutDraftPreviewStore.setState({
     scopeId: null,
@@ -79,6 +81,7 @@ it("edits a controlled layout fixture in preview and commits it as one generated
   await user.click(screen.getByRole("button", { name: "生成粗布景" }));
   expect(await screen.findByText(/待应用布景 · 2 个组件/)).toBeInTheDocument();
   expect(screen.getByText("待确认")).toBeInTheDocument();
+  expect(screen.getByText("后墙位置待确认")).toBeInTheDocument();
 
   const positionX = screen.getByLabelText("位置 X");
   fireEvent.keyDown(positionX, { key: "Delete" });
@@ -105,6 +108,55 @@ it("edits a controlled layout fixture in preview and commits it as one generated
   expect(useDirectorStore.getState().undoStack).toHaveLength(1);
 
   window.removeEventListener("keydown", windowKeydown);
+});
+
+it("requires measured scale values for pillar and prop while preserving legacy category presets", async () => {
+  const user = userEvent.setup();
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      draft: {
+        ...fixtureDraft,
+        components: [
+          fixtureDraft.components[0],
+          {
+            ...fixtureDraft.components[0],
+            id: "prop_01",
+            name: "坐垫道具",
+            category: "prop",
+            size: [0.6, 0.12, 0.6],
+          },
+          {
+            ...fixtureDraft.components[0],
+            id: "pillar_01",
+            name: "寺庙立柱",
+            category: "pillar",
+            size: [0.5, 4.2, 0.5],
+          },
+        ],
+      },
+    }),
+  })));
+  render(<ReferenceLayoutPanel />);
+  act(() => {
+    window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+      detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "temple.png" }] },
+    }));
+  });
+
+  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
+  expect(await screen.findByLabelText("已知高度（米）")).toHaveValue(2.8);
+
+  await user.click(screen.getByRole("button", { name: /坐垫道具/ }));
+  expect(screen.getByLabelText("已知高度（米）")).toHaveValue(null);
+  expect(screen.getByRole("button", { name: "校正" })).toBeDisabled();
+  expect(screen.getByText(/坐垫、供器或雕像.*请填写你确知的实测尺寸/)).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: /寺庙立柱/ }));
+  expect(screen.getByLabelText("已知高度（米）")).toHaveValue(null);
+  expect(screen.getByRole("button", { name: "校正" })).toBeDisabled();
+  expect(screen.getByText(/柱体高度差异较大.*请填写你确知的实测尺寸/)).toBeInTheDocument();
 });
 
 it("cancels an in-flight request without writing a draft or project objects", async () => {
@@ -346,6 +398,82 @@ it("accepts a pasted screenshot or dropped file as the local reference image", a
   fireEvent.drop(panel as Element, { dataTransfer: { files: [droppedFile] } });
 
   await waitFor(() => expect(screen.getAllByText("dropped.png").length).toBeGreaterThan(0));
+});
+
+it("opens the selected reference thumbnail with keyboard and closes the large viewer safely", async () => {
+  const user = userEvent.setup();
+  render(<ReferenceLayoutPanel />);
+  act(() => {
+    window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+      detail: {
+        images: [{
+          edgeId: "e",
+          sourceNodeId: "n",
+          imageUrl: "data:image/png;base64,aGVsbG8=",
+          fileName: "寺庙参考图.png",
+        }],
+      },
+    }));
+  });
+
+  await user.selectOptions(screen.getByLabelText("选择粗布景参考图"), "n");
+  const previewButton = await screen.findByRole("button", { name: "查看参考图大图：寺庙参考图.png" });
+  previewButton.focus();
+  await user.keyboard("{Enter}");
+  const dialog = screen.getByRole("dialog", { name: "参考图查看器：寺庙参考图.png" });
+  expect(within(dialog).getByAltText("寺庙参考图.png 大图")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "关闭参考图查看器" })).toHaveFocus();
+
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog", { name: /参考图查看器/ })).not.toBeInTheDocument();
+  await waitFor(() => expect(previewButton).toHaveFocus());
+
+  await user.click(previewButton);
+  fireEvent.click(screen.getByRole("dialog", { name: "参考图查看器：寺庙参考图.png" }));
+  expect(screen.queryByRole("dialog", { name: /参考图查看器/ })).not.toBeInTheDocument();
+});
+
+it("lets a generated kneeling character switch between explicit kneel variants", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      draft: {
+        ...fixtureDraft,
+        characters: [{
+          id: "char_01",
+          name: "祈祷女子",
+          position: [0, 0.12, 0],
+          height: 1.62,
+          rotationYDegrees: -45,
+          posture: "kneel",
+          kneelVariant: "seiza",
+          handGesture: "prayer",
+          bodyTypeHint: "female",
+          confidence: 0.88,
+          uncertain: false,
+          notes: "跪坐人物支撑高度待确认",
+        }],
+      },
+    }),
+  })));
+  const user = userEvent.setup();
+  render(<ReferenceLayoutPanel />);
+  act(() => {
+    window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+      detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "temple.png" }] },
+    }));
+  });
+
+  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
+  expect(await screen.findByText(/跪坐（臀落脚跟） · 1\.62m/)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: /祈祷女子/ }));
+  const variant = screen.getByLabelText("跪姿细分");
+  expect(variant).toHaveValue("seiza");
+  expect(screen.getByLabelText("手势")).toHaveValue("prayer");
+  expect(screen.getByText("跪坐人物支撑高度待确认")).toBeInTheDocument();
+  await user.selectOptions(variant, "two-knee");
+  expect(useLayoutDraftPreviewStore.getState().draft?.characters[0].kneelVariant).toBe("two-knee");
 });
 
 it("keeps a successful draft when the scene panel unmounts and discards it only from the explicit action", async () => {

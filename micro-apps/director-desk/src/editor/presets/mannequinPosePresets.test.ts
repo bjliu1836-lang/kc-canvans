@@ -1,6 +1,6 @@
 import { MANNEQUIN_POSE_PRESETS } from "./mannequinPosePresets";
 
-it("exports the approved 20 pose presets", () => {
+it("exports the approved 21 pose presets", () => {
   expect(MANNEQUIN_POSE_PRESETS.map((item) => item.label)).toEqual([
     "站立",
     "T型",
@@ -10,6 +10,7 @@ it("exports the approved 20 pose presets", () => {
     "蹲下",
     "单膝跪",
     "双膝跪",
+    "跪坐",
     "叉腰",
     "倚靠",
     "鞠躬",
@@ -23,6 +24,24 @@ it("exports the approved 20 pose presets", () => {
     "抱臂",
     "看手机",
   ]);
+});
+
+it("calibrates seiza with both legs folded under the pelvis and neutral arms", () => {
+  const pose = MANNEQUIN_POSE_PRESETS.find((item) => item.id === "seiza");
+
+  expect(pose?.controls).toMatchObject({
+    "body.offsetY": -0.56,
+    "leftHip.pitch": 68,
+    "rightHip.pitch": 68,
+    "leftKnee.bend": 142,
+    "rightKnee.bend": 142,
+    "leftFoot.pitch": -28,
+    "rightFoot.pitch": -28,
+    "leftShoulder.pitch": -8,
+    "rightShoulder.pitch": -8,
+    "leftElbow.bend": 12,
+    "rightElbow.bend": 12,
+  });
 });
 
 it("calibrates the T-pose for the retopology mannequin side plane", () => {

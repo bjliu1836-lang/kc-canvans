@@ -22,6 +22,8 @@ export const LAYOUT_COMPONENT_CATEGORIES = [
   "chair",
   "sofa",
   "cabinet",
+  "pillar",
+  "prop",
 ] as const satisfies readonly DirectorLayoutCategory[];
 
 export const LAYOUT_COMPONENT_PRIMITIVES = ["box", "cylinder"] as const satisfies readonly GeometryPrimitiveType[];
@@ -36,6 +38,12 @@ export const LAYOUT_CHARACTER_MAX_HEIGHT = 2.5;
 
 export const LAYOUT_CHARACTER_POSTURES = ["stand", "sit", "crouch", "kneel", "lie", "unknown"] as const;
 export type LayoutCharacterPosture = (typeof LAYOUT_CHARACTER_POSTURES)[number];
+
+export const LAYOUT_KNEEL_VARIANTS = ["one-knee", "two-knee", "seiza"] as const;
+export type LayoutKneelVariant = (typeof LAYOUT_KNEEL_VARIANTS)[number];
+
+export const LAYOUT_HAND_GESTURES = ["prayer"] as const;
+export type LayoutHandGesture = (typeof LAYOUT_HAND_GESTURES)[number];
 
 export const LAYOUT_CHARACTER_BODY_HINTS = ["male", "female", "unknown"] as const;
 export type LayoutCharacterBodyHint = (typeof LAYOUT_CHARACTER_BODY_HINTS)[number];
@@ -82,6 +90,12 @@ export interface LayoutDraftCharacter {
   height: number;
   rotationYDegrees: number;
   posture: LayoutCharacterPosture;
+  /** 跪姿细分；旧草稿没有该字段时继续沿用历史的单膝跪映射。 */
+  kneelVariant?: LayoutKneelVariant;
+  /** 当前只细分可可靠表达的合十手势；未提供时沿用姿态预设的中性手臂。 */
+  handGesture?: LayoutHandGesture;
+  /** 明确承载人物的组件 id；存在时人物 Y 由该组件顶面计算。 */
+  supportComponentId?: string;
   bodyTypeHint: LayoutCharacterBodyHint;
   confidence: number;
   uncertain: boolean;
@@ -91,10 +105,10 @@ export interface LayoutDraftCharacter {
 
 export type LayoutAnchorDimension = "width" | "height";
 
-/** 各类组件的常见真实尺寸，用于尺度校正时预填，降低用户估算门槛。 */
+/** 各类组件的尺度锚点建议；差异过大的类别不预填米数，避免误校准整场。 */
 export const LAYOUT_ANCHOR_PRESETS: Record<DirectorLayoutCategory, {
   dimension: LayoutAnchorDimension;
-  meters: number;
+  meters?: number;
   hint: string;
 }> = {
   ground: { dimension: "width", meters: 4, hint: "房间开间" },
@@ -105,6 +119,8 @@ export const LAYOUT_ANCHOR_PRESETS: Record<DirectorLayoutCategory, {
   chair: { dimension: "height", meters: 0.9, hint: "椅背高度" },
   sofa: { dimension: "width", meters: 2, hint: "双人沙发宽" },
   cabinet: { dimension: "height", meters: 1.8, hint: "柜体高度" },
+  pillar: { dimension: "height", hint: "柱体高度差异较大" },
+  prop: { dimension: "height", hint: "道具可能是坐垫、供器或雕像，尺寸差异较大" },
 };
 
 /** 各类组件的语义配色，预览与应用后保持一致，帮助用户分辨谁是谁。 */
@@ -117,6 +133,8 @@ export const LAYOUT_CATEGORY_COLORS: Record<DirectorLayoutCategory, string> = {
   chair: "#D4A6A0",
   sofa: "#6F9E8F",
   cabinet: "#A88BB5",
+  pillar: "#A87868",
+  prop: "#C9A850",
 };
 
 export interface LayoutBatchTransformPatch {
@@ -139,6 +157,8 @@ export interface LayoutDraftComponent {
   position: [number, number, number];
   /** Width, height and depth in scene metres. */
   size: [number, number, number];
+  /** 明确承载该组件重量的另一组件 id；存在时底面 Y 由支撑组件顶面计算。 */
+  supportComponentId?: string;
   rotationYDegrees: number;
   confidence: number;
   uncertain: boolean;
@@ -258,6 +278,18 @@ function normalizeLayoutCharacter(raw: unknown, index: number, seenIds: Set<stri
   const bodyTypeHint: LayoutCharacterBodyHint = LAYOUT_CHARACTER_BODY_HINTS.includes(rawBodyHint as LayoutCharacterBodyHint)
     ? rawBodyHint as LayoutCharacterBodyHint
     : "unknown";
+  const rawKneelVariant = raw.kneelVariant;
+  const kneelVariant = posture === "kneel"
+    && LAYOUT_KNEEL_VARIANTS.includes(rawKneelVariant as LayoutKneelVariant)
+    ? rawKneelVariant as LayoutKneelVariant
+    : undefined;
+  const rawHandGesture = raw.handGesture;
+  const handGesture = LAYOUT_HAND_GESTURES.includes(rawHandGesture as LayoutHandGesture)
+    ? rawHandGesture as LayoutHandGesture
+    : undefined;
+  const supportComponentId = typeof raw.supportComponentId === "string"
+    ? boundedString(raw.supportComponentId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
+    : undefined;
 
   const rotationYDegrees = typeof raw.rotationYDegrees === "number" && Number.isFinite(raw.rotationYDegrees)
     ? raw.rotationYDegrees
@@ -277,6 +309,9 @@ function normalizeLayoutCharacter(raw: unknown, index: number, seenIds: Set<stri
     height,
     rotationYDegrees,
     posture,
+    kneelVariant,
+    handGesture,
+    supportComponentId,
     bodyTypeHint,
     confidence,
     uncertain: raw.uncertain === true
@@ -354,6 +389,218 @@ function carveDoorOpenings(components: LayoutDraftComponent[]) {
     });
   }
   return result;
+}
+
+const LAYOUT_SUPPORT_Y_TOLERANCE = 0.02;
+const LAYOUT_LEGACY_SUPPORT_NEARBY_TOLERANCE = 0.15;
+
+function appendLayoutDiagnostic(notes: string | undefined, diagnostic: string) {
+  const current = (notes ?? "").trim().slice(0, 240);
+  if (current.includes(diagnostic)) return current;
+  if (diagnostic.length >= 240) return diagnostic.slice(0, 240);
+  const prefix = current.slice(0, Math.max(0, 239 - diagnostic.length)).replace(/[；\s]+$/g, "");
+  return prefix ? `${prefix}；${diagnostic}` : diagnostic;
+}
+
+function isPointInsideComponentFootprint(
+  position: readonly [number, number, number],
+  component: LayoutDraftComponent,
+  padding = 0.04,
+) {
+  const radians = component.rotationYDegrees * Math.PI / 180;
+  const dx = position[0] - component.position[0];
+  const dz = position[2] - component.position[2];
+  const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
+  const localZ = Math.sin(radians) * dx + Math.cos(radians) * dz;
+  return Math.abs(localX) <= component.size[0] / 2 + padding
+    && Math.abs(localZ) <= component.size[2] / 2 + padding;
+}
+
+function getSupportTopY(component: LayoutDraftComponent, groundHeight: number) {
+  // ground 的语义以场景地面顶面为准；服务返回的 ground.position.y 不参与支撑计算。
+  if (component.category === "ground") return groundHeight;
+  return component.position[1] + component.size[1];
+}
+
+function canUseBoundingBoxTopAsSupport(component: LayoutDraftComponent) {
+  return ["ground", "table", "cabinet", "prop"].includes(component.category);
+}
+
+function resolveLayoutSupportGraph(
+  components: LayoutDraftComponent[],
+  characters: LayoutDraftCharacter[],
+  groundHeight = 0,
+) {
+  const byId = new Map(components.map((component) => [component.id, component]));
+  const resolved = new Map<string, LayoutDraftComponent>();
+  const resolving = new Set<string>();
+  const cyclicSupportIds = new Set<string>();
+  components.forEach((component) => {
+    const path: string[] = [];
+    const pathIndex = new Map<string, number>();
+    let current: LayoutDraftComponent | undefined = component;
+    while (current?.supportComponentId && byId.has(current.supportComponentId)) {
+      const repeatedAt = pathIndex.get(current.id);
+      if (repeatedAt !== undefined) {
+        path.slice(repeatedAt).forEach((id) => cyclicSupportIds.add(id));
+        break;
+      }
+      pathIndex.set(current.id, path.length);
+      path.push(current.id);
+      current = byId.get(current.supportComponentId);
+    }
+  });
+
+  const resolveComponent = (id: string): LayoutDraftComponent => {
+    const cached = resolved.get(id);
+    if (cached) return cached;
+    const component = byId.get(id)!;
+    let next = component;
+    const supportId = component.supportComponentId;
+
+    if (supportId && cyclicSupportIds.has(id)) {
+      next = {
+        ...component,
+        uncertain: true,
+        notes: appendLayoutDiagnostic(component.notes, `支撑关系与 ${supportId} 构成循环，未自动调整 Y`),
+      };
+    } else if (supportId) {
+      const support = byId.get(supportId);
+      if (!support || supportId === id) {
+        next = {
+          ...component,
+          uncertain: true,
+          notes: appendLayoutDiagnostic(component.notes, supportId === id
+            ? "支撑关系引用了组件自身，未自动调整 Y"
+            : `支撑组件 ${supportId} 不存在，未自动调整 Y`),
+        };
+      } else if (resolving.has(supportId)) {
+        next = {
+          ...component,
+          uncertain: true,
+          notes: appendLayoutDiagnostic(component.notes, `支撑关系与 ${supportId} 构成循环，未自动调整 Y`),
+        };
+      } else {
+        resolving.add(id);
+        const resolvedSupport = resolveComponent(supportId);
+        resolving.delete(id);
+        if (!canUseBoundingBoxTopAsSupport(resolvedSupport)) {
+          next = {
+            ...component,
+            uncertain: true,
+            notes: appendLayoutDiagnostic(
+              component.notes,
+              `支撑组件 ${supportId} 的包围盒顶面不代表可确认承载面，未自动调整 Y`,
+            ),
+          };
+        } else if (!isPointInsideComponentFootprint(component.position, resolvedSupport)) {
+          next = {
+            ...component,
+            uncertain: true,
+            notes: appendLayoutDiagnostic(
+              component.notes,
+              `与支撑组件 ${supportId} 的水平足迹不重叠，未自动调整 Y`,
+            ),
+          };
+        } else {
+          const expectedY = getSupportTopY(resolvedSupport, groundHeight);
+          const difference = Math.abs(component.position[1] - expectedY);
+          next = {
+            ...component,
+            position: [component.position[0], expectedY, component.position[2]],
+            uncertain: component.uncertain || resolvedSupport.uncertain || difference > LAYOUT_SUPPORT_Y_TOLERANCE,
+            notes: difference > LAYOUT_SUPPORT_Y_TOLERANCE
+              ? appendLayoutDiagnostic(component.notes, `已按支撑组件 ${supportId} 顶面把 Y 从 ${component.position[1]} 修正为 ${expectedY}`)
+              : component.notes,
+          };
+        }
+      }
+    } else if (["wall", "pillar"].includes(component.category)
+      && Math.abs(component.position[1] - groundHeight) > LAYOUT_SUPPORT_Y_TOLERANCE) {
+      next = {
+        ...component,
+        uncertain: true,
+        notes: appendLayoutDiagnostic(
+          component.notes,
+          `底面 Y=${component.position[1]} 未对齐地面 ${groundHeight}；可能是合法悬空墙段/台上柱，也可能误用了几何中心 Y，待确认`,
+        ),
+      };
+    }
+
+    resolved.set(id, next);
+    return next;
+  };
+
+  components.forEach((component) => resolveComponent(component.id));
+  const resolvedComponents = components.map((component) => resolved.get(component.id) ?? component);
+  const resolvedById = new Map(resolvedComponents.map((component) => [component.id, component]));
+
+  const resolvedCharacters = characters.map((character) => {
+    const supportId = character.supportComponentId;
+    if (supportId) {
+      const support = resolvedById.get(supportId);
+      if (!support) {
+        return {
+          ...character,
+          uncertain: true,
+          notes: appendLayoutDiagnostic(character.notes, `支撑组件 ${supportId} 不存在，未自动调整人物 Y`),
+        };
+      }
+      if (!canUseBoundingBoxTopAsSupport(support)
+        || (character.posture === "sit" && ["chair", "sofa"].includes(support.category))) {
+        return {
+          ...character,
+          uncertain: true,
+          notes: appendLayoutDiagnostic(
+            character.notes,
+            `支撑组件 ${supportId} 的包围盒顶面不等于可确认座面/承载面，未自动调整人物 Y`,
+          ),
+        };
+      }
+      if (!isPointInsideComponentFootprint(character.position, support)) {
+        return {
+          ...character,
+          uncertain: true,
+          notes: appendLayoutDiagnostic(
+            character.notes,
+            `与支撑组件 ${supportId} 的水平足迹不重叠，未自动调整人物 Y`,
+          ),
+        };
+      }
+      const expectedY = getSupportTopY(support, groundHeight);
+      const difference = Math.abs(character.position[1] - expectedY);
+      return {
+        ...character,
+        position: [character.position[0], expectedY, character.position[2]] as [number, number, number],
+        uncertain: character.uncertain || support.uncertain || difference > LAYOUT_SUPPORT_Y_TOLERANCE,
+        notes: difference > LAYOUT_SUPPORT_Y_TOLERANCE
+          ? appendLayoutDiagnostic(character.notes, `已按支撑组件 ${supportId} 顶面把人物 Y 从 ${character.position[1]} 修正为 ${expectedY}`)
+          : character.notes,
+      };
+    }
+
+    // 旧草稿没有显式支撑关系时只诊断，不凭名称或邻近关系静默改位置。
+    if (!["stand", "crouch", "kneel"].includes(character.posture)) return character;
+    const nearbySupport = resolvedComponents
+      .filter((component) => ["table", "cabinet", "prop"].includes(component.category))
+      .filter((component) => isPointInsideComponentFootprint(character.position, component))
+      .map((component) => ({ component, topY: getSupportTopY(component, groundHeight) }))
+      .filter(({ topY }) => Math.abs(topY - character.position[1]) <= LAYOUT_LEGACY_SUPPORT_NEARBY_TOLERANCE)
+      .sort((left, right) => Math.abs(left.topY - character.position[1]) - Math.abs(right.topY - character.position[1]))[0];
+    if (!nearbySupport || Math.abs(nearbySupport.topY - character.position[1]) <= LAYOUT_SUPPORT_Y_TOLERANCE) {
+      return character;
+    }
+    return {
+      ...character,
+      uncertain: true,
+      notes: appendLayoutDiagnostic(
+        character.notes,
+        `人物 Y=${character.position[1]} 与近邻组件 ${nearbySupport.component.id} 顶面 Y=${nearbySupport.topY} 不一致；缺少 supportComponentId，未自动修正`,
+      ),
+    };
+  });
+
+  return { components: resolvedComponents, characters: resolvedCharacters };
 }
 
 export function validateLayoutDraftCandidate(
@@ -434,6 +681,9 @@ export function validateLayoutDraftCandidate(
       primitive: primitive as "box" | "cylinder",
       position: [...raw.position] as [number, number, number],
       size: [...raw.size] as [number, number, number],
+      supportComponentId: typeof raw.supportComponentId === "string"
+        ? boundedString(raw.supportComponentId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
+        : undefined,
       rotationYDegrees,
       confidence,
       uncertain: raw.uncertain === true || confidence < 0.65,
@@ -460,6 +710,7 @@ export function validateLayoutDraftCandidate(
   const characters = rawCharacters
     .map((raw, index) => normalizeLayoutCharacter(raw, index, seenIds))
     .filter((item): item is LayoutDraftCharacter => Boolean(item));
+  const supported = resolveLayoutSupportGraph(normalizedComponents, characters);
 
   return {
     version: 1,
@@ -471,9 +722,18 @@ export function validateLayoutDraftCandidate(
       mode: "estimated",
       confidence: scaleConfidence,
     },
-    components: carveDoorOpenings(normalizedComponents),
-    characters,
+    components: carveDoorOpenings(supported.components),
+    characters: supported.characters,
   };
+}
+
+export function getLayoutComponentRenderPosition(
+  component: LayoutDraftComponent,
+  groundHeight = 0,
+): [number, number, number] {
+  return component.category === "ground"
+    ? [component.position[0], groundHeight - component.size[1], component.position[2]]
+    : [...component.position];
 }
 
 export function calibrateLayoutDraft(
@@ -529,8 +789,24 @@ function uniqueId(base: string, used: Set<string>) {
 /** 草稿预览与正式入场共用的人物渲染适配，避免体型、姿态和身高换算分叉。 */
 export function createLayoutCharacterRenderAdapter(character: LayoutDraftCharacter) {
   const bodyType = LAYOUT_BODY_HINT_TO_BODY_TYPE[character.bodyTypeHint];
-  const posePresetId = LAYOUT_POSTURE_TO_POSE_PRESET[character.posture];
+  const posePresetId = character.posture === "kneel" && character.kneelVariant
+    ? ({ "one-knee": "kneel-one", "two-knee": "kneel-two", seiza: "seiza" } as const)[character.kneelVariant]
+    : LAYOUT_POSTURE_TO_POSE_PRESET[character.posture];
   const posePreset = MANNEQUIN_POSE_PRESETS.find((preset) => preset.id === posePresetId);
+  const handGestureControls: Record<string, number> = character.handGesture === "prayer"
+    ? {
+        "leftShoulder.pitch": 52,
+        "rightShoulder.pitch": 52,
+        "leftShoulder.spread": -24,
+        "rightShoulder.spread": 24,
+        "leftShoulder.twist": 46,
+        "rightShoulder.twist": -46,
+        "leftElbow.bend": 96,
+        "rightElbow.bend": 96,
+        "leftHand.roll": -10,
+        "rightHand.roll": 10,
+      }
+    : {};
   const canonicalHeight = getLayoutCharacterCanonicalHeight(bodyType);
   const scaleFactor = character.height / canonicalHeight;
   const rootPosition = [...character.position] as [number, number, number];
@@ -549,7 +825,7 @@ export function createLayoutCharacterRenderAdapter(character: LayoutDraftCharact
     characterRig: {
       rigType: "ue4-mannequin" as const,
       posePresetId,
-      controls: posePreset ? { ...posePreset.controls } : {},
+      controls: posePreset ? { ...posePreset.controls, ...handGestureControls } : handGestureControls,
     },
   };
 }
@@ -572,9 +848,7 @@ export function buildLayoutBatch(
       geometryType: component.primitive,
       color: LAYOUT_CATEGORY_COLORS[component.category],
       transform: {
-        position: component.category === "ground"
-          ? [component.position[0], groundHeight - component.size[1], component.position[2]]
-          : [...component.position] as [number, number, number],
+        position: getLayoutComponentRenderPosition(component, groundHeight),
         rotation: [0, component.rotationYDegrees * Math.PI / 180, 0] as [number, number, number],
         scale: [...component.size] as [number, number, number],
       },
@@ -613,6 +887,8 @@ export function buildLayoutBatch(
         uncertain: character.uncertain,
         characterMeta: {
           posture: character.posture,
+          ...(character.kneelVariant ? { kneelVariant: character.kneelVariant } : {}),
+          ...(character.handGesture ? { handGesture: character.handGesture } : {}),
           height: character.height,
         },
       },

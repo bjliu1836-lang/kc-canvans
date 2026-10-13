@@ -7,6 +7,7 @@ export const POSE_PRESET_IDS = [
   "crouch",
   "kneel-one",
   "kneel-two",
+  "seiza",
   "hands-on-hips",
   "lean",
   "bow",

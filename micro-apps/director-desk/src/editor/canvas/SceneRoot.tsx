@@ -53,6 +53,7 @@ import { constrainCameraPosition, constrainObjectMotionTransform } from "../sche
 import { getUE4GroundedLabelY } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import {
   createLayoutCharacterRenderAdapter,
+  getLayoutComponentRenderPosition,
   LAYOUT_CATEGORY_COLORS,
 } from "../schema/layoutDraft";
 import { getEffectiveGroundOpacity } from "./panoramaMath";
@@ -95,6 +96,8 @@ const LAYOUT_DRAFT_PREVIEW_STYLE: Record<DirectorLayoutCategory, {
   chair: { baseOpacity: 0.92, hoverOpacity: 1, selectedOpacity: 0.98, depthWrite: true },
   sofa: { baseOpacity: 0.92, hoverOpacity: 1, selectedOpacity: 0.98, depthWrite: true },
   cabinet: { baseOpacity: 0.92, hoverOpacity: 1, selectedOpacity: 0.98, depthWrite: true },
+  pillar: { baseOpacity: 0.84, hoverOpacity: 1, selectedOpacity: 0.96, depthWrite: true },
+  prop: { baseOpacity: 0.94, hoverOpacity: 1, selectedOpacity: 0.99, depthWrite: true },
 };
 
 export function getLayoutDraftPreviewStyle(
@@ -1745,7 +1748,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
             return (
               <group
                 key={component.id}
-                position={component.position}
+                position={getLayoutComponentRenderPosition(component, scene.groundHeight)}
                 rotation={[0, component.rotationYDegrees * Math.PI / 180, 0]}
                 scale={component.size}
               >

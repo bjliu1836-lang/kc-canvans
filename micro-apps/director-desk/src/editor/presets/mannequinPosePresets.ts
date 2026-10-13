@@ -121,6 +121,28 @@ export const MANNEQUIN_POSE_PRESETS: PosePresetDefinition[] = [
     },
   },
   {
+    id: "seiza",
+    label: "跪坐",
+    controls: {
+      "body.offsetY": -0.56,
+      "body.pitch": 1,
+      "torso.pitch": 6,
+      "head.pitch": -2,
+      "leftShoulder.pitch": -8,
+      "rightShoulder.pitch": -8,
+      "leftShoulder.spread": -5,
+      "rightShoulder.spread": 5,
+      "leftElbow.bend": 12,
+      "rightElbow.bend": 12,
+      "leftHip.pitch": 68,
+      "rightHip.pitch": 68,
+      "leftKnee.bend": 142,
+      "rightKnee.bend": 142,
+      "leftFoot.pitch": -28,
+      "rightFoot.pitch": -28,
+    },
+  },
+  {
     id: "hands-on-hips",
     label: "叉腰",
     controls: {

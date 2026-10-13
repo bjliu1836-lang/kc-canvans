@@ -6,6 +6,7 @@ import {
   EyeOff,
   ImagePlus,
   LoaderCircle,
+  Maximize2,
   Move,
   RefreshCw,
   Ruler,
@@ -35,9 +36,13 @@ import {
   LAYOUT_CHARACTER_MAX_HEIGHT,
   LAYOUT_CHARACTER_MIN_HEIGHT,
   LAYOUT_CHARACTER_POSTURES,
+  LAYOUT_HAND_GESTURES,
+  LAYOUT_KNEEL_VARIANTS,
   LayoutDraftValidationError,
   type LayoutAnchorDimension,
   type LayoutCharacterPosture,
+  type LayoutHandGesture,
+  type LayoutKneelVariant,
   type LayoutDraftCharacter,
   type LayoutDraftComponent,
 } from "../schema/layoutDraft";
@@ -54,6 +59,8 @@ const CATEGORY_LABELS: Record<LayoutDraftComponent["category"], string> = {
   chair: "椅子",
   sofa: "沙发",
   cabinet: "柜子",
+  pillar: "柱子",
+  prop: "道具",
 };
 
 const POSTURE_LABELS: Record<LayoutCharacterPosture, string> = {
@@ -63,6 +70,16 @@ const POSTURE_LABELS: Record<LayoutCharacterPosture, string> = {
   kneel: "跪姿",
   lie: "卧姿",
   unknown: "姿态未知",
+};
+
+const KNEEL_VARIANT_LABELS: Record<LayoutKneelVariant, string> = {
+  "one-knee": "单膝跪",
+  "two-knee": "双膝直身跪",
+  seiza: "跪坐（臀落脚跟）",
+};
+
+const HAND_GESTURE_LABELS: Record<LayoutHandGesture, string> = {
+  prayer: "双手合十",
 };
 
 const DIMENSION_LABELS: Record<LayoutAnchorDimension, string> = {
@@ -159,10 +176,13 @@ export function ReferenceLayoutPanel() {
   const [appliedBatchId, setAppliedBatchId] = useState<string | null>(initialRetainedPanelState.appliedBatchId);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [viewingImage, setViewingImage] = useState<ReferenceLayoutImage | null>(null);
   const [batchScale, setBatchScale] = useState("1.2");
   const [batchOffsetX, setBatchOffsetX] = useState("");
   const [batchOffsetZ, setBatchOffsetZ] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const previewButtonRef = useRef<HTMLButtonElement>(null);
+  const viewerCloseButtonRef = useRef<HTMLButtonElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
   const activeScopeRef = useRef(scopeId);
@@ -174,6 +194,12 @@ export function ReferenceLayoutPanel() {
   const selectedImage = images.find((image) => image.sourceId === selectedSourceId) ?? images[0] ?? null;
   const selectedComponent = draft?.components.find((component) => component.id === selectedComponentId) ?? null;
   const selectedCharacter = draft?.characters.find((character) => character.id === selectedCharacterId) ?? null;
+  const selectedComponentSupport = selectedComponent?.supportComponentId
+    ? draft?.components.find((component) => component.id === selectedComponent.supportComponentId) ?? null
+    : null;
+  const selectedCharacterSupport = selectedCharacter?.supportComponentId
+    ? draft?.components.find((component) => component.id === selectedCharacter.supportComponentId) ?? null
+    : null;
   const anchorPreset = selectedComponent ? LAYOUT_ANCHOR_PRESETS[selectedComponent.category] : null;
   const uncertainCount = draft?.components.filter((component) => component.uncertain).length ?? 0;
   const uncertainCharacterCount = draft?.characters.filter((character) => character.uncertain).length ?? 0;
@@ -185,11 +211,11 @@ export function ReferenceLayoutPanel() {
       : null;
   const activeBatch = replaceBatchId ? layoutBatches.find((batch) => batch.id === replaceBatchId) ?? null : null;
 
-  // 选中组件变化时，按类别预填推荐真实尺寸，用户可直接确认也可修改
+  // 选中组件变化时，旧类别预填常见尺寸；差异较大的新类别要求用户填写实测值。
   useEffect(() => {
     if (!anchorPreset) return;
     setAnchorDimension(anchorPreset.dimension);
-    setAnchorWidth(String(anchorPreset.meters));
+    setAnchorWidth(anchorPreset.meters === undefined ? "" : String(anchorPreset.meters));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedComponentId]);
 
@@ -202,6 +228,25 @@ export function ReferenceLayoutPanel() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [generating]);
+
+  useEffect(() => {
+    if (!viewingImage) return undefined;
+    viewerCloseButtonRef.current?.focus();
+    function handleViewerKeyDown(event: KeyboardEvent) {
+      event.stopPropagation();
+      if (event.key === "Tab") {
+        event.preventDefault();
+        viewerCloseButtonRef.current?.focus();
+        return;
+      }
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setViewingImage(null);
+      window.setTimeout(() => previewButtonRef.current?.focus(), 0);
+    }
+    window.addEventListener("keydown", handleViewerKeyDown, true);
+    return () => window.removeEventListener("keydown", handleViewerKeyDown, true);
+  }, [viewingImage]);
 
   // Ctrl+V 粘贴截图作为参考图（不劫持输入框内粘贴）
   useEffect(() => {
@@ -235,6 +280,7 @@ export function ReferenceLayoutPanel() {
     setSelectedSourceId(retained.selectedSourceId);
     setAppliedBatchId(retained.appliedBatchId);
     setConfirmRegenerate(false);
+    setViewingImage(null);
   }, [scopeId]);
 
   useEffect(() => {
@@ -254,6 +300,7 @@ export function ReferenceLayoutPanel() {
       setError(null);
       setConnectedImages([]);
       setConfirmRegenerate(false);
+      setViewingImage(null);
     };
     window.addEventListener(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, updateConnectedImages);
     window.addEventListener(DIRECTOR_DESK_SESSION_OPENED_EVENT, resetForInstance);
@@ -283,6 +330,12 @@ export function ReferenceLayoutPanel() {
     setAppliedBatchId(null);
     updateRetainedPanelState(scopeId, { appliedBatchId: null });
     setConfirmRegenerate(false);
+    setViewingImage(null);
+  }
+
+  function closeImageViewer() {
+    setViewingImage(null);
+    window.setTimeout(() => previewButtonRef.current?.focus(), 0);
   }
 
   async function generateLayout(forceReplaceEditedDraft = false) {
@@ -511,6 +564,7 @@ export function ReferenceLayoutPanel() {
 
   return (
     <InspectorSection title={draft ? "待应用布景" : "参考图粗布景"}>
+      <>
       <div
         className={`reference-layout-panel${dragOver ? " is-dragover" : ""}`}
         onKeyDown={(event) => event.stopPropagation()}
@@ -530,7 +584,17 @@ export function ReferenceLayoutPanel() {
         <p className="reference-layout-help">从一张图片估算地面、墙门窗和基础家具，确认后再加入当前场景。支持拖入图片或 Ctrl+V 粘贴截图。</p>
         {selectedImage ? (
           <div className="reference-layout-source-preview">
-            <img alt="当前粗布景参考图" src={selectedImage.url} />
+            <button
+              ref={previewButtonRef}
+              className="reference-layout-preview-button"
+              type="button"
+              aria-label={`查看参考图大图：${selectedImage.fileName}`}
+              title="点击查看大图"
+              onClick={() => setViewingImage(selectedImage)}
+            >
+              <img alt="当前粗布景参考图" src={selectedImage.url} />
+              <Maximize2 aria-hidden="true" size={13} />
+            </button>
             <div><strong>{selectedImage.fileName}</strong><span>{selectedImage.origin === "canvas" ? "来自画布连接" : "本地图片"}</span></div>
           </div>
         ) : null}
@@ -662,7 +726,7 @@ export function ReferenceLayoutPanel() {
                         title="人物占位"
                       />
                       <span>{character.name}</span>
-                      <small>{POSTURE_LABELS[character.posture]} · {character.height.toFixed(2)}m · {Math.round(character.confidence * 100)}%</small>
+                      <small>{character.posture === "kneel" && character.kneelVariant ? KNEEL_VARIANT_LABELS[character.kneelVariant] : POSTURE_LABELS[character.posture]} · {character.height.toFixed(2)}m · {Math.round(character.confidence * 100)}%</small>
                       {character.uncertain ? <i>待确认</i> : null}
                     </button>
                   ))}
@@ -715,11 +779,49 @@ export function ReferenceLayoutPanel() {
                         <option key={posture} value={posture}>{POSTURE_LABELS[posture]}</option>
                       ))}
                     </select>
+                    {selectedCharacter.posture === "kneel" ? (
+                      <select
+                        aria-label="跪姿细分"
+                        value={selectedCharacter.kneelVariant ?? "one-knee"}
+                        onChange={(event) => updateCharacter(selectedCharacter.id, (character) => ({
+                          ...character,
+                          kneelVariant: event.currentTarget.value as LayoutKneelVariant,
+                        }))}
+                      >
+                        {LAYOUT_KNEEL_VARIANTS.map((variant) => (
+                          <option key={variant} value={variant}>{KNEEL_VARIANT_LABELS[variant]}</option>
+                        ))}
+                      </select>
+                    ) : null}
+                    <select
+                      aria-label="手势"
+                      value={selectedCharacter.handGesture ?? ""}
+                      onChange={(event) => updateCharacter(selectedCharacter.id, (character) => ({
+                        ...character,
+                        handGesture: event.currentTarget.value
+                          ? event.currentTarget.value as LayoutHandGesture
+                          : undefined,
+                      }))}
+                    >
+                      <option value="">默认手势</option>
+                      {LAYOUT_HAND_GESTURES.map((gesture) => (
+                        <option key={gesture} value={gesture}>{HAND_GESTURE_LABELS[gesture]}</option>
+                      ))}
+                    </select>
                   </label>
                 </div>
                 <p className="reference-layout-anchor-hint">
                   占位素体按「身高 ÷ 原生长度」缩放；坐姿人物的位置 Y 即座面高度，随家具调整。
                 </p>
+                {selectedCharacter.notes || selectedCharacterSupport ? (
+                  <p
+                    className={`reference-layout-diagnostic${selectedCharacter.uncertain ? " is-warning" : ""}`}
+                    title={selectedCharacter.notes}
+                  >
+                    {selectedCharacterSupport ? <strong>支撑：{selectedCharacterSupport.name}。 </strong> : null}
+                    {selectedCharacter.notes}
+                  </p>
+                ) : null}
               </div>
             ) : selectedComponent ? (
               <div className="reference-layout-editor" aria-label={`编辑${selectedComponent.name}`}>
@@ -768,7 +870,22 @@ export function ReferenceLayoutPanel() {
                   <label>已知{DIMENSION_LABELS[anchorDimension]}（米）<input aria-label={`已知${DIMENSION_LABELS[anchorDimension]}（米）`} type="number" min="0.01" max="100" step="0.1" value={anchorWidth} onChange={(event) => setAnchorWidth(event.target.value)} /></label>
                   <button type="button" disabled={!anchorWidth} onClick={applyScaleAnchor}>校正</button>
                 </div>
-                {anchorPreset ? <p className="reference-layout-anchor-hint">已按「{anchorPreset.hint}」预填，可直接校正或改成你确知的尺寸。</p> : null}
+                {anchorPreset ? (
+                  <p className="reference-layout-anchor-hint">
+                    {anchorPreset.meters === undefined
+                      ? `${anchorPreset.hint}，请填写你确知的实测尺寸后校正。`
+                      : `已按「${anchorPreset.hint}」预填，可直接校正或改成你确知的尺寸。`}
+                  </p>
+                ) : null}
+                {selectedComponent.notes || selectedComponentSupport ? (
+                  <p
+                    className={`reference-layout-diagnostic${selectedComponent.uncertain ? " is-warning" : ""}`}
+                    title={selectedComponent.notes}
+                  >
+                    {selectedComponentSupport ? <strong>支撑：{selectedComponentSupport.name}。 </strong> : null}
+                    {selectedComponent.notes}
+                  </p>
+                ) : null}
               </div>
             ) : null}
             <div className="reference-layout-commit-row">
@@ -811,6 +928,34 @@ export function ReferenceLayoutPanel() {
           </div>
         ) : null}
       </div>
+      {viewingImage ? (
+        <div
+          aria-label={`参考图查看器：${viewingImage.fileName}`}
+          aria-modal="true"
+          className="reference-layout-image-viewer"
+          role="dialog"
+          onClick={closeImageViewer}
+          onKeyDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            ref={viewerCloseButtonRef}
+            aria-label="关闭参考图查看器"
+            className="reference-layout-image-viewer-close"
+            type="button"
+            onClick={closeImageViewer}
+          >
+            <X aria-hidden="true" size={20} />
+          </button>
+          <img
+            alt={`${viewingImage.fileName} 大图`}
+            className="reference-layout-image-viewer-image"
+            src={viewingImage.url}
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      ) : null}
+      </>
     </InspectorSection>
   );
 }

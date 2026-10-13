@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
-import { Box3, BoxGeometry, Group, Mesh, MeshStandardMaterial, SkinnedMesh } from "three";
+import { Box3, BoxGeometry, Group, Mesh, MeshStandardMaterial, SkinnedMesh, Vector3 } from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { BODY_TYPE_OPTIONS } from "./mannequin/bodyTypes";
+import { createLayoutCharacterRenderAdapter } from "../schema/layoutDraft";
 import { alignUE4MannequinToGround, isolateAndTintUE4MannequinMaterials } from "./UE4MannequinModel";
 import { getUE4ModelScale } from "./ue4Mannequin/ue4MannequinRig";
 import { applyUE4RestPoseAndRig, captureUE4RestPose } from "./ue4Mannequin/ue4MannequinPoseApplication";
@@ -111,4 +112,59 @@ it("keeps every real retopology body type grounded after right-panel style switc
 
     expect(bounds.min.y, option.label).toBeCloseTo(0, 4);
   }
+});
+
+it("grounds the real seiza mesh on the supplied cushion top through the layout adapter", async () => {
+  vi.stubGlobal("createImageBitmap", async () => ({ close: vi.fn() }));
+  const gltf = await loadRetopologyMannequin();
+  const adapter = createLayoutCharacterRenderAdapter({
+    id: "char_seiza",
+    name: "跪坐人物",
+    position: [0.4, 0.12, -0.6],
+    height: 1.62,
+    rotationYDegrees: -45,
+    posture: "kneel",
+    kneelVariant: "seiza",
+    handGesture: "prayer",
+    bodyTypeHint: "female",
+    confidence: 0.9,
+    uncertain: false,
+    visible: true,
+  });
+  const wrapper = new Group();
+  const scene = cloneSkeleton(gltf.scene) as Group;
+  const restPose = captureUE4RestPose(scene);
+  wrapper.position.set(...adapter.transform.position);
+  wrapper.rotation.set(...adapter.transform.rotation);
+  wrapper.scale.set(...adapter.transform.scale);
+  wrapper.add(scene);
+
+  applyUE4RestPoseAndRig(scene, {
+    bodyType: adapter.bodyType,
+    controls: adapter.characterRig.controls,
+    restPose,
+  });
+  alignUE4MannequinToGround(scene);
+  wrapper.updateMatrixWorld(true);
+
+  const bounds = new Box3().setFromObject(wrapper, true);
+  const bonePosition = (name: string) => {
+    const bone = scene.getObjectByName(name);
+    if (!bone) throw new Error(`缺少骨骼 ${name}`);
+    return bone.getWorldPosition(new Vector3());
+  };
+  const pelvis = bonePosition("Bip001_Pelvis_03");
+  const leftKnee = bonePosition("Bip001_L_Calf_058");
+  const rightKnee = bonePosition("Bip001_R_Calf_062");
+  const leftFoot = bonePosition("Bip001_L_Foot_059");
+  const rightFoot = bonePosition("Bip001_R_Foot_063");
+  expect(bounds.min.y).toBeCloseTo(0.12, 4);
+  expect(bounds.max.y - bounds.min.y).toBeLessThan(1.45);
+  expect(leftKnee.y - bounds.min.y).toBeLessThan(0.25);
+  expect(rightKnee.y - bounds.min.y).toBeLessThan(0.25);
+  expect(Math.abs(leftKnee.y - rightKnee.y)).toBeLessThan(0.001);
+  expect(pelvis.y - leftFoot.y).toBeLessThan(0.2);
+  expect(pelvis.y - rightFoot.y).toBeLessThan(0.2);
+  expect(Math.hypot(pelvis.x - leftFoot.x, pelvis.z - leftFoot.z)).toBeLessThan(0.12);
+  expect(Math.hypot(pelvis.x - rightFoot.x, pelvis.z - rightFoot.z)).toBeLessThan(0.12);
 });

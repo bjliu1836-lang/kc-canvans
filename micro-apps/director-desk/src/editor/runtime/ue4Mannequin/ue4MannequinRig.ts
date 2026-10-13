@@ -104,6 +104,21 @@ function ue4LimbBendRotation(
   return [0, 0, -radians(controls[key] ?? 0, bodyType)];
 }
 
+function ue4KneeBendRotation(
+  controls: Record<string, number>,
+  key: "leftKnee.bend" | "rightKnee.bend",
+  bodyType?: CharacterBodyType
+): [number, number, number] {
+  // Knees need substantially more flexion than torso, head, or arm controls.
+  // Keep the existing conservative limits for compact child/chibi rigs whose
+  // proportions can self-intersect sooner, while allowing adult knees to fold.
+  const limit = bodyType === "child" || bodyType === "chibi"
+    ? getBodyTypePoseLimit(bodyType)
+    : 165;
+  const value = Math.min(limit, Math.max(-limit, controls[key] ?? 0));
+  return [0, 0, -degreesToRadians(value)];
+}
+
 function ue4HandRotation(
   controls: Record<string, number>,
   prefix: "leftHand" | "rightHand",
@@ -338,8 +353,8 @@ export function getUE4PoseBoneRotations(
     Bip001_R_Hand_034: ue4HandRotation(controls, "rightHand", bodyType),
     Bip001_L_Thigh_057: ue4HipRotation(controls, "leftHip", bodyType),
     Bip001_R_Thigh_061: ue4HipRotation(controls, "rightHip", bodyType),
-    Bip001_L_Calf_058: ue4LimbBendRotation(controls, "leftKnee.bend", bodyType),
-    Bip001_R_Calf_062: ue4LimbBendRotation(controls, "rightKnee.bend", bodyType),
+    Bip001_L_Calf_058: ue4KneeBendRotation(controls, "leftKnee.bend", bodyType),
+    Bip001_R_Calf_062: ue4KneeBendRotation(controls, "rightKnee.bend", bodyType),
     Bip001_L_Foot_059: ue4FootRotation(controls, "leftFoot", bodyType),
     Bip001_R_Foot_063: ue4FootRotation(controls, "rightFoot", bodyType),
   };

@@ -16,7 +16,7 @@ export const GEOMETRY_PRIMITIVE_OPTIONS = [
   { type: "pyramid", label: "棱锥" },
 ] as const;
 export type GeometryPrimitiveType = (typeof GEOMETRY_PRIMITIVE_OPTIONS)[number]["type"];
-export type DirectorLayoutCategory = "ground" | "wall" | "door" | "window" | "table" | "chair" | "sofa" | "cabinet";
+export type DirectorLayoutCategory = "ground" | "wall" | "door" | "window" | "table" | "chair" | "sofa" | "cabinet" | "pillar" | "prop";
 export type CharacterRigType = "mannequin" | "ue4-mannequin" | "mixamo" | "vrm" | "custom-humanoid";
 export type CharacterBodyType =
   | "mannequin"
@@ -136,6 +136,8 @@ export interface DirectorObject {
     /** category === "character" 时携带的占位元数据（姿态与估算身高）。 */
     characterMeta?: {
       posture: "stand" | "sit" | "crouch" | "kneel" | "lie" | "unknown";
+      kneelVariant?: "one-knee" | "two-knee" | "seiza";
+      handGesture?: "prayer";
       height: number;
     };
   };
