@@ -6873,6 +6873,32 @@ textarea:focus-visible {
   pointer-events: none;
 }
 
+.pilot-take-review {
+  z-index: 60;
+}
+
+.pilot-take-review__notes {
+  position: absolute;
+  right: 18px;
+  bottom: 66px;
+  max-width: 320px;
+  padding: 8px 10px;
+  border: 1px solid rgb(255 255 255 / 0.16);
+  border-radius: 8px;
+  color: rgb(255 255 255 / 0.82);
+  background: rgb(0 0 0 / 0.62);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.pilot-take-review__notes p {
+  margin: 0;
+}
+
+.pilot-take-review__notes p + p {
+  margin-top: 5px;
+}
+
 .pilot-status {
   position: absolute;
   top: 18px;

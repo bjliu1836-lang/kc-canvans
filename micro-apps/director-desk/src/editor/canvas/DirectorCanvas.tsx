@@ -30,14 +30,14 @@ import {
 import { buildScreenshotMeta, type ScreenshotResult } from "../io/screenshotExport";
 import { useDirectorStore, type CameraShotSnapshot } from "../store/directorStore";
 import { DEFAULT_DIRECTOR_CAMERA_VIEW_SNAPSHOT } from "../schema/cameraGeometry";
-import { DEFAULT_CAMERA_MOTION_PATH, getCameraMotionPath } from "../schema/cameraMotion";
-import type { DirectorAssetRef, DirectorObject, DirectorTransform, SceneSettings } from "../schema/directorProject";
+import { createCameraMotionKeyframe, DEFAULT_CAMERA_MOTION_PATH, getCameraMotionPath, getCameraMotionSnapshot } from "../schema/cameraMotion";
+import type { DirectorAssetRef, DirectorCameraMotionKeyframe, DirectorCameraShot, DirectorObject, DirectorTransform, SceneSettings } from "../schema/directorProject";
 import { getCameraPlaybackSnapshot } from "../schema/cameraPlayback";
 import { CameraPilotController } from "../motion/CameraPilotController";
 import { MotionStudio } from "../motion/MotionStudio";
 import { ObjectMotionTransport } from "../motion/ObjectMotionTransport";
-import { PilotHud } from "../motion/PilotHud";
-import { exitPointerLockSafely, requestPointerLockSafely } from "../motion/pointerLock";
+import { PilotHud, TakeReviewHud } from "../motion/PilotHud";
+import { exitPointerLockSafely } from "../motion/pointerLock";
 import { getGroundedLabelY } from "../runtime/mannequin/bodyTypes";
 import { getUE4GroundedLabelY } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { getSceneSemanticBodyPartTarget } from "../runtime/semanticBodyTracking";
@@ -78,6 +78,102 @@ export const DEFAULT_DIRECTOR_VIEW_SNAPSHOT: CameraShotSnapshot = DEFAULT_DIRECT
 const VIEWPORT_FRAME_PADDING = 40;
 const VIEWPORT_TOOLBAR_BOTTOM_OFFSET = 40;
 const DEFAULT_VIEWPORT_TOOLBAR_HEIGHT = 44;
+export interface RecordedCameraSample {
+  elapsedMs: number;
+  snapshot: CameraShotSnapshot;
+}
+
+export interface CameraRecordingTake {
+  duration: number;
+  initialSnapshot: CameraShotSnapshot;
+  keyframes: DirectorCameraMotionKeyframe[];
+  sourceDuration: number;
+}
+
+const RECORDING_MIN_KEYFRAME_INTERVAL_MS = 240;
+const RECORDING_POSITION_EPSILON = 0.12;
+const RECORDING_DIRECTION_DOT_EPSILON = Math.cos(Math.PI / 90);
+const RECORDING_FOV_EPSILON = 0.4;
+
+function hasMeaningfulCameraChange(previous: RecordedCameraSample, next: RecordedCameraSample) {
+  const positionDistance = Math.hypot(
+    next.snapshot.position[0] - previous.snapshot.position[0],
+    next.snapshot.position[1] - previous.snapshot.position[1],
+    next.snapshot.position[2] - previous.snapshot.position[2]
+  );
+  if (positionDistance >= RECORDING_POSITION_EPSILON || Math.abs(next.snapshot.fov - previous.snapshot.fov) >= RECORDING_FOV_EPSILON) {
+    return true;
+  }
+  const previousDirection = previous.snapshot.target.map((value, index) => value - previous.snapshot.position[index]);
+  const nextDirection = next.snapshot.target.map((value, index) => value - next.snapshot.position[index]);
+  const previousLength = Math.hypot(...previousDirection);
+  const nextLength = Math.hypot(...nextDirection);
+  if (previousLength < 0.001 || nextLength < 0.001) return false;
+  const dot = previousDirection.reduce((sum, value, index) => sum + value * nextDirection[index], 0) / (previousLength * nextLength);
+  return dot < RECORDING_DIRECTION_DOT_EPSILON;
+}
+
+export function compactRecordingSamples(samples: RecordedCameraSample[]) {
+  if (samples.length <= 2) return samples;
+  const compacted = [samples[0]];
+  let stationaryCandidate: RecordedCameraSample | null = null;
+
+  for (let index = 1; index < samples.length - 1; index += 1) {
+    const sample = samples[index];
+    const previous = compacted[compacted.length - 1];
+    if (sample.elapsedMs - previous.elapsedMs < RECORDING_MIN_KEYFRAME_INTERVAL_MS) {
+      stationaryCandidate = sample;
+      continue;
+    }
+    if (!hasMeaningfulCameraChange(previous, sample)) {
+      stationaryCandidate = sample;
+      continue;
+    }
+    if (
+      stationaryCandidate
+      && stationaryCandidate.elapsedMs - previous.elapsedMs >= RECORDING_MIN_KEYFRAME_INTERVAL_MS
+      && !hasMeaningfulCameraChange(previous, stationaryCandidate)
+    ) {
+      compacted.push(stationaryCandidate);
+    }
+    compacted.push(sample);
+    stationaryCandidate = null;
+  }
+
+  const finalSample = samples[samples.length - 1];
+  if (compacted[compacted.length - 1] !== finalSample) compacted.push(finalSample);
+  return compacted;
+}
+
+export function createCameraRecordingTake({
+  activeCamera,
+  elapsedMs,
+  initialSnapshot,
+  samples,
+  sourceDuration,
+  takePrefix,
+}: {
+  activeCamera: DirectorCameraShot;
+  elapsedMs: number;
+  initialSnapshot: CameraShotSnapshot;
+  samples: RecordedCameraSample[];
+  sourceDuration: number | null;
+  takePrefix: string;
+}): CameraRecordingTake {
+  const duration = Math.max(0.5, elapsedMs / 1000);
+  const effectiveSourceDuration = sourceDuration ?? duration;
+  const keyframes = compactRecordingSamples(samples).map((sample, index) => ({
+    ...createCameraMotionKeyframe(activeCamera, `${takePrefix}_${index + 1}`, sample.snapshot),
+    time: Math.min(1, sample.elapsedMs / (duration * 1000)),
+  }));
+  if (keyframes.length === 1) keyframes.push({ ...keyframes[0], id: `${takePrefix}_2`, time: 1 });
+  return { duration, initialSnapshot, keyframes, sourceDuration: effectiveSourceDuration };
+}
+
+export function mapTakeKeyframesForSavedPath(take: CameraRecordingTake) {
+  const playbackRatio = Math.min(1, take.duration / take.sourceDuration);
+  return take.keyframes.map((keyframe) => ({ ...keyframe, time: keyframe.time * playbackRatio }));
+}
 const GIZMO_AXIS_COLORS: [string, string, string] = ["#E56C5B", "#6CDB7A", "#7AA7FF"];
 const GIZMO_VIEWPORT_SCALE = 25;
 const GIZMO_HIT_LAYER_SIZE = 80;
@@ -645,6 +741,33 @@ function PlaybackCameraSync({
   return null;
 }
 
+function TemporaryTakePlaybackSync({
+  activeCamera,
+  take,
+}: {
+  activeCamera: DirectorCameraShot;
+  take: CameraRecordingTake;
+}) {
+  const { camera } = useThree();
+
+  useFrame(() => {
+    const snapshot = getCameraMotionSnapshot(
+      {
+        ...activeCamera,
+        motionPath: {
+          ...DEFAULT_CAMERA_MOTION_PATH,
+          duration: take.duration,
+          keyframes: take.keyframes,
+        },
+      },
+      Math.min(1, getRuntimePlaybackProgress() * take.sourceDuration / take.duration)
+    );
+    applySnapshotToCamera(camera as ThreePerspectiveCamera, snapshot);
+  });
+
+  return null;
+}
+
 function FixedCameraSync({ snapshot, fovOverride }: { snapshot: CameraShotSnapshot; fovOverride: number | null }) {
   const { camera } = useThree();
   useLayoutEffect(() => applySnapshotToCamera(camera as ThreePerspectiveCamera, {
@@ -998,6 +1121,7 @@ export function DirectorCanvas() {
   const activeCamera = useDirectorStore((state) =>
     state.project.cameras.find((item) => item.id === state.project.activeCameraId) ?? state.project.cameras[0]
   );
+  const cameraMotionProgress = useDirectorStore((state) => state.cameraMotionProgress);
   const cameraMotionPlaying = useDirectorStore((state) => state.cameraMotionPlaying);
   const cameraMotionPlaybackRevision = useDirectorStore((state) => state.cameraMotionPlaybackRevision);
   const motionStudioOpen = useDirectorStore((state) => state.motionStudioOpen);
@@ -1015,6 +1139,7 @@ export function DirectorCanvas() {
     state.project.assets.find((asset) => asset.id === state.project.panoramaAssetId) as DirectorAssetRef | undefined
   );
   const recordCameraMotionSnapshot = useDirectorStore((state) => state.recordCameraMotionSnapshot);
+  const replaceCameraMotionKeyframes = useDirectorStore((state) => state.replaceCameraMotionKeyframes);
   const startCameraPilot = useDirectorStore((state) => state.startCameraPilot);
   const stopCameraPilot = useDirectorStore((state) => state.stopCameraPilot);
   const viewportFocusRequest = useDirectorStore((state) => state.viewportFocusRequest);
@@ -1037,6 +1162,13 @@ export function DirectorCanvas() {
   const [referenceVideoQuality, setReferenceVideoQuality] = useState<"720p" | "1080p">("720p");
   const [referenceVideoRendering, setReferenceVideoRendering] = useState(false);
   const [automaticViewportAspect, setAutomaticViewportAspect] = useState(16 / 9);
+  const [cameraRecording, setCameraRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [reviewTake, setReviewTake] = useState<CameraRecordingTake | null>(null);
+  const recordingStartedAtRef = useRef(0);
+  const recordingSamplesRef = useRef<RecordedCameraSample[]>([]);
+  const recordingInitialSnapshotRef = useRef<CameraShotSnapshot>(DEFAULT_DIRECTOR_VIEW_SNAPSHOT);
+  const recordingTimelineDurationRef = useRef<number | null>(null);
   const isCameraPiloting = cameraPilotMode !== "idle";
   const isCharacterRoutePlacement = Boolean(characterRoutePlacementId);
   const activeCameraMotionPath = useMemo(
@@ -1054,14 +1186,15 @@ export function DirectorCanvas() {
     () => sceneObjects.some((item) => item.kind === "character" && (item.motionPath?.keyframes?.length ?? 0) >= 2),
     [sceneObjects]
   );
-  const hasPlayableMotion = (activeCameraMotionPath?.keyframes.length ?? 0) >= 2 || hasObjectMotion;
+  const hasPlayableMotion = Boolean(reviewTake) || (activeCameraMotionPath?.keyframes.length ?? 0) >= 2 || hasObjectMotion;
   const canPreviewFinishedShot = (activeCameraMotionPath?.keyframes.length ?? 0) >= 2 || hasCharacterRoute;
   const isCameraPreviewing =
     motionStudioOpen
     && viewMode === "camera"
     && canPreviewFinishedShot
     && !isCameraPiloting;
-  const activeMotionDuration = activeCameraMotionPath?.duration ?? DEFAULT_CAMERA_MOTION_PATH.duration;
+  const activeMotionDuration = reviewTake?.sourceDuration ?? activeCameraMotionPath?.duration ?? DEFAULT_CAMERA_MOTION_PATH.duration;
+  const playbackEndProgress = reviewTake ? Math.min(1, reviewTake.duration / reviewTake.sourceDuration) : 1;
   const viewportAspectRatio = useDirectorStore((state) => state.viewportAspectRatio);
   const finishedShotFov = useDirectorStore((state) => state.finishedShotFov);
   const motionMonitorFov = useDirectorStore((state) => state.motionMonitorFov);
@@ -1143,16 +1276,17 @@ export function DirectorCanvas() {
     const uiIntervalMs = 1000 / performanceConfig.playbackUiFps;
     const tick = (now: number) => {
       const elapsed = (now - cycleStartedAt) / (activeMotionDuration * 1000);
-      if (elapsed >= 1) {
-        if (activeCameraMotionPath?.loop) {
+      if (elapsed >= playbackEndProgress) {
+        if (activeCameraMotionPath?.loop && !reviewTake && !cameraRecording) {
           cycleStartedAt = now;
           setRuntimePlaybackProgress(0);
           setCameraMotionProgress(0);
           animationFrame = requestAnimationFrame(tick);
           return;
         }
-        setCameraMotionProgress(1);
-        setCameraMotionPlaying(false);
+        setCameraMotionProgress(playbackEndProgress);
+        if (cameraRecording) finishCameraRecording();
+        else setCameraMotionPlaying(false);
         return;
       }
       setRuntimePlaybackProgress(elapsed);
@@ -1169,8 +1303,11 @@ export function DirectorCanvas() {
     activeCameraMotionPath,
     activeMotionDuration,
     cameraMotionPlaying,
+    cameraRecording,
     cameraMotionPlaybackRevision,
     hasPlayableMotion,
+    playbackEndProgress,
+    reviewTake,
     setCameraMotionPlaying,
     setCameraMotionProgress,
     performanceConfig.playbackUiFps,
@@ -1453,6 +1590,152 @@ export function DirectorCanvas() {
     }
   }
 
+  function addRecordingSample(snapshot: CameraShotSnapshot, sampledAt = performance.now()) {
+    if (!cameraRecording) return;
+    const elapsedMs = Math.max(0, sampledAt - recordingStartedAtRef.current);
+    const samples = recordingSamplesRef.current;
+    const previous = samples[samples.length - 1];
+    if (previous && elapsedMs - previous.elapsedMs < 60) return;
+    samples.push({
+      elapsedMs,
+      snapshot: {
+        fov: snapshot.fov,
+        position: [...snapshot.position],
+        target: [...snapshot.target],
+      },
+    });
+    setRecordingSeconds(elapsedMs / 1000);
+  }
+
+  function beginCameraRecording() {
+    if (!activeCamera || cameraPilotEditKeyframeId) return;
+    const initialSnapshot = viewportCameraSnapshotRef.current;
+    recordingStartedAtRef.current = performance.now();
+    recordingInitialSnapshotRef.current = {
+      fov: initialSnapshot.fov,
+      position: [...initialSnapshot.position],
+      target: [...initialSnapshot.target],
+    };
+    recordingSamplesRef.current = [{ elapsedMs: 0, snapshot: recordingInitialSnapshotRef.current }];
+    recordingTimelineDurationRef.current = hasObjectMotion ? activeMotionDuration : null;
+    setRecordingSeconds(0);
+    setReviewTake(null);
+    setCameraMotionProgress(0);
+    if (hasObjectMotion) setCameraMotionPlaying(true);
+    setCameraRecording(true);
+  }
+
+  function finishCameraRecording() {
+    if (!activeCamera || !cameraRecording) return;
+    const finishedAt = performance.now();
+    const elapsedMs = Math.max(0, finishedAt - recordingStartedAtRef.current);
+    const samples = [...recordingSamplesRef.current];
+    const lastSample = samples[samples.length - 1];
+    const currentSnapshot = viewportCameraSnapshotRef.current;
+    if (!lastSample || elapsedMs > lastSample.elapsedMs) {
+      samples.push({
+        elapsedMs,
+        snapshot: { fov: currentSnapshot.fov, position: [...currentSnapshot.position], target: [...currentSnapshot.target] },
+      });
+    }
+
+    const take = createCameraRecordingTake({
+      activeCamera,
+      elapsedMs,
+      initialSnapshot: recordingInitialSnapshotRef.current,
+      samples,
+      sourceDuration: recordingTimelineDurationRef.current,
+      takePrefix: `${activeCamera.id}_take_${Date.now()}`,
+    });
+
+    setCameraRecording(false);
+    setRecordingSeconds(elapsedMs / 1000);
+    setCameraMotionPlaying(false);
+    setCameraMotionProgress(0);
+    setReviewTake(take);
+    setViewMode("camera");
+    stopPilotSession(false);
+  }
+
+  function toggleCameraRecording() {
+    if (cameraRecording) finishCameraRecording();
+    else beginCameraRecording();
+  }
+
+  function discardCameraRecording() {
+    if (!cameraRecording) return;
+    setCameraRecording(false);
+    recordingSamplesRef.current = [];
+    recordingTimelineDurationRef.current = null;
+    setCameraMotionPlaying(false);
+    setCameraMotionProgress(0);
+    updateDirectorViewSnapshot(recordingInitialSnapshotRef.current, true);
+    setViewMode("director");
+  }
+
+  function replayOrReshootTake() {
+    if (!reviewTake) return;
+    const initialSnapshot = reviewTake.initialSnapshot;
+    setReviewTake(null);
+    setCameraMotionPlaying(false);
+    setCameraMotionProgress(0);
+    setRuntimePlaybackProgress(0);
+    updateDirectorViewSnapshot(initialSnapshot, true);
+    setViewMode("director");
+    startPilotSession();
+  }
+
+  function keepRecordedTake() {
+    if (!activeCamera || !reviewTake) return;
+    replaceCameraMotionKeyframes(
+      activeCamera.id,
+      mapTakeKeyframesForSavedPath(reviewTake),
+      reviewTake.sourceDuration
+    );
+    setReviewTake(null);
+    setCameraMotionProgress(0);
+    setCameraMotionPlaying(false);
+    setRuntimePlaybackProgress(0);
+    setViewMode("director");
+  }
+
+  function discardRecordedTake() {
+    if (!reviewTake) return;
+    updateDirectorViewSnapshot(reviewTake.initialSnapshot, true);
+    setReviewTake(null);
+    setCameraMotionPlaying(false);
+    setCameraMotionProgress(0);
+    setRuntimePlaybackProgress(0);
+    setViewMode("director");
+  }
+
+  useEffect(() => {
+    if (!reviewTake) return;
+    setRuntimePlaybackProgress(0);
+    setCameraMotionProgress(0);
+    setCameraMotionPlaying(true);
+  }, [reviewTake, setCameraMotionPlaying, setCameraMotionProgress]);
+
+  function restartTakeReviewPlayback() {
+    if (!reviewTake) return;
+    setRuntimePlaybackProgress(0);
+    setCameraMotionProgress(0);
+    setCameraMotionPlaying(true);
+  }
+
+  function toggleTakeReviewPlayback() {
+    if (!reviewTake) return;
+    if (cameraMotionPlaying) {
+      setCameraMotionPlaying(false);
+      return;
+    }
+    if (cameraMotionProgress >= playbackEndProgress - 0.0001) {
+      setRuntimePlaybackProgress(0);
+      setCameraMotionProgress(0);
+    }
+    setCameraMotionPlaying(true);
+  }
+
   function toggleSceneActionPlayback() {
     if (cameraMotionPlaying) {
       setCameraMotionPlaying(false);
@@ -1465,11 +1748,13 @@ export function DirectorCanvas() {
 
   function startPilotSession(editKeyframeId: string | null = null) {
     startCameraPilot("pilot", editKeyframeId);
-    const canvas = viewportCanvasRef.current;
-    if (canvas) void requestPointerLockSafely(canvas);
   }
 
-  function stopPilotSession() {
+  function stopPilotSession(discardActiveRecording = true) {
+    if (discardActiveRecording && cameraRecording) {
+      finishCameraRecording();
+      return;
+    }
     updateDirectorViewSnapshot(viewportCameraSnapshotRef.current, true);
     stopCameraPilot();
     void exitPointerLockSafely();
@@ -1578,12 +1863,41 @@ export function DirectorCanvas() {
             snapshotRef={viewportCameraSnapshotRef}
             onExit={stopPilotSession}
             onRecord={recordPilotSnapshot}
+            onRecordingSample={addRecordingSample}
+            onToggleRecording={toggleCameraRecording}
+            recording={cameraRecording}
             onToggleActionPlayback={toggleSceneActionPlayback}
           />
+          {reviewTake && activeCamera ? <TemporaryTakePlaybackSync activeCamera={activeCamera} take={reviewTake} /> : null}
           <Suspense fallback={null}>
             <SceneRoot />
           </Suspense>
         </Canvas>
+        {isCameraPiloting ? (
+          <PilotHud
+            lockedTargetName={lockedPilotTargetName}
+            mode={cameraPilotMode}
+            onExit={stopPilotSession}
+            onRecord={() => recordPilotSnapshot()}
+            onToggleRecording={toggleCameraRecording}
+            pointedTargetName={hoveredPilotTargetName}
+            recording={cameraRecording}
+            recordingSeconds={recordingSeconds}
+          />
+        ) : null}
+        {reviewTake ? (
+          <TakeReviewHud
+            duration={reviewTake.duration}
+            holdsLastFrame={reviewTake.duration + 0.01 < reviewTake.sourceDuration}
+            onDiscard={discardRecordedTake}
+            onKeep={keepRecordedTake}
+            onRestartPlayback={restartTakeReviewPlayback}
+            onReshoot={replayOrReshootTake}
+            onTogglePlayback={toggleTakeReviewPlayback}
+            playbackSeconds={Math.min(reviewTake.duration, cameraMotionProgress * reviewTake.sourceDuration)}
+            playing={cameraMotionPlaying}
+          />
+        ) : null}
         {isCharacterRoutePlacement ? (
           <div className="character-route-placement-hud" role="status">
             <span>正在为{sceneObjects.find((object) => object.id === characterRoutePlacementId)?.name ?? "人物"}选终点</span>
@@ -1616,7 +1930,7 @@ export function DirectorCanvas() {
         onLoadCameraSnapshot={(snapshot) => updateDirectorViewSnapshot(snapshot, true)}
         onStartPilot={startPilotSession}
       />
-      {motionStudioOpen && (activeCameraMotionPath?.keyframes.length ?? 0) >= 2 && !isCameraPiloting && !referenceVideoRendering ? (
+      {motionStudioOpen && (activeCameraMotionPath?.keyframes.length ?? 0) >= 2 && !isCameraPiloting && !reviewTake && !referenceVideoRendering ? (
         <MotionMonitor
           antialias={contextPerformanceConfig.antialias}
           aspectRatio={finishedShotAspectRatio}
@@ -1668,16 +1982,7 @@ export function DirectorCanvas() {
           </div>
         );
       })(), document.body) : null}
-      <ObjectMotionTransport />
-      {isCameraPiloting ? (
-        <PilotHud
-          lockedTargetName={lockedPilotTargetName}
-          mode={cameraPilotMode}
-          onExit={stopPilotSession}
-          onRecord={() => recordPilotSnapshot()}
-          pointedTargetName={hoveredPilotTargetName}
-        />
-      ) : null}
+      {!reviewTake ? <ObjectMotionTransport /> : null}
     </div>
   );
 }

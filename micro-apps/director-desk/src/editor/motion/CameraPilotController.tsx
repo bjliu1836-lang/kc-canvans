@@ -29,6 +29,7 @@ const PILOT_WHEEL_FOV_SENSITIVITY = 0.006;
 const PILOT_WHEEL_MAX_FOV_STEP = 0.6;
 const PILOT_MAX_FRAME_DELTA = 0.05;
 const PILOT_RAYCAST_INTERVAL_MS = 80;
+const PILOT_RECORD_SAMPLE_INTERVAL_MS = 100;
 
 export function getPilotMouseSensitivity(rotateSensitivity = DEFAULT_VIEWPORT_ROTATE_SENSITIVITY) {
   const normalizedSensitivity = normalizeViewportSensitivity(
@@ -99,12 +100,18 @@ export function CameraPilotController({
   active,
   onExit,
   onRecord,
+  onRecordingSample,
+  onToggleRecording,
+  recording,
   onToggleActionPlayback,
   snapshotRef,
 }: {
   active: boolean;
   onExit: () => void;
   onRecord: (snapshot: CameraMotionSnapshot) => void;
+  onRecordingSample: (snapshot: CameraMotionSnapshot, recordedAt: number) => void;
+  onToggleRecording: () => void;
+  recording: boolean;
   onToggleActionPlayback: () => void;
   snapshotRef: MutableRefObject<CameraMotionSnapshot>;
 }) {
@@ -148,6 +155,10 @@ export function CameraPilotController({
   const lastLockedTargetPositionRef = useRef<Vector3 | null>(null);
   const onExitRef = useRef(onExit);
   const onRecordRef = useRef(onRecord);
+  const onRecordingSampleRef = useRef(onRecordingSample);
+  const onToggleRecordingRef = useRef(onToggleRecording);
+  const recordingRef = useRef(recording);
+  const lastRecordingSampleAtRef = useRef(Number.NEGATIVE_INFINITY);
   const onToggleActionPlaybackRef = useRef(onToggleActionPlayback);
   const hadPointerLockRef = useRef(false);
   const pilotMouseSensitivity = getPilotMouseSensitivity(viewportRotateSensitivity);
@@ -168,6 +179,16 @@ export function CameraPilotController({
     lockedPointRef.current = lockedPoint ? [...lockedPoint] : null;
     lastLockedTargetPositionRef.current = null;
   }, [lockedPoint]);
+
+  useEffect(() => {
+    onRecordingSampleRef.current = onRecordingSample;
+    onToggleRecordingRef.current = onToggleRecording;
+  }, [onRecordingSample, onToggleRecording]);
+
+  useEffect(() => {
+    recordingRef.current = recording;
+    if (!recording) lastRecordingSampleAtRef.current = Number.NEGATIVE_INFINITY;
+  }, [recording]);
 
   useEffect(() => {
     onExitRef.current = onExit;
@@ -262,7 +283,14 @@ export function CameraPilotController({
 
       if (event.code === "Enter") {
         event.preventDefault();
+        if (recordingRef.current) return;
         onRecordRef.current(snapshotRef.current);
+        return;
+      }
+
+      if (event.code === "KeyR") {
+        event.preventDefault();
+        onToggleRecordingRef.current();
         return;
       }
 
@@ -446,6 +474,10 @@ export function CameraPilotController({
       target: snapshotTuple(target),
     };
     snapshotRef.current = snapshot;
+    if (recordingRef.current && now - lastRecordingSampleAtRef.current >= PILOT_RECORD_SAMPLE_INTERVAL_MS) {
+      lastRecordingSampleAtRef.current = now;
+      onRecordingSampleRef.current(snapshot, now);
+    }
   });
 
   return null;

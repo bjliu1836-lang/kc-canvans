@@ -39,11 +39,16 @@ function renderController(overrides: {
   active?: boolean;
   onExit?: () => void;
   onRecord?: (snapshot: CameraMotionSnapshot) => void;
+  onRecordingSample?: (snapshot: CameraMotionSnapshot, recordedAt: number) => void;
+  onToggleRecording?: () => void;
+  recording?: boolean;
   onToggleActionPlayback?: () => void;
 } = {}) {
   const callbacks = {
     onExit: overrides.onExit ?? vi.fn(),
     onRecord: overrides.onRecord ?? vi.fn(),
+    onRecordingSample: overrides.onRecordingSample ?? vi.fn(),
+    onToggleRecording: overrides.onToggleRecording ?? vi.fn(),
     onToggleActionPlayback: overrides.onToggleActionPlayback ?? vi.fn(),
   };
 
@@ -52,6 +57,9 @@ function renderController(overrides: {
       active={overrides.active ?? true}
       onExit={callbacks.onExit}
       onRecord={callbacks.onRecord}
+      onRecordingSample={callbacks.onRecordingSample}
+      onToggleRecording={callbacks.onToggleRecording}
+      recording={overrides.recording ?? false}
       onToggleActionPlayback={callbacks.onToggleActionPlayback}
       snapshotRef={snapshotRef}
     />
@@ -150,6 +158,28 @@ describe("CameraPilotController", () => {
 
     expect(onRecord).toHaveBeenCalledTimes(1);
     expect(onRecord).toHaveBeenCalledWith(snapshotRef.current);
+  });
+
+  it("uses R to toggle take recording while keeping Enter for manual points", () => {
+    const onToggleRecording = vi.fn();
+    const onRecord = vi.fn();
+    renderController({ onRecord, onToggleRecording });
+
+    fireEvent.keyDown(window, { code: "KeyR" });
+    fireEvent.keyDown(window, { code: "Enter" });
+
+    expect(onToggleRecording).toHaveBeenCalledOnce();
+    expect(onRecord).toHaveBeenCalledOnce();
+  });
+
+  it("samples the active camera on a bounded recording cadence", () => {
+    const onRecordingSample = vi.fn();
+    renderController({ recording: true, onRecordingSample });
+
+    act(() => frameCallback({}, 1 / 60));
+    act(() => frameCallback({}, 1 / 60));
+
+    expect(onRecordingSample).toHaveBeenCalledTimes(1);
   });
 
   it("locks the current empty-space focus with F and unlocks it with F again", () => {

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, vi } from "vitest";
 import { PerspectiveCamera, Vector3 } from "three";
 import { clearViewportCaptureHandler, requestViewportCapture } from "../io/captureBridge";
 import { getViewportAspectFrameRect } from "./viewportAspectFrame";
+import { createCameraRecordingTake, mapTakeKeyframesForSavedPath } from "./DirectorCanvas";
 
 const mockCameraPositionSet = vi.hoisted(() => vi.fn());
 const mockCameraLookAt = vi.hoisted(() => vi.fn());
@@ -241,6 +242,48 @@ vi.mock("./ViewportBackground", () => ({
 
 import App from "../../App";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
+
+it("keeps a static take at its real recorded duration", () => {
+  const camera = createInitialDirectorState().project.cameras[0];
+  const initialSnapshot = { position: [0, 2, 8] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 50 };
+  const take = createCameraRecordingTake({
+    activeCamera: camera,
+    elapsedMs: 1800,
+    initialSnapshot,
+    samples: [
+      { elapsedMs: 0, snapshot: initialSnapshot },
+      { elapsedMs: 900, snapshot: { ...initialSnapshot, position: [1, 2, 8] } },
+      { elapsedMs: 1800, snapshot: { ...initialSnapshot, position: [2, 2, 8] } },
+    ],
+    sourceDuration: null,
+    takePrefix: "static_take",
+  });
+
+  expect(take.duration).toBeCloseTo(1.8);
+  expect(take.sourceDuration).toBeCloseTo(1.8);
+  expect(take.keyframes[take.keyframes.length - 1]?.time).toBe(1);
+});
+
+it("maps an early take into the source timeline without accelerating the cast", () => {
+  const camera = createInitialDirectorState().project.cameras[0];
+  const initialSnapshot = { position: [0, 2, 8] as [number, number, number], target: [0, 1, 0] as [number, number, number], fov: 50 };
+  const take = createCameraRecordingTake({
+    activeCamera: camera,
+    elapsedMs: 3000,
+    initialSnapshot,
+    samples: [
+      { elapsedMs: 0, snapshot: initialSnapshot },
+      { elapsedMs: 3000, snapshot: { ...initialSnapshot, position: [3, 2, 8] } },
+    ],
+    sourceDuration: 6,
+    takePrefix: "performer_take",
+  });
+
+  expect(take.duration).toBe(3);
+  expect(take.sourceDuration).toBe(6);
+  const savedKeyframes = mapTakeKeyframesForSavedPath(take);
+  expect(savedKeyframes[savedKeyframes.length - 1]?.time).toBeCloseTo(0.5);
+});
 
 it("renders a live R3F viewport and director scene controls", () => {
   render(<App />);
