@@ -2,7 +2,7 @@
 
 创建：2026-10-14
 
-状态：进行中
+状态：已完成
 范围：3D 导演台的参考图识别、草稿预览和确认应用链路。目标是让可编辑的空间结构、视角和外观更接近参考图；不调用新的外部付费模型或部署。用户于 2026-10-15 另行授权将本轮相关改动提交并推送到 `origin/main`。
 
 ## 验收口径
@@ -47,8 +47,8 @@
 - [x] T07b 在隔离导演台编辑对象并保存重开，核对外观、assembly、referenceCamera 与已有相机运镜；保存前后对照证据。
   - 实现：草稿应用时将 `appearance.color` 写入对象当前可编辑 `color`；SceneRoot 对正式对象和导入模型都消费对象颜色，roughness/metalness 仍取 `layoutSource.appearance`，assembly 继续保留并渲染。
   - 验证：隔离 `desk_3` 将主供桌 X 改为 1.35、颜色改为 `#C28A52`，reload 后输入值和画面颜色均保留；对象 assembly 5 parts、batch `referenceCamera`、`cam_1` 两个运镜关键帧及位置/目标/FOV 与编辑前一致。截图：`artifacts/temple-layout-diagnosis-2026-10-13/22-altar-edited-before-reload-2026-10-15.png`、`artifacts/temple-layout-diagnosis-2026-10-13/24-altar-color-rendered-after-reopen-2026-10-15.png`。
-- [ ] T08 按用户授权审阅提交范围、提交本轮改动、推送 `origin HEAD:main` 并验证远程 `main` 指向推送提交；保留不相关脏改动。
-  - 交付核对：当前 `HEAD` 为 `295f6b9e084b89dfe6c8e2211e64e5c9472b216d`，fetch 后 `origin/main` 与之相同；执行记录待补充。
+- [x] T08 按用户授权审阅提交范围、提交本轮改动、使用 `git push origin HEAD:main` 推送并验证远程 `main` 指向推送提交；保留不相关脏改动。
+  - 交付核对：功能提交 `d7615d17eada372146d6744b7064fd1e63cb04be`（`feat(director-layout): improve reference layout fidelity`，31 个文件）由 `git push origin HEAD:main` 成功推送；推送后 `git ls-remote origin refs/heads/main` 与该提交一致。用户既存 `docs/节点分组功能清单.md` 保持未暂存；其余未提交验收图均为本轮本地中间证据。最终仓库交付 HEAD 以最终报告核验值为准。
 
 ## 外部能力边界
 
