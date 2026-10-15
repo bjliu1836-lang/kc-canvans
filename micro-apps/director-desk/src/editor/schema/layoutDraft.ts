@@ -2,6 +2,7 @@ import type {
   CharacterBodyType,
   DirectorLayoutBatch,
   DirectorLayoutCategory,
+  DirectorLayoutReferenceCamera,
   DirectorObject,
   GeometryPrimitiveType,
 } from "./directorProject";
@@ -162,6 +163,22 @@ export interface LayoutDraftComponent {
   rotationYDegrees: number;
   confidence: number;
   uncertain: boolean;
+  /** 可编辑的受限语义描述，用于选择已有程序构件或本地库，绝不承诺生成新模型。 */
+  modelDescriptor?: string;
+  appearance?: {
+    color?: string;
+    roughness?: number;
+    metalness?: number;
+    /** 局部 +Z 正面在世界中的方向，缺省时使用 rotationYDegrees。 */
+    frontDirectionDegrees?: number;
+  };
+  /** 受限声明式子部件，局部坐标和尺寸均相对组件包围盒（0..1）；最多 24 个。 */
+  assembly?: Array<{
+    primitive: "box" | "cylinder" | "sphere" | "cone" | "torus";
+    position: [number, number, number];
+    size: [number, number, number];
+    rotation?: [number, number, number];
+  }>;
   notes?: string;
   visible: boolean;
 }
@@ -179,6 +196,8 @@ export interface LayoutDraft {
     anchorWidthMeters?: number;
     anchorDimension?: LayoutAnchorDimension;
   };
+  /** 参考图的透视起始机位；无可信输入时由布局边界生成并明确标为自动取景。 */
+  referenceCamera?: DirectorLayoutReferenceCamera;
   components: LayoutDraftComponent[];
   /** 参考图识别到的人物占位；旧数据/纯布景图为空数组。 */
   characters: LayoutDraftCharacter[];
@@ -225,11 +244,110 @@ function boundedString(value: unknown, fallback: string, maxLength = 80) {
   return (text || fallback).slice(0, maxLength);
 }
 
+function normalizeLayoutAppearance(raw: unknown, fallbackDirection: number): LayoutDraftComponent["appearance"] {
+  if (!isRecord(raw)) return undefined;
+  const color = typeof raw.color === "string" && /^#[0-9a-fA-F]{6}$/.test(raw.color.trim())
+    ? raw.color.trim().toUpperCase()
+    : undefined;
+  const roughness = typeof raw.roughness === "number" && Number.isFinite(raw.roughness)
+    ? Math.min(1, Math.max(0, raw.roughness))
+    : undefined;
+  const metalness = typeof raw.metalness === "number" && Number.isFinite(raw.metalness)
+    ? Math.min(1, Math.max(0, raw.metalness))
+    : undefined;
+  const frontDirectionDegrees = typeof raw.frontDirectionDegrees === "number" && Number.isFinite(raw.frontDirectionDegrees)
+    ? raw.frontDirectionDegrees
+    : fallbackDirection;
+  return color || roughness !== undefined || metalness !== undefined || frontDirectionDegrees !== fallbackDirection
+    ? { ...(color ? { color } : {}), ...(roughness !== undefined ? { roughness } : {}), ...(metalness !== undefined ? { metalness } : {}), frontDirectionDegrees }
+    : undefined;
+}
+
+function normalizeLayoutAssembly(raw: unknown): LayoutDraftComponent["assembly"] {
+  if (!Array.isArray(raw)) return undefined;
+  const allowed = new Set(["box", "cylinder", "sphere", "cone", "torus"]);
+  if (raw.length > 24 || raw.length === 0) return undefined;
+  const parts = raw.map((part) => {
+    if (!isRecord(part) || !allowed.has(String(part.primitive)) || !isFiniteTuple3(part.position) || !isFiniteTuple3(part.size)) return [];
+    const position = part.position;
+    const size = part.size;
+    if (position.some((value) => value < 0 || value > 1) || size.some((value) => value <= 0 || value > 1)
+      || position.some((value, index) => value - size[index] / 2 < 0 || value + size[index] / 2 > 1)) return [];
+    const rotation = isFiniteTuple3(part.rotation) && part.rotation.every((value) => Math.abs(value) <= 360)
+      ? [...part.rotation] as [number, number, number]
+      : undefined;
+    const [rx, ry, rz] = (rotation ?? [0, 0, 0]).map((value) => value * Math.PI / 180);
+    const sx = Math.sin(rx), cx = Math.cos(rx), sy = Math.sin(ry), cy = Math.cos(ry), sz = Math.sin(rz), cz = Math.cos(rz);
+    const matrix = [
+      [cy * cz, -cy * sz, sy],
+      [sx * sy * cz + cx * sz, -sx * sy * sz + cx * cz, -sx * cy],
+      [-cx * sy * cz + sx * sz, cx * sy * sz + sx * cz, cx * cy],
+    ];
+    const half = matrix.map((row) => row.reduce((sum, value, axis) => sum + Math.abs(value) * size[axis] / 2, 0));
+    if (position.some((value, axis) => value - half[axis] < 0 || value + half[axis] > 1)) return [];
+    return [{ primitive: part.primitive as "box" | "cylinder" | "sphere" | "cone" | "torus", position: [...position] as [number, number, number], size: [...size] as [number, number, number], ...(rotation ? { rotation } : {}) }];
+  });
+  return parts.length === raw.length && parts.every((part) => part.length === 1) ? parts.flat() : undefined;
+}
+
 function parseJsonCandidate(value: unknown) {
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
   const withoutFence = trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   return JSON.parse(withoutFence) as unknown;
+}
+
+function getLayoutReferenceCameraFallback(components: readonly LayoutDraftComponent[]): DirectorLayoutReferenceCamera {
+  const bounds = components.reduce(
+    (current, component) => ({
+      minX: Math.min(current.minX, component.position[0] - component.size[0] / 2),
+      maxX: Math.max(current.maxX, component.position[0] + component.size[0] / 2),
+      minY: Math.min(current.minY, component.position[1]),
+      maxY: Math.max(current.maxY, component.position[1] + component.size[1]),
+      minZ: Math.min(current.minZ, component.position[2] - component.size[2] / 2),
+      maxZ: Math.max(current.maxZ, component.position[2] + component.size[2] / 2),
+    }),
+    { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity },
+  );
+  const width = Math.max(1, bounds.maxX - bounds.minX);
+  const depth = Math.max(1, bounds.maxZ - bounds.minZ);
+  const height = Math.max(1, bounds.maxY - bounds.minY);
+  const target: [number, number, number] = [
+    (bounds.minX + bounds.maxX) / 2,
+    bounds.minY + height * 0.48,
+    (bounds.minZ + bounds.maxZ) / 2,
+  ];
+  return {
+    projection: "perspective",
+    position: [target[0], target[1] + Math.max(0.7, height * 0.22), bounds.maxZ + Math.max(width, depth) * 1.15],
+    target,
+    fov: 50,
+    confidence: 0,
+    source: "bounds-fallback",
+  };
+}
+
+function normalizeLayoutReferenceCamera(raw: unknown, components: readonly LayoutDraftComponent[]): DirectorLayoutReferenceCamera {
+  if (!isRecord(raw) || !isFiniteTuple3(raw.position) || !isFiniteTuple3(raw.target)
+    || typeof raw.fov !== "number" || !Number.isFinite(raw.fov) || raw.fov < 20 || raw.fov > 100) {
+    return getLayoutReferenceCameraFallback(components);
+  }
+  const confidence = typeof raw.confidence === "number" && Number.isFinite(raw.confidence)
+    ? Math.min(1, Math.max(0, raw.confidence))
+    : 0;
+  return {
+    projection: "perspective",
+    position: [...raw.position] as [number, number, number],
+    target: [...raw.target] as [number, number, number],
+    fov: raw.fov,
+    confidence,
+    source: "model",
+  };
+}
+
+/** 兼容在本地存储中的旧草稿；缺字段时明确返回自动取景，而不伪造模型相机。 */
+export function getLayoutDraftReferenceCamera(draft: Pick<LayoutDraft, "referenceCamera" | "components">): DirectorLayoutReferenceCamera {
+  return draft.referenceCamera ?? getLayoutReferenceCameraFallback(draft.components);
 }
 
 function normalizeHalfTurnDifference(left: number, right: number) {
@@ -426,6 +544,31 @@ function canUseBoundingBoxTopAsSupport(component: LayoutDraftComponent) {
   return ["ground", "table", "cabinet", "prop"].includes(component.category);
 }
 
+function isOpeningAttachedToWall(opening: LayoutDraftComponent, walls: readonly LayoutDraftComponent[]) {
+  return walls.some((wall) => {
+    if (normalizeHalfTurnDifference(opening.rotationYDegrees, wall.rotationYDegrees) > 18) return false;
+    const radians = wall.rotationYDegrees * Math.PI / 180;
+    const dx = opening.position[0] - wall.position[0];
+    const dz = opening.position[2] - wall.position[2];
+    const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
+    const localZ = Math.sin(radians) * dx + Math.cos(radians) * dz;
+    return Math.abs(localX) + opening.size[0] / 2 <= wall.size[0] / 2 + 0.12
+      && Math.abs(localZ) <= (wall.size[2] + opening.size[2]) / 2 + 0.18;
+  });
+}
+
+function appendOpeningAttachmentDiagnostics(components: LayoutDraftComponent[]) {
+  const walls = components.filter((component) => component.category === "wall");
+  return components.map((component) => {
+    if (!["door", "window"].includes(component.category) || isOpeningAttachedToWall(component, walls)) return component;
+    return {
+      ...component,
+      uncertain: true,
+      notes: appendLayoutDiagnostic(component.notes, `${component.category === "door" ? "门" : "窗"}未依附可识别墙面，待确认位置与朝向`),
+    };
+  });
+}
+
 function resolveLayoutSupportGraph(
   components: LayoutDraftComponent[],
   characters: LayoutDraftCharacter[],
@@ -516,6 +659,17 @@ function resolveLayoutSupportGraph(
         }
       }
     } else if (["wall", "pillar"].includes(component.category)
+      && Math.abs(component.position[1] - (groundHeight + component.size[1] / 2)) <= LAYOUT_SUPPORT_Y_TOLERANCE) {
+      next = {
+        ...component,
+        position: [component.position[0], groundHeight, component.position[2]],
+        uncertain: true,
+        notes: appendLayoutDiagnostic(
+          component.notes,
+          `检测到旧版几何中心 Y=${component.position[1]}，已按底部中心语义修正为 ${groundHeight}`,
+        ),
+      };
+    } else if (["wall", "pillar"].includes(component.category)
       && Math.abs(component.position[1] - groundHeight) > LAYOUT_SUPPORT_Y_TOLERANCE) {
       next = {
         ...component,
@@ -532,7 +686,9 @@ function resolveLayoutSupportGraph(
   };
 
   components.forEach((component) => resolveComponent(component.id));
-  const resolvedComponents = components.map((component) => resolved.get(component.id) ?? component);
+  const resolvedComponents = appendOpeningAttachmentDiagnostics(
+    components.map((component) => resolved.get(component.id) ?? component),
+  );
   const resolvedById = new Map(resolvedComponents.map((component) => [component.id, component]));
 
   const resolvedCharacters = characters.map((character) => {
@@ -653,6 +809,9 @@ export function validateLayoutDraftCandidate(
     if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
       issues.push(`${label}的置信度必须在 0 到 1 之间`);
     }
+    if (raw.assembly !== undefined && !normalizeLayoutAssembly(raw.assembly)) {
+      issues.push(`${label}的 assembly 必须是父组件包围盒内最多 24 个轴对齐受限子件`);
+    }
 
     const baseId = boundedString(raw.id, `item_${String(index + 1).padStart(2, "0")}`, 48)
       .replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -687,6 +846,9 @@ export function validateLayoutDraftCandidate(
       rotationYDegrees,
       confidence,
       uncertain: raw.uncertain === true || confidence < 0.65,
+      modelDescriptor: boundedString(raw.modelDescriptor, "", 120) || undefined,
+      appearance: normalizeLayoutAppearance(raw.appearance, rotationYDegrees),
+      assembly: normalizeLayoutAssembly(raw.assembly),
       notes: boundedString(raw.notes, "", 240) || undefined,
       visible: raw.visible !== false,
     };
@@ -722,6 +884,7 @@ export function validateLayoutDraftCandidate(
       mode: "estimated",
       confidence: scaleConfidence,
     },
+    referenceCamera: normalizeLayoutReferenceCamera(parsed.referenceCamera, supported.components),
     components: carveDoorOpenings(supported.components),
     characters: supported.characters,
   };
@@ -732,8 +895,14 @@ export function getLayoutComponentRenderPosition(
   groundHeight = 0,
 ): [number, number, number] {
   return component.category === "ground"
-    ? [component.position[0], groundHeight - component.size[1], component.position[2]]
+    // 让参考地面顶面比编辑器默认 ground plane 高 2mm，避免预览/应用时 z-fighting 而只看见蓝色网格。
+    ? [component.position[0], groundHeight - component.size[1] + 0.002, component.position[2]]
     : [...component.position];
+}
+
+/** 外观语义中的局部 +Z 正面优先于通用 yaw，供预览与正式对象共用。 */
+export function getLayoutComponentRotationYDegrees(component: Pick<LayoutDraftComponent, "rotationYDegrees" | "appearance">) {
+  return component.appearance?.frontDirectionDegrees ?? component.rotationYDegrees;
 }
 
 export function calibrateLayoutDraft(
@@ -771,6 +940,11 @@ export function calibrateLayoutDraft(
       position: character.position.map((value) => value * factor) as [number, number, number],
       height: character.height * factor,
     })),
+    referenceCamera: {
+      ...getLayoutDraftReferenceCamera(draft),
+      position: getLayoutDraftReferenceCamera(draft).position.map((value) => value * factor) as [number, number, number],
+      target: getLayoutDraftReferenceCamera(draft).target.map((value) => value * factor) as [number, number, number],
+    },
   };
 }
 
@@ -846,10 +1020,10 @@ export function buildLayoutBatch(
       visible: component.visible,
       locked: false,
       geometryType: component.primitive,
-      color: LAYOUT_CATEGORY_COLORS[component.category],
+      color: component.appearance?.color ?? LAYOUT_CATEGORY_COLORS[component.category],
       transform: {
         position: getLayoutComponentRenderPosition(component, groundHeight),
-        rotation: [0, component.rotationYDegrees * Math.PI / 180, 0] as [number, number, number],
+        rotation: [0, getLayoutComponentRotationYDegrees(component) * Math.PI / 180, 0] as [number, number, number],
         scale: [...component.size] as [number, number, number],
       },
       layoutSource: {
@@ -861,6 +1035,9 @@ export function buildLayoutBatch(
         category: component.category,
         confidence: component.confidence,
         uncertain: component.uncertain,
+        ...(component.modelDescriptor ? { modelDescriptor: component.modelDescriptor } : {}),
+        ...(component.appearance ? { appearance: { ...component.appearance } } : {}),
+        ...(component.assembly ? { assembly: component.assembly.map((part) => ({ ...part, position: [...part.position] as [number, number, number], size: [...part.size] as [number, number, number], ...(part.rotation ? { rotation: [...part.rotation] as [number, number, number] } : {}) })) } : {}),
       },
     } satisfies DirectorObject;
   });
@@ -907,6 +1084,7 @@ export function buildLayoutBatch(
       createdAt: draft.createdAt,
       scale: { ...draft.scale },
       objectIds: allObjects.map((object) => object.id),
+      referenceCamera: { ...getLayoutDraftReferenceCamera(draft) },
     },
   };
 }

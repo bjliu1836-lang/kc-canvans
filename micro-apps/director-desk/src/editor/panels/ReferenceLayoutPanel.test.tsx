@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, vi } from "vitest";
 import { DIRECTOR_DESK_REFERENCE_IMAGES_EVENT } from "../io/hostBridge";
 import { getUE4SeatedPelvisSupportHeight } from "../runtime/ue4Mannequin/ue4MannequinRig";
+import { getCameraViewSnapshotFromShot } from "../schema/cameraGeometry";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
 import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
 import { ReferenceLayoutPanel } from "./ReferenceLayoutPanel";
@@ -108,6 +109,56 @@ it("edits a controlled layout fixture in preview and commits it as one generated
   expect(useDirectorStore.getState().undoStack).toHaveLength(1);
 
   window.removeEventListener("keydown", windowKeydown);
+});
+
+it("keeps the inferred reference framing when applying from reference-camera preview", async () => {
+  const user = userEvent.setup();
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ draft: {
+      ...fixtureDraft,
+      referenceCamera: { projection: "perspective", position: [0, 2.1, 10], target: [0, 1.2, -2.8], fov: 48, confidence: 0.35, source: "model" },
+    } }),
+  })));
+  render(<ReferenceLayoutPanel />);
+  act(() => {
+    window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+      detail: {
+        instanceId: "desk_reference_camera",
+        images: [{ edgeId: "edge_reference", sourceNodeId: "image_reference", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "寺庙.png" }],
+      },
+    }));
+  });
+
+  await user.click(await screen.findByRole("button", { name: "生成粗布景" }));
+  const previewButton = screen.getByTitle("按同一推断机位查看可编辑草稿");
+  await user.click(previewButton);
+  expect(useDirectorStore.getState().referenceCameraPreview).toMatchObject({
+    position: [0, 2.1, 10],
+    target: [0, 1.2, -2.8],
+    fov: 48,
+  });
+  expect(useDirectorStore.getState().viewMode).toBe("director");
+  await user.click(screen.getByTitle("退出参考机位预览"));
+  expect(useDirectorStore.getState().referenceCameraPreview).toBeNull();
+  await user.click(screen.getByTitle("按同一推断机位查看可编辑草稿"));
+
+  await user.click(screen.getByRole("button", { name: "添加到当前场景" }));
+  await waitFor(() => expect(useDirectorStore.getState().viewMode).toBe("camera"));
+  const state = useDirectorStore.getState();
+  expect(state.referenceCameraPreview).toBeNull();
+  expect(state.project.activeCameraId).toBe(state.project.layoutBatches?.[0]?.referenceCameraId);
+  expect(state.project.cameras.find((camera) => camera.id === state.project.activeCameraId)).toMatchObject({
+    fov: expect.any(Number),
+    motionPath: { keyframes: [] },
+  });
+  const appliedCamera = state.project.cameras.find((camera) => camera.id === state.project.activeCameraId)!;
+  expect(getCameraViewSnapshotFromShot(appliedCamera)).toMatchObject({
+    position: [0, 2.1, 10],
+    target: [0, 1.2, -2.8],
+    fov: 48,
+  });
 });
 
 it("requires measured scale values for pillar and prop while preserving legacy category presets", async () => {

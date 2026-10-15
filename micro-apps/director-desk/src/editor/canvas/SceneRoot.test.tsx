@@ -271,11 +271,12 @@ it("keeps draft furniture visually stronger than enclosing walls and ground", ()
 
 it("renders outlined layout draft components only in the interactive viewport", () => {
   useLayoutDraftPreviewStore.getState().setDraft(layoutDraftFixture);
+  useLayoutDraftPreviewStore.setState({ selectedComponentId: null, hoveredComponentId: null });
 
   const { container, rerender } = render(<SceneRoot />);
   expect(container.querySelector('group[name="layout-draft-preview"]')).toBeInTheDocument();
-  expect(screen.getAllByTestId("layout-draft-outline")).toHaveLength(3);
-  expect(screen.getAllByTestId("layout-draft-outline")[0]).toHaveAttribute("data-threshold", "15");
+  // 普通草稿组件不再各自生成 Edges；只在 hover/selected 时显示轮廓。
+  expect(screen.queryAllByTestId("layout-draft-outline")).toHaveLength(0);
   expect(container.querySelector('mesh[name="sofa-layout-draft-mesh"] meshstandardmaterial')).toHaveAttribute("opacity", "0.92");
 
   rerender(<SceneRoot renderMode="clean-camera" />);
@@ -595,6 +596,41 @@ it("renders added geometry primitives as light blue-white models", () => {
   expect(container.querySelector('mesh[name="geometry-sphere"]')).toBeInTheDocument();
   expect(container.querySelector("spheregeometry")).toBeInTheDocument();
   expect(container.querySelector('meshstandardmaterial[color="#d7e7ff"]')).toBeInTheDocument();
+});
+
+it("renders an applied layout object's editable color while keeping its source material properties", () => {
+  const draft: LayoutDraft = {
+    version: 1,
+    id: "draft_color_render",
+    sourceId: "image_color_render",
+    sourceFileName: "餐厅.png",
+    createdAt: "2026-10-15T00:00:00.000Z",
+    scale: { mode: "estimated", confidence: 0.4 },
+    components: [{
+      id: "table",
+      name: "餐桌",
+      category: "wall",
+      primitive: "box",
+      position: [0, 0, 0],
+      size: [1, 1, 1],
+      rotationYDegrees: 0,
+      confidence: 0.8,
+      uncertain: false,
+      visible: true,
+      appearance: { color: "#6A4729", roughness: 0.42, metalness: 0.08 },
+    }],
+    characters: [],
+  };
+  const applied = useDirectorStore.getState().applyLayoutDraft({ draft, mode: "append" });
+  const id = applied.objectIds[0];
+  const { container, rerender } = render(<SceneRoot />);
+
+  expect(container.querySelector('meshstandardmaterial[color="#6A4729"]')).toHaveAttribute("roughness", "0.42");
+  useDirectorStore.getState().updateObjectColor(id, "#C28A52");
+  rerender(<SceneRoot />);
+
+  expect(container.querySelector('meshstandardmaterial[color="#C28A52"]')).toHaveAttribute("roughness", "0.42");
+  expect(container.querySelector('meshstandardmaterial[color="#6A4729"]')).not.toBeInTheDocument();
 });
 
 it("does not render name labels above geometry primitives", () => {

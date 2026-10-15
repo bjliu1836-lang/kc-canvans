@@ -48,6 +48,40 @@ const validDraft = {
   }],
 };
 
+const layoutEnv = { ...baseEnv, DIRECTOR_LAYOUT_API_KEY: 'test-key' };
+
+test('director-layout accepts an assembly whose rotated bounds remain inside its parent component', async (t) => {
+  const token = await login();
+  const rotatedDraft = structuredClone(validDraft);
+  rotatedDraft.components[0].assembly = [{ primitive: 'box', position: [0.5, 0.5, 0.5], size: [0.4, 0.2, 0.2], rotation: [0, 0, 45] }];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(rotatedDraft) } }] });
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const response = await call('/api/director-layout', { method: 'POST', token, env: layoutEnv, body: { image: { url: 'data:image/png;base64,AA==' } } });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).draft, rotatedDraft);
+});
+
+test('director-layout rejects a rotated assembly that escapes its parent bounds and requests one correction', async (t) => {
+  const token = await login();
+  let modelCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    modelCalls += 1;
+    if (modelCalls === 1) {
+      const invalid = structuredClone(validDraft);
+      invalid.components[0].assembly = [{ primitive: 'box', position: [0.12, 0.5, 0.5], size: [0.4, 0.2, 0.2], rotation: [0, 0, 45] }];
+      return Response.json({ choices: [{ message: { content: JSON.stringify(invalid) } }] });
+    }
+    assert.match(JSON.parse(init.body).messages[1].content[1].text, /assembly/);
+    return Response.json({ choices: [{ message: { content: JSON.stringify(validDraft) } }] });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const response = await call('/api/director-layout', { method: 'POST', token, env: layoutEnv, body: { image: { url: 'data:image/png;base64,AA==' } } });
+  assert.equal(response.status, 200);
+  assert.equal(modelCalls, 2);
+});
+
 test('director-layout route requires authentication', async () => {
   const response = await call('/api/director-layout', { method: 'POST', body: {} });
   assert.equal(response.status, 401);

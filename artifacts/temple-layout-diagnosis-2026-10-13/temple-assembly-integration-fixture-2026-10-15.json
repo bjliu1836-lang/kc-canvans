@@ -1,0 +1,853 @@
+{
+  "scale": {
+    "mode": "estimated",
+    "confidence": 0.45
+  },
+  "components": [
+    {
+      "id": "ground_01",
+      "name": "石砖地面",
+      "category": "ground",
+      "primitive": "box",
+      "position": [
+        0,
+        -0.05,
+        0
+      ],
+      "size": [
+        12,
+        0.1,
+        10
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.9,
+      "uncertain": false,
+      "notes": "室内地面，作为统一尺度基准",
+      "visible": true,
+      "modelDescriptor": "石砖地面",
+      "appearance": {
+        "color": "#8FA3C4",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "wall_back_01",
+      "name": "后墙",
+      "category": "wall",
+      "primitive": "box",
+      "position": [
+        0,
+        1.5,
+        -4.5
+      ],
+      "size": [
+        12,
+        3,
+        0.2
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.8,
+      "uncertain": false,
+      "notes": "佛龛所在后墙",
+      "visible": true,
+      "modelDescriptor": "后墙",
+      "appearance": {
+        "color": "#8FA3C4",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "wall_left_01",
+      "name": "左侧墙",
+      "category": "wall",
+      "primitive": "box",
+      "position": [
+        -6,
+        1.5,
+        0
+      ],
+      "size": [
+        0.2,
+        3,
+        10
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.7,
+      "uncertain": false,
+      "notes": "左侧带窗墙面",
+      "visible": true,
+      "modelDescriptor": "左侧墙",
+      "appearance": {
+        "color": "#8FA3C4",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "window_left_01",
+      "name": "左侧木格窗",
+      "category": "window",
+      "primitive": "box",
+      "position": [
+        -5.85,
+        1.6,
+        -1.5
+      ],
+      "size": [
+        0.1,
+        2.2,
+        3.5
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.75,
+      "uncertain": false,
+      "notes": "依附左侧墙，透出室外树木",
+      "visible": true,
+      "modelDescriptor": "左侧木格窗",
+      "appearance": {
+        "color": "#8FA3C4",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "pillar_01",
+      "name": "左侧立柱",
+      "category": "pillar",
+      "primitive": "cylinder",
+      "position": [
+        -3.2,
+        0,
+        -1
+      ],
+      "size": [
+        0.45,
+        3,
+        0.45
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.85,
+      "uncertain": false,
+      "notes": "从地面延伸到顶面的木柱",
+      "visible": true,
+      "modelDescriptor": "左侧立柱",
+      "appearance": {
+        "color": "#8FA3C4",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "cabinet_altar_01",
+      "name": "主供桌",
+      "category": "cabinet",
+      "primitive": "box",
+      "position": [
+        1.2,
+        0,
+        -3.2
+      ],
+      "size": [
+        5,
+        1,
+        0.9
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.85,
+      "uncertain": false,
+      "notes": "后墙前长条供桌，开放面朝 +Z",
+      "visible": true,
+      "modelDescriptor": "主供桌",
+      "appearance": {
+        "color": "#6A4729",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      },
+      "assembly": [
+        {
+          "primitive": "box",
+          "position": [
+            0.5,
+            0.88,
+            0.5
+          ],
+          "size": [
+            0.96,
+            0.12,
+            0.86
+          ]
+        },
+        {
+          "primitive": "box",
+          "position": [
+            0.12,
+            0.42,
+            0.15
+          ],
+          "size": [
+            0.12,
+            0.78,
+            0.12
+          ]
+        },
+        {
+          "primitive": "box",
+          "position": [
+            0.88,
+            0.42,
+            0.15
+          ],
+          "size": [
+            0.12,
+            0.78,
+            0.12
+          ]
+        },
+        {
+          "primitive": "box",
+          "position": [
+            0.12,
+            0.42,
+            0.85
+          ],
+          "size": [
+            0.12,
+            0.78,
+            0.12
+          ]
+        },
+        {
+          "primitive": "box",
+          "position": [
+            0.88,
+            0.42,
+            0.85
+          ],
+          "size": [
+            0.12,
+            0.78,
+            0.12
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cabinet_altar_02",
+      "name": "供桌上层台面",
+      "category": "cabinet",
+      "primitive": "box",
+      "position": [
+        1.2,
+        1,
+        -3.2
+      ],
+      "size": [
+        4.6,
+        0.15,
+        0.8
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.8,
+      "uncertain": false,
+      "notes": "供桌上方承载佛像与供器的台面",
+      "visible": true,
+      "modelDescriptor": "供桌上层台面",
+      "appearance": {
+        "color": "#6A4729",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "cabinet_side_01",
+      "name": "左侧边柜",
+      "category": "cabinet",
+      "primitive": "box",
+      "position": [
+        -4.8,
+        0,
+        -2.8
+      ],
+      "size": [
+        1.8,
+        0.9,
+        0.7
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.7,
+      "uncertain": false,
+      "notes": "左侧靠墙矮柜",
+      "visible": true,
+      "modelDescriptor": "左侧边柜",
+      "appearance": {
+        "color": "#6A4729",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "prop_buddha_01",
+      "name": "佛像",
+      "category": "prop",
+      "primitive": "box",
+      "position": [
+        1.8,
+        1.15,
+        -3.6
+      ],
+      "size": [
+        1.6,
+        1.8,
+        0.8
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.8,
+      "uncertain": false,
+      "notes": "位于供桌上层台面，作为背景佛像占位",
+      "visible": true,
+      "modelDescriptor": "佛像",
+      "appearance": {
+        "color": "#C9A850",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      },
+      "assembly": [
+        {
+          "primitive": "box",
+          "position": [
+            0.5,
+            0.12,
+            0.5
+          ],
+          "size": [
+            0.9,
+            0.24,
+            0.7
+          ]
+        },
+        {
+          "primitive": "cylinder",
+          "position": [
+            0.5,
+            0.48,
+            0.5
+          ],
+          "size": [
+            0.4,
+            0.55,
+            0.32
+          ]
+        },
+        {
+          "primitive": "sphere",
+          "position": [
+            0.5,
+            0.82,
+            0.5
+          ],
+          "size": [
+            0.3,
+            0.3,
+            0.3
+          ]
+        },
+        {
+          "primitive": "cylinder",
+          "position": [
+            0.32,
+            0.48,
+            0.5
+          ],
+          "size": [
+            0.12,
+            0.42,
+            0.12
+          ],
+          "rotation": [
+            0,
+            0,
+            25
+          ]
+        },
+        {
+          "primitive": "cylinder",
+          "position": [
+            0.68,
+            0.48,
+            0.5
+          ],
+          "size": [
+            0.12,
+            0.42,
+            0.12
+          ],
+          "rotation": [
+            0,
+            0,
+            -25
+          ]
+        },
+        {
+          "primitive": "cylinder",
+          "position": [
+            0.38,
+            0.27,
+            0.58
+          ],
+          "size": [
+            0.18,
+            0.3,
+            0.24
+          ],
+          "rotation": [
+            0,
+            0,
+            35
+          ]
+        },
+        {
+          "primitive": "cylinder",
+          "position": [
+            0.62,
+            0.27,
+            0.58
+          ],
+          "size": [
+            0.18,
+            0.3,
+            0.24
+          ],
+          "rotation": [
+            0,
+            0,
+            -35
+          ]
+        }
+      ]
+    },
+    {
+      "id": "prop_incense_01",
+      "name": "大香炉",
+      "category": "prop",
+      "primitive": "cylinder",
+      "position": [
+        0.2,
+        0.55,
+        -2.2
+      ],
+      "size": [
+        0.8,
+        0.7,
+        0.8
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.8,
+      "uncertain": false,
+      "notes": "位于小供桌上，有香火",
+      "visible": true,
+      "modelDescriptor": "大香炉",
+      "appearance": {
+        "color": "#C9A850",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      },
+      "assembly": [
+        {
+          "primitive": "cylinder",
+          "position": [
+            0.5,
+            0.38,
+            0.5
+          ],
+          "size": [
+            0.7,
+            0.55,
+            0.7
+          ]
+        },
+        {
+          "primitive": "torus",
+          "position": [
+            0.5,
+            0.67,
+            0.5
+          ],
+          "size": [
+            0.8,
+            0.12,
+            0.8
+          ]
+        },
+        {
+          "primitive": "torus",
+          "position": [
+            0.18,
+            0.42,
+            0.5
+          ],
+          "size": [
+            0.14,
+            0.14,
+            0.32
+          ],
+          "rotation": [
+            0,
+            0,
+            90
+          ]
+        },
+        {
+          "primitive": "torus",
+          "position": [
+            0.82,
+            0.42,
+            0.5
+          ],
+          "size": [
+            0.14,
+            0.14,
+            0.32
+          ],
+          "rotation": [
+            0,
+            0,
+            90
+          ]
+        },
+        {
+          "primitive": "cylinder",
+          "position": [
+            0.25,
+            0.08,
+            0.25
+          ],
+          "size": [
+            0.12,
+            0.16,
+            0.12
+          ]
+        },
+        {
+          "primitive": "cylinder",
+          "position": [
+            0.75,
+            0.08,
+            0.25
+          ],
+          "size": [
+            0.12,
+            0.16,
+            0.12
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cabinet_small_altar_01",
+      "name": "小供桌",
+      "category": "cabinet",
+      "primitive": "box",
+      "position": [
+        0.2,
+        0,
+        -2.2
+      ],
+      "size": [
+        0.9,
+        0.55,
+        0.6
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.75,
+      "uncertain": false,
+      "notes": "承载大香炉的小桌",
+      "visible": true,
+      "modelDescriptor": "小供桌",
+      "appearance": {
+        "color": "#6A4729",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "prop_vase_01",
+      "name": "白瓷花瓶",
+      "category": "prop",
+      "primitive": "cylinder",
+      "position": [
+        -0.8,
+        1.15,
+        -3.4
+      ],
+      "size": [
+        0.35,
+        0.6,
+        0.35
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.7,
+      "uncertain": false,
+      "notes": "供桌左侧花瓶",
+      "visible": true,
+      "modelDescriptor": "白瓷花瓶",
+      "appearance": {
+        "color": "#C9A850",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "prop_vase_02",
+      "name": "白瓷花瓶",
+      "category": "prop",
+      "primitive": "cylinder",
+      "position": [
+        3.8,
+        1.15,
+        -3.4
+      ],
+      "size": [
+        0.35,
+        0.6,
+        0.35
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.7,
+      "uncertain": false,
+      "notes": "供桌右侧花瓶",
+      "visible": true,
+      "modelDescriptor": "白瓷花瓶",
+      "appearance": {
+        "color": "#C9A850",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "prop_candle_01",
+      "name": "烛台",
+      "category": "prop",
+      "primitive": "cylinder",
+      "position": [
+        0.8,
+        1.15,
+        -3.4
+      ],
+      "size": [
+        0.15,
+        0.8,
+        0.15
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.65,
+      "uncertain": false,
+      "notes": "供桌左侧烛台",
+      "visible": true,
+      "modelDescriptor": "烛台",
+      "appearance": {
+        "color": "#C9A850",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "prop_candle_02",
+      "name": "烛台",
+      "category": "prop",
+      "primitive": "cylinder",
+      "position": [
+        2.8,
+        1.15,
+        -3.4
+      ],
+      "size": [
+        0.15,
+        0.8,
+        0.15
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.65,
+      "uncertain": false,
+      "notes": "供桌右侧烛台",
+      "visible": true,
+      "modelDescriptor": "烛台",
+      "appearance": {
+        "color": "#C9A850",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "prop_lantern_01",
+      "name": "落地灯",
+      "category": "prop",
+      "primitive": "box",
+      "position": [
+        -4.2,
+        0,
+        -1.8
+      ],
+      "size": [
+        0.4,
+        1.2,
+        0.4
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.6,
+      "uncertain": true,
+      "notes": "左侧发光落地灯，位置估计",
+      "visible": true,
+      "modelDescriptor": "落地灯",
+      "appearance": {
+        "color": "#C9A850",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "prop_cushion_01",
+      "name": "坐垫",
+      "category": "prop",
+      "primitive": "box",
+      "position": [
+        -0.6,
+        0.06,
+        0.2
+      ],
+      "size": [
+        0.9,
+        0.12,
+        0.9
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.8,
+      "uncertain": false,
+      "notes": "人物跪坐的坐垫",
+      "visible": true,
+      "modelDescriptor": "坐垫",
+      "appearance": {
+        "color": "#C9A850",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "prop_cushion_02",
+      "name": "空坐垫",
+      "category": "prop",
+      "primitive": "box",
+      "position": [
+        -2.2,
+        0.06,
+        0.8
+      ],
+      "size": [
+        0.9,
+        0.12,
+        0.9
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.7,
+      "uncertain": false,
+      "notes": "左侧空坐垫",
+      "visible": true,
+      "modelDescriptor": "空坐垫",
+      "appearance": {
+        "color": "#C9A850",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    },
+    {
+      "id": "prop_cushion_03",
+      "name": "空坐垫",
+      "category": "prop",
+      "primitive": "box",
+      "position": [
+        -3.5,
+        0.06,
+        1.8
+      ],
+      "size": [
+        0.9,
+        0.12,
+        0.9
+      ],
+      "rotationYDegrees": 0,
+      "confidence": 0.6,
+      "uncertain": true,
+      "notes": "左下角部分可见坐垫",
+      "visible": true,
+      "modelDescriptor": "空坐垫",
+      "appearance": {
+        "color": "#C9A850",
+        "roughness": 0.55,
+        "metalness": 0.08,
+        "frontDirectionDegrees": 0
+      }
+    }
+  ],
+  "characters": [
+    {
+      "id": "char_01",
+      "name": "礼佛女子",
+      "position": [
+        -0.6,
+        0.12,
+        0.2
+      ],
+      "height": 1.65,
+      "rotationYDegrees": 180,
+      "posture": "kneel",
+      "kneelVariant": "seiza",
+      "handGesture": "prayer",
+      "bodyTypeHint": "female",
+      "confidence": 0.85,
+      "uncertain": false,
+      "notes": "跪坐在坐垫上，双手合十，面朝后墙佛像",
+      "visible": true
+    }
+  ],
+  "version": 1,
+  "id": "temple_assembly_integration_fixture",
+  "sourceId": "fixture:temple-current-model-draft",
+  "sourceFileName": "reference-temple.png",
+  "createdAt": "2026-10-15T00:00:00.000Z",
+  "referenceCamera": {
+    "projection": "perspective",
+    "position": [
+      0,
+      2.1,
+      10
+    ],
+    "target": [
+      0,
+      1.2,
+      -2.8
+    ],
+    "fov": 48,
+    "confidence": 0.35,
+    "source": "model"
+  },
+  "fixtureSource": "人工增强集成fixture，不是实时视觉模型结果"
+}

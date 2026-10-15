@@ -92,6 +92,24 @@ export const BUILTIN_LIFE_MODELS: ModelLibraryItem[] = BUILTIN_LIFE_MODEL_INPUTS
   thumbUrl: createBuiltInThumbnail(item.name, item.categoryId),
 }));
 
+/**
+ * 参考图布景只会使用已随导演台发布的受限内置模型；缺少可靠类别时返回 null，
+ * 由同源程序构件承接，绝不把 catalog id 伪装成项目 asset id。
+ */
+export function resolveLayoutCatalogItem(input: { category: string; name?: string; modelDescriptor?: string }) {
+  const text = `${input.name ?? ""} ${input.modelDescriptor ?? ""}`.toLowerCase();
+  const fileName = input.category === "sofa"
+    ? "sofa_modern_low.fbx"
+    : input.category === "table"
+      ? "dining_table_low.fbx"
+      : input.category === "prop" && /(冰箱|refrigerator)/.test(text)
+        ? "refrigerator_modern_low.fbx"
+        : input.category === "prop" && /(洗衣机|washing)/.test(text)
+          ? "washing_machine_modern_low.fbx"
+          : null;
+  return fileName ? BUILTIN_LIFE_MODELS.find((item) => item.fileName === fileName) ?? null : null;
+}
+
 type GuoCharacterManifestItem = {
   id: string;
   label: string;

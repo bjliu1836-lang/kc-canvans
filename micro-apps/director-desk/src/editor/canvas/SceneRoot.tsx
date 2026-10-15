@@ -53,6 +53,7 @@ import { constrainCameraPosition, constrainObjectMotionTransform } from "../sche
 import { getUE4GroundedLabelY } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import {
   createLayoutCharacterRenderAdapter,
+  getLayoutComponentRotationYDegrees,
   getLayoutComponentRenderPosition,
   LAYOUT_CATEGORY_COLORS,
 } from "../schema/layoutDraft";
@@ -493,12 +494,16 @@ function ImportedModel({
   color,
   fileName,
   url,
+  roughness,
+  metalness,
 }: {
   color?: string;
   fileName: string;
   url: string;
+  roughness?: number;
+  metalness?: number;
 }) {
-  if (url.startsWith("builtin://life/")) return <BuiltInLifeModel color={color} modelId={fileName} />;
+  if (url.startsWith("builtin://life/")) return <BuiltInLifeModel color={color} modelId={fileName} roughness={roughness} metalness={metalness} />;
   if (/\.fbx$/i.test(fileName)) return <FbxModel color={color} url={url} />;
   if (/\.obj$/i.test(fileName)) return <ObjModel color={color} url={url} />;
   if (/\.glb$/i.test(fileName)) return <GlbModel color={color} url={url} />;
@@ -508,11 +513,15 @@ function ImportedModel({
 function GeometryPrimitiveModel({
   color = "#d7e7ff",
   geometryType,
+  roughness = 0.68,
+  metalness = 0.02,
 }: {
   color?: string;
   geometryType: GeometryPrimitiveType;
+  roughness?: number;
+  metalness?: number;
 }) {
-  const material = <meshStandardMaterial color={color} metalness={0.02} roughness={0.68} />;
+  const material = <meshStandardMaterial color={color} metalness={metalness} roughness={roughness} />;
 
   if (geometryType === "sphere") {
     return (
@@ -563,6 +572,93 @@ function GeometryPrimitiveModel({
     <mesh name="geometry-box" position={[0, 0.5, 0]}>
       <boxGeometry args={[1, 1, 1]} />
       {material}
+    </mesh>
+  );
+}
+
+/** 参考布景预览与确认后的对象共同使用的可编辑程序构件。 */
+function LayoutComponentGeometry({
+  category,
+  primitive,
+  color,
+  roughness,
+  metalness,
+  meshName,
+  outline,
+  opacity,
+  depthWrite,
+  emissive,
+  descriptor,
+  assembly,
+}: {
+  category: DirectorLayoutCategory;
+  primitive: Extract<GeometryPrimitiveType, "box" | "cylinder">;
+  color: string;
+  roughness?: number;
+  metalness?: number;
+  meshName?: string;
+  outline?: { color: string; lineWidth: number };
+  opacity?: number;
+  depthWrite?: boolean;
+  emissive?: string;
+  descriptor?: string;
+  assembly?: NonNullable<DirectorObject["layoutSource"]>["assembly"];
+}) {
+  const material = <meshStandardMaterial color={color} metalness={metalness ?? 0.02} roughness={roughness ?? 0.68} opacity={opacity} depthWrite={depthWrite} emissive={emissive} transparent={opacity !== undefined && opacity < 1} />;
+  const box = <boxGeometry args={[1, 1, 1]} />;
+  const legMaterial = <meshStandardMaterial color={color} metalness={metalness ?? 0.02} roughness={roughness ?? 0.68} />;
+  if (assembly?.length) return <group>{assembly.map((part, index) => (
+    <mesh key={`${part.primitive}-${index}`} name={index === 0 ? meshName : undefined} position={part.position} scale={part.size} rotation={part.rotation?.map((value) => value * Math.PI / 180) as [number, number, number] | undefined}>
+      {part.primitive === "cylinder" ? <cylinderGeometry args={[0.5, 0.5, 1, 18]} /> : part.primitive === "sphere" ? <sphereGeometry args={[0.5, 14, 10]} /> : part.primitive === "cone" ? <coneGeometry args={[0.5, 1, 16]} /> : part.primitive === "torus" ? <torusGeometry args={[0.5, 0.08, 10, 20]} /> : box}
+      {material}
+    </mesh>
+  ))}</group>;
+  const structuralParts = category === "table" ? (
+    <>
+      <mesh name={meshName} position={[0, 0.88, 0]} scale={[1, 0.12, 0.72]}>{box}{material}</mesh>
+      {[-0.42, 0.42].flatMap((x) => [-0.28, 0.28].map((z) => <mesh key={`${x}-${z}`} position={[x, 0.42, z]} scale={[0.1, 0.78, 0.1]}>{box}{legMaterial}</mesh>))}
+    </>
+  ) : category === "chair" ? (
+    <>
+      <mesh name={meshName} position={[0, 0.47, 0.04]} scale={[0.78, 0.12, 0.72]}>{box}{material}</mesh>
+      <mesh position={[0, 0.75, -0.32]} scale={[0.78, 0.56, 0.12]}>{box}{legMaterial}</mesh>
+      {[-0.3, 0.3].flatMap((x) => [-0.24, 0.24].map((z) => <mesh key={`${x}-${z}`} position={[x, 0.23, z]} scale={[0.08, 0.48, 0.08]}>{box}{legMaterial}</mesh>))}
+    </>
+  ) : category === "sofa" ? (
+    <>
+      <mesh name={meshName} position={[0, 0.28, 0]} scale={[1, 0.5, 0.82]}>{box}{material}</mesh>
+      <mesh position={[0, 0.68, -0.3]} scale={[1, 0.56, 0.2]}>{box}{legMaterial}</mesh>
+      <mesh position={[-0.44, 0.5, 0.02]} scale={[0.14, 0.48, 0.8]}>{box}{legMaterial}</mesh>
+      <mesh position={[0.44, 0.5, 0.02]} scale={[0.14, 0.48, 0.8]}>{box}{legMaterial}</mesh>
+    </>
+  ) : category === "cabinet" ? (
+    <>
+      <mesh name={meshName} position={[0, 0.5, 0]}>{box}{material}</mesh>
+      <mesh position={[0, 0.5, 0.506]} scale={[0.9, 0.88, 0.025]}>{box}{legMaterial}</mesh>
+    </>
+  ) : category === "prop" && /(香炉|incense|urn)/i.test(descriptor ?? "") ? (
+    <>
+      <mesh name={meshName} position={[0, 0.34, 0]} scale={[0.86, 0.42, 0.86]}>{primitive === "cylinder" ? <cylinderGeometry args={[0.5, 0.5, 1, 24]} /> : box}{material}</mesh>
+      <mesh position={[0, 0.62, 0]} scale={[1.04, 0.08, 1.04]}><torusGeometry args={[0.5, 0.06, 12, 24]} />{legMaterial}</mesh>
+    </>
+  ) : category === "prop" && /(花瓶|vase)/i.test(descriptor ?? "") ? (
+    <>
+      <mesh name={meshName} position={[0, 0.34, 0]} scale={[0.74, 0.62, 0.74]}><sphereGeometry args={[0.5, 18, 12]} />{material}</mesh>
+      <mesh position={[0, 0.7, 0]} scale={[0.32, 0.45, 0.32]}><cylinderGeometry args={[0.5, 0.5, 1, 18]} />{legMaterial}</mesh>
+    </>
+  ) : category === "prop" && /(佛像|buddha|雕像|statue)/i.test(descriptor ?? "") ? (
+    <>
+      <mesh name={meshName} position={[0, 0.22, 0]} scale={[0.86, 0.28, 0.56]}>{box}{material}</mesh>
+      <mesh position={[0, 0.66, 0]} scale={[0.44, 0.72, 0.3]}><cylinderGeometry args={[0.5, 0.5, 1, 18]} />{legMaterial}</mesh>
+      <mesh position={[0, 1.12, 0]} scale={[0.34, 0.34, 0.34]}><sphereGeometry args={[0.5, 14, 10]} />{legMaterial}</mesh>
+    </>
+  ) : null;
+  if (structuralParts) return <group>{structuralParts}</group>;
+  return (
+    <mesh name={meshName} position={[0, 0.5, 0]}>
+      {primitive === "cylinder" ? <cylinderGeometry args={[0.5, 0.5, 1, 24]} /> : box}
+      {material}
+      {outline ? <Edges color={outline.color} lineWidth={outline.lineWidth} name="layout-draft-outline" threshold={15} /> : null}
     </mesh>
   );
 }
@@ -779,10 +875,20 @@ function ObjectSceneNode({
         </>
       ) : isImportedModel && asset && resolvedAssetUrl ? (
         <Suspense fallback={null}>
-          <ImportedModel color={item.color} fileName={asset.fileName} url={resolvedAssetUrl} />
+          <ImportedModel color={item.color} fileName={asset.fileName} url={resolvedAssetUrl} roughness={item.layoutSource?.appearance?.roughness} metalness={item.layoutSource?.appearance?.metalness} />
         </Suspense>
       ) : item.kind === "prop" && item.geometryType ? (
-        <GeometryPrimitiveModel color={item.color} geometryType={item.geometryType} />
+        item.layoutSource && (item.geometryType === "box" || item.geometryType === "cylinder") ? (
+          <LayoutComponentGeometry
+            category={item.layoutSource.category as DirectorLayoutCategory}
+            primitive={item.geometryType}
+            color={item.color ?? "#d7e7ff"}
+            roughness={item.layoutSource.appearance?.roughness}
+            metalness={item.layoutSource.appearance?.metalness}
+            descriptor={`${item.name} ${item.layoutSource.modelDescriptor ?? ""}`}
+            assembly={item.layoutSource.assembly}
+          />
+        ) : <GeometryPrimitiveModel color={item.color} geometryType={item.geometryType} />
       ) : null}
     </group>
   );
@@ -1627,6 +1733,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
   const objects = useDirectorStore((state) => state.project.objects);
   const cameras = useDirectorStore((state) => state.project.cameras);
   const viewMode = useDirectorStore((state) => state.viewMode);
+  const referenceCameraPreview = useDirectorStore((state) => state.referenceCameraPreview);
   const selectedObjectId = useDirectorStore((state) => state.selectedObjectId);
   const selectedCameraKeyframeId = useDirectorStore((state) => state.selectedCameraKeyframeId);
   const selectedObjectMotionKeyframeId = useDirectorStore((state) => state.selectedObjectMotionKeyframeId);
@@ -1749,28 +1856,25 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
               <group
                 key={component.id}
                 position={getLayoutComponentRenderPosition(component, scene.groundHeight)}
-                rotation={[0, component.rotationYDegrees * Math.PI / 180, 0]}
+                rotation={[0, getLayoutComponentRotationYDegrees(component) * Math.PI / 180, 0]}
                 scale={component.size}
               >
-                <mesh name={`${component.id}-layout-draft-mesh`} position={[0, 0.5, 0]}>
-                  {component.primitive === "cylinder"
-                    ? <cylinderGeometry args={[0.5, 0.5, 1, 24]} />
-                    : <boxGeometry args={[1, 1, 1]} />}
-                  <meshStandardMaterial
-                    color={LAYOUT_CATEGORY_COLORS[component.category]}
-                    depthWrite={previewStyle.depthWrite}
-                    emissive={component.uncertain ? "#8a6a1e" : "#000000"}
-                    emissiveIntensity={component.uncertain ? 0.18 : 0}
-                    opacity={previewStyle.opacity}
-                    transparent={previewStyle.opacity < 1}
-                  />
-                  <Edges
-                    color={previewStyle.outlineColor}
-                    lineWidth={previewStyle.outlineWidth}
-                    name={`${component.id}-layout-draft-outline`}
-                    threshold={15}
-                  />
-                </mesh>
+                <LayoutComponentGeometry
+                  category={component.category}
+                  primitive={component.primitive}
+                  color={component.appearance?.color ?? LAYOUT_CATEGORY_COLORS[component.category]}
+                  roughness={component.appearance?.roughness}
+                  metalness={component.appearance?.metalness}
+                  meshName={`${component.id}-layout-draft-mesh`}
+                  opacity={previewStyle.opacity}
+                  depthWrite={previewStyle.depthWrite}
+                  emissive={component.uncertain ? "#8a6a1e" : "#000000"}
+                  descriptor={`${component.name} ${component.modelDescriptor ?? ""} ${component.notes ?? ""}`}
+                  assembly={component.assembly}
+                  outline={isHovered || isSelected
+                    ? { color: previewStyle.outlineColor, lineWidth: previewStyle.outlineWidth }
+                    : undefined}
+                />
               </group>
             );
           })}
@@ -1816,7 +1920,6 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
         .filter((item) => (
           item.visible
           && item.kind !== "camera"
-          && !(scene.showGround && item.layoutSource?.category === "ground")
         ))
         .map((item) => {
           const asset = item.assetRefId ? assetsById.get(item.assetRefId) : undefined;
@@ -1891,7 +1994,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
             translationSnap={translationSnap}
           />
         )) : null}
-      {effectiveViewMode === "director"
+      {effectiveViewMode === "director" && !referenceCameraPreview
         ? cameras
             .map((camera) => ({ camera, object: cameraObjectsByCameraId.get(camera.id) }))
             .filter(({ object }) => object?.visible ?? true)

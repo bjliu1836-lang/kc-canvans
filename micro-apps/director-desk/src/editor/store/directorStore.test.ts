@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, vi } from "vitest";
 import { createDefaultDirectorProject, createInitialDirectorState, useDirectorStore } from "./directorStore";
 import { selectRightPanelKind } from "./directorSelectors";
-import { getCameraRigPositionFromViewSnapshot } from "../schema/cameraGeometry";
+import { getCameraRigPositionFromViewSnapshot, getCameraViewSnapshotFromShot } from "../schema/cameraGeometry";
 import {
   DEFAULT_VIEWPORT_ROTATE_SENSITIVITY,
   DEFAULT_VIEWPORT_ZOOM_SENSITIVITY,
@@ -56,6 +56,14 @@ function createLayoutDraftFixture(): LayoutDraft {
     sourceFileName: "客厅.png",
     createdAt: "2026-10-10T00:00:00.000Z",
     scale: { mode: "estimated", confidence: 0.4 },
+    referenceCamera: {
+      projection: "perspective",
+      position: [0, 1.8, 6],
+      target: [0, 1.2, -2],
+      fov: 48,
+      confidence: 0.4,
+      source: "model",
+    },
     components: [{
       id: "wall_01",
       name: "后墙",
@@ -78,11 +86,28 @@ it("adds and replaces one generated layout batch as one undoable transaction", (
   const afterAppend = useDirectorStore.getState();
 
   expect(first.objectIds).toHaveLength(1);
-  expect(afterAppend.project.objects).toHaveLength(initialObjects.length + 1);
+  expect(afterAppend.project.objects).toHaveLength(initialObjects.length + 2);
   expect(afterAppend.project.layoutBatches?.[0]).toMatchObject({
     id: first.batchId,
     sourceId: "canvas_image_1",
+    referenceCameraId: "cam_reference_2",
   });
+  expect(afterAppend.project.cameras.find((camera) => camera.id === "cam_reference_2")).toMatchObject({
+    fov: 48,
+    target: [0, 1.2, -2],
+  });
+  const referenceCamera = afterAppend.project.cameras.find((camera) => camera.id === "cam_reference_2")!;
+  expect(referenceCamera.transform.position).toEqual(getCameraRigPositionFromViewSnapshot({
+    position: [0, 1.8, 6],
+    target: [0, 1.2, -2],
+    fov: 48,
+  }));
+  expect(getCameraViewSnapshotFromShot(referenceCamera)).toMatchObject({
+    position: [0, 1.8, 6],
+    target: [0, 1.2, -2],
+    fov: 48,
+  });
+  expect(afterAppend.project.activeCameraId).toBe("cam_reference_2");
 
   const replacementDraft = createLayoutDraftFixture();
   replacementDraft.components[0] = {
@@ -97,14 +122,54 @@ it("adds and replaces one generated layout batch as one undoable transaction", (
   });
   const afterReplace = useDirectorStore.getState();
 
-  expect(afterReplace.project.objects).toHaveLength(initialObjects.length + 1);
-  expect(afterReplace.project.objects.filter((object) => !object.layoutSource)).toEqual(initialObjects);
+  expect(afterReplace.project.objects).toHaveLength(initialObjects.length + 2);
+  expect(afterReplace.project.cameras).toHaveLength(2);
+  expect(afterReplace.project.objects.filter((object) => object.kind === "camera")).toHaveLength(2);
   expect(afterReplace.project.objects.find((object) => object.layoutSource?.batchId === first.batchId))
     .toMatchObject({ name: "已校正后墙", transform: { scale: [3, 2.8, 0.15] } });
 
   useDirectorStore.getState().undo();
   expect(useDirectorStore.getState().project.objects.find((object) => object.layoutSource?.batchId === first.batchId))
     .toMatchObject({ name: "后墙", transform: { scale: [6, 2.8, 0.15] } });
+});
+
+it("keeps an edited reference camera when replacing its generated layout batch", () => {
+  const first = useDirectorStore.getState().applyLayoutDraft({ draft: createLayoutDraftFixture(), mode: "append" });
+  const oldReferenceCameraId = useDirectorStore.getState().project.layoutBatches?.[0]?.referenceCameraId;
+  expect(oldReferenceCameraId).toBe("cam_reference_2");
+
+  useDirectorStore.getState().updateCamera(oldReferenceCameraId!, { fov: 62 });
+  useDirectorStore.getState().applyLayoutDraft({
+    draft: createLayoutDraftFixture(),
+    mode: "replace-batch",
+    replaceBatchId: first.batchId,
+  });
+
+  const state = useDirectorStore.getState();
+  expect(state.project.cameras.find((camera) => camera.id === oldReferenceCameraId)).toMatchObject({ fov: 62 });
+  expect(state.project.cameras.find((camera) => camera.id === "cam_reference_3")).toMatchObject({ fov: 48 });
+  expect(state.project.objects.find((object) => object.linkedCameraId === oldReferenceCameraId)).toBeTruthy();
+  expect(state.project.layoutBatches?.[0]?.referenceCameraId).toBe("cam_reference_3");
+});
+
+it("materializes a verified catalog item into a project asset before linking a layout object", () => {
+  const draft = createLayoutDraftFixture();
+  draft.components[0] = {
+    ...draft.components[0],
+    category: "sofa",
+    name: "双人沙发",
+    modelDescriptor: "现代双人沙发",
+  };
+  const result = useDirectorStore.getState().applyLayoutDraft({ draft, mode: "append" });
+  const object = useDirectorStore.getState().project.objects.find((item) => item.id === result.objectIds[0]);
+  const asset = useDirectorStore.getState().project.assets.find((item) => item.id === object?.assetRefId);
+  expect(object?.assetRefId).toBe("layout_catalog_builtin_sofa_modern_low_fbx");
+  expect(asset).toMatchObject({
+    id: "layout_catalog_builtin_sofa_modern_low_fbx",
+    sourceType: "model",
+    assetSource: "library",
+    url: "builtin://life/sofa_modern_low.fbx",
+  });
 });
 
 it("scales and offsets a generated layout batch around its center as undoable transactions", () => {

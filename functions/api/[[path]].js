@@ -489,7 +489,10 @@ const DIRECTOR_LAYOUT_SYSTEM_PROMPT = [
   '坐标单位是米；position 是物体底面中心，也是物体与支撑面的接触中心：落地物体 Y=地面高度，桌台上的香炉、花瓶、雕像等 prop 的 Y=承载台面高度，不能把所有组件 Y 都写成 0。size 顺序是局部宽、高、深，且每项必须大于 0。yaw=0 时局部 width 沿 +X、local depth 沿 +Z；正 rotationYDegrees 使 local +Z 转向 +X。size 只写局部尺寸，rotationYDegrees 只写朝向，不能把宽深旋转两次。',
   '提交前逐项检查 Y 语义：落地 wall、pillar 的 position.y 通常等于地面高度 0，而不是 size[1]/2；例如 3 米高的落地墙应写 position.y=0、size[1]=3，不能写 position.y=1.5。window、桌面 prop 等悬空物体仍写真实支撑面高度，不得统一贴地。',
   '柜体或有开口面的家具，局部正面/开放面定义为 local +Z；床体的床头定义在 local -Z，床头板与床体分别输出并邻近该端。普通 box 的前后或 +/-180 度视觉不可区分时，在 notes 写明朝向依据或不确定性，不要假装可从对称外形恢复。',
+  '组件可选输出 modelDescriptor（不超过120字的受限语义描述）和 appearance：appearance.color 为 #RRGGBB，roughness/metalness 在0到1，frontDirectionDegrees 表示局部 +Z 正面方向。它们只驱动已有程序构件/本地库外观，不得输出外部模型、GLB 或纹理。',
+  '关键物件可选 assembly，最多24个局部轴对齐子件：primitive 只能为 box/cylinder/sphere/cone/torus，position 和 size 均为父组件包围盒内的归一化三元组；position 每项0到1，size每项大于0且不超过1，position±size/2 不得越界，rotation 如出现必须为 [0,0,0]。不得执行代码或输出任意几何。',
   '先识别空间关系，再填写坐标：门、窗依附所在墙面；柱应从可见支撑面延伸到顶面；门洞附近的墙应拆成门洞左右或上方的墙段，不要用一整块墙堵住门洞；家具长轴、柜开放面、床头端与相邻墙/家具的关系要自洽；承载于桌台的 prop 必须保持与对应台面的垂直层次。床头柜（cabinet）应靠近床头端，并按图判断其在床的哪一侧。以上是一般关系规则，不能硬编码为某个房间。',
+  '输出 referenceCamera 作为参考图的透视起始机位：projection 固定 perspective，position 与 target 都是世界米坐标，fov 为 20 到 100 的度数，confidence 为 0 到 1。单张图无法可靠恢复时宁可降低 confidence；它只用于同画幅对照，不得把它当作真实拍摄内参。',
   '组件明确承载在另一组件的水平顶面时，输出 supportComponentId=承载组件 id；只允许引用 ground、table、cabinet、prop。不要用 wall/window/door/pillar 作为水平支撑。chair/sofa 的包围盒顶通常不是座面，坐姿人物不要引用整个 chair/sofa；没有独立可确认座面组件时省略 supportComponentId，并直接填写观察到的座面 Y。',
   '最多 30 个组件。无法确认的物体请降低 confidence 并设置 uncertain=true。',
   '========== 第二部分：人物 characters ==========',
@@ -511,7 +514,7 @@ const DIRECTOR_LAYOUT_SYSTEM_PROMPT = [
   'scale.mode 固定为 estimated。没有要创建的人物时输出空数组 characters: []，不要省略该字段。',
   '无法确认的人物请降低 confidence 并设置 uncertain=true（例如被遮挡、只露出部分身体）。',
   '只输出一个 JSON 对象，不要 Markdown，不要解释。格式：',
-  '{"scale":{"mode":"estimated","confidence":0.4},"components":[{"id":"pillar_01","name":"立柱","category":"pillar","primitive":"cylinder","position":[0,0,-3],"size":[0.45,2.8,0.45],"rotationYDegrees":0,"confidence":0.8,"uncertain":false,"notes":""}],"characters":[{"id":"char_01","name":"人物甲","position":[-0.6,0.12,0.2],"height":1.7,"rotationYDegrees":15,"posture":"kneel","kneelVariant":"seiza","handGesture":"prayer","bodyTypeHint":"female","confidence":0.7,"uncertain":false,"notes":"跪坐在坐垫上"}]}'
+  '{"scale":{"mode":"estimated","confidence":0.4},"referenceCamera":{"projection":"perspective","position":[0,1.6,8],"target":[0,1.2,-2],"fov":50,"confidence":0.35},"components":[{"id":"pillar_01","name":"立柱","category":"pillar","primitive":"cylinder","position":[0,0,-3],"size":[0.45,2.8,0.45],"rotationYDegrees":0,"confidence":0.8,"uncertain":false,"notes":""}],"characters":[{"id":"char_01","name":"人物甲","position":[-0.6,0.12,0.2],"height":1.7,"rotationYDegrees":15,"posture":"kneel","kneelVariant":"seiza","handGesture":"prayer","bodyTypeHint":"female","confidence":0.7,"uncertain":false,"notes":"跪坐在坐垫上"}]}'
 ].join('\n');
 
 const DIRECTOR_LAYOUT_CATEGORIES = new Set(['ground', 'wall', 'door', 'window', 'table', 'chair', 'sofa', 'cabinet', 'pillar', 'prop']);
@@ -545,6 +548,32 @@ const validateDirectorLayoutCandidate = (candidate) => {
   if (!components) issues.push('布局结果缺少 components 数组');
   if (components && components.length === 0) issues.push('没有识别到可用的粗布景组件');
   if (components && components.length > 30) issues.push('组件数量超过 30 个上限');
+  const referenceCamera = candidate?.referenceCamera;
+  if (referenceCamera !== undefined) {
+    const finiteTuple = (value) => Array.isArray(value) && value.length === 3
+      && value.every(number => typeof number === 'number' && Number.isFinite(number));
+    if (!referenceCamera || typeof referenceCamera !== 'object' || Array.isArray(referenceCamera)
+      || referenceCamera.projection !== 'perspective'
+      || !finiteTuple(referenceCamera.position)
+      || !finiteTuple(referenceCamera.target)
+      || typeof referenceCamera.fov !== 'number' || !Number.isFinite(referenceCamera.fov) || referenceCamera.fov < 20 || referenceCamera.fov > 100
+      || typeof referenceCamera.confidence !== 'number' || !Number.isFinite(referenceCamera.confidence) || referenceCamera.confidence < 0 || referenceCamera.confidence > 1) {
+      issues.push('referenceCamera 必须包含 perspective、position、target、20 到 100 的 fov 与 0 到 1 的 confidence');
+    }
+  }
+  const assemblyPartFits = (part) => {
+    if (!part || typeof part !== 'object' || !['box', 'cylinder', 'sphere', 'cone', 'torus'].includes(part.primitive)
+      || !Array.isArray(part.position) || part.position.length !== 3 || !part.position.every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1)
+      || !Array.isArray(part.size) || part.size.length !== 3 || !part.size.every(value => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 1)
+      || (part.rotation !== undefined && (!Array.isArray(part.rotation) || part.rotation.length !== 3 || !part.rotation.every(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 360)))) return false;
+    const [rx, ry, rz] = (part.rotation || [0, 0, 0]).map(value => value * Math.PI / 180);
+    const sx = Math.sin(rx), cx = Math.cos(rx), sy = Math.sin(ry), cy = Math.cos(ry), sz = Math.sin(rz), cz = Math.cos(rz);
+    const matrix = [[cy * cz, -cy * sz, sy], [sx * sy * cz + cx * sz, -sx * sy * sz + cx * cz, -sx * cy], [-cx * sy * cz + sx * sz, cx * sy * sz + sx * cz, cx * cy]];
+    return part.position.every((value, axis) => {
+      const half = matrix[axis].reduce((sum, coefficient, otherAxis) => sum + Math.abs(coefficient) * part.size[otherAxis] / 2, 0);
+      return value - half >= 0 && value + half <= 1;
+    });
+  };
   const ids = new Set();
   components?.forEach((item, index) => {
     const label = `第 ${index + 1} 个组件`;
@@ -561,6 +590,22 @@ const validateDirectorLayoutCandidate = (candidate) => {
     else if (item.size.some(number => number <= 0 || number > 100)) issues.push(`${label}的尺寸必须大于 0 且不超过 100 米`);
     if (typeof item.rotationYDegrees !== 'number' || !Number.isFinite(item.rotationYDegrees)) {
       issues.push(`${label}的朝向必须是有限数字`);
+    }
+    if (item.modelDescriptor !== undefined && (typeof item.modelDescriptor !== 'string' || item.modelDescriptor.trim().length > 120)) {
+      issues.push(`${label}的 modelDescriptor 必须是不超过 120 字的字符串`);
+    }
+    if (item.appearance !== undefined) {
+      const appearance = item.appearance;
+      const validColor = appearance && typeof appearance === 'object' && !Array.isArray(appearance)
+        && (appearance.color === undefined || (typeof appearance.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(appearance.color.trim())))
+        && (appearance.roughness === undefined || (typeof appearance.roughness === 'number' && Number.isFinite(appearance.roughness) && appearance.roughness >= 0 && appearance.roughness <= 1))
+        && (appearance.metalness === undefined || (typeof appearance.metalness === 'number' && Number.isFinite(appearance.metalness) && appearance.metalness >= 0 && appearance.metalness <= 1))
+        && (appearance.frontDirectionDegrees === undefined || (typeof appearance.frontDirectionDegrees === 'number' && Number.isFinite(appearance.frontDirectionDegrees)));
+      if (!validColor) issues.push(`${label}的 appearance 必须包含合法颜色、材质数值或正面方向`);
+    }
+    if (item.assembly !== undefined) {
+      const validAssembly = Array.isArray(item.assembly) && item.assembly.length > 0 && item.assembly.length <= 24 && item.assembly.every(assemblyPartFits);
+      if (!validAssembly) issues.push(`${label}的 assembly 必须是父组件包围盒内最多24个轴对齐受限子件`);
     }
     if (typeof item.confidence !== 'number' || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) {
       issues.push(`${label}的置信度必须在 0 到 1 之间`);
@@ -584,6 +629,21 @@ const validateDirectorLayoutCandidate = (candidate) => {
     const localZ = Math.sin(radians) * dx + Math.cos(radians) * dz;
     return Math.abs(localX) <= support.size[0] / 2 + 0.04 && Math.abs(localZ) <= support.size[2] / 2 + 0.04;
   };
+  const openingAttachedToWall = (opening) => (components || []).some((wall) => {
+    if (!wall || wall.category !== 'wall' || !Array.isArray(wall.position) || !Array.isArray(wall.size)) return false;
+    if (!Array.isArray(opening.position) || !Array.isArray(opening.size)) return false;
+    const wallYaw = Number(wall.rotationYDegrees || 0);
+    const openingYaw = Number(opening.rotationYDegrees || 0);
+    const halfTurnDifference = Math.abs(((openingYaw - wallYaw + 90) % 180 + 180) % 180 - 90);
+    if (halfTurnDifference > 18) return false;
+    const radians = wallYaw * Math.PI / 180;
+    const dx = opening.position[0] - wall.position[0];
+    const dz = opening.position[2] - wall.position[2];
+    const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
+    const localZ = Math.sin(radians) * dx + Math.cos(radians) * dz;
+    return Math.abs(localX) + opening.size[0] / 2 <= wall.size[0] / 2 + 0.12
+      && Math.abs(localZ) <= (wall.size[2] + opening.size[2]) / 2 + 0.18;
+  });
   components?.forEach((item, index) => {
     if (!item || typeof item !== 'object' || item.supportComponentId === undefined) return;
     const label = `第 ${index + 1} 个组件`;
@@ -595,6 +655,12 @@ const validateDirectorLayoutCandidate = (candidate) => {
       issues.push(`${label}引用的 ${supportId} 不是可按包围盒顶面计算的水平支撑`);
     } else if (!supportFootprintContains(item.position, componentById.get(supportId))) {
       issues.push(`${label}与支撑组件 ${supportId} 的水平足迹不重叠`);
+    }
+  });
+  components?.forEach((item, index) => {
+    if (!item || typeof item !== 'object' || !['door', 'window'].includes(item.category)) return;
+    if (!openingAttachedToWall(item)) {
+      issues.push(`第 ${index + 1} 个组件的${item.category === 'door' ? '门' : '窗'}未依附任何墙面`);
     }
   });
   const supportVisitState = new Map();

@@ -12,6 +12,7 @@ import {
   createLayoutCharacterRenderAdapter,
   getLayoutCharacterCanonicalHeight,
   getLayoutComponentRenderPosition,
+  getLayoutDraftReferenceCamera,
   LAYOUT_CATEGORY_COLORS,
   LAYOUT_CHARACTER_COLOR,
   LAYOUT_CHARACTER_NATIVE_HEIGHT,
@@ -113,6 +114,54 @@ describe("layout draft validation", () => {
     expect(calibrated.scale).toMatchObject({ mode: "anchored", anchorWidthMeters: 3 });
     expect(calibrated.components[0].size).toEqual([3, 1.4, 0.075]);
     expect(draft.components[0].size).toEqual([6, 2.8, 0.15]);
+    expect(getLayoutDraftReferenceCamera(calibrated)).toMatchObject({
+      source: "bounds-fallback",
+      confidence: 0,
+    });
+  });
+
+  it("preserves a model reference camera for the applied batch", () => {
+    const value: any = candidate();
+    value.referenceCamera = {
+      projection: "perspective",
+      position: [1, 1.7, 7],
+      target: [0, 1.1, -2],
+      fov: 46,
+      confidence: 0.62,
+    };
+
+    const draft = validateLayoutDraftCandidate(value, source);
+    const built = buildLayoutBatch(draft, "layout_camera", []);
+    expect(draft.referenceCamera).toEqual({ ...value.referenceCamera, source: "model" });
+    expect(built.batch.referenceCamera).toEqual(draft.referenceCamera);
+  });
+
+  it("preserves constrained model and material hints through the applied object", () => {
+    const value: any = candidate();
+    value.components[0] = {
+      ...value.components[0],
+      modelDescriptor: "深色木质餐桌",
+      appearance: { color: "#6A4729", roughness: 0.42, metalness: 0.08, frontDirectionDegrees: 90 },
+    };
+    const draft = validateLayoutDraftCandidate(value, source);
+    const built = buildLayoutBatch(draft, "layout_appearance", []);
+    expect(built.objects[0].layoutSource).toMatchObject({
+      modelDescriptor: "深色木质餐桌",
+      appearance: { color: "#6A4729", roughness: 0.42, metalness: 0.08, frontDirectionDegrees: 90 },
+    });
+    expect(built.objects[0].color).toBe("#6A4729");
+    expect(built.objects[0].transform.rotation[1]).toBeCloseTo(Math.PI / 2);
+  });
+
+  it("keeps a bounded declarative assembly and rejects parts outside the parent bounds", () => {
+    const value: any = candidate();
+    value.components[0] = { ...value.components[0], assembly: [
+      { primitive: "box", position: [0.5, 0.82, 0.5], size: [0.9, 0.1, 0.7] },
+      { primitive: "cylinder", position: [0.15, 0.4, 0.18], size: [0.1, 0.75, 0.1] },
+    ] };
+    expect(buildLayoutBatch(validateLayoutDraftCandidate(value, source), "layout_assembly", []).objects[0].layoutSource?.assembly).toHaveLength(2);
+    value.components[0].assembly[0].position = [1, 0.5, 0.5];
+    expect(() => validateLayoutDraftCandidate(value, source)).toThrow("assembly");
   });
 
   it("calibrates from the height axis when the anchor dimension is height", () => {
@@ -166,7 +215,7 @@ describe("layout draft validation", () => {
     const draft = validateLayoutDraftCandidate(value, source);
     const built = buildLayoutBatch(draft, "layout_ground", [], 1.5);
 
-    expect(built.objects[0].transform.position).toEqual([0, 1.4, 0]);
+    expect(built.objects[0].transform.position).toEqual([0, 1.402, 0]);
     expect(built.objects[0].transform.position[1] + built.objects[0].transform.scale[1]).toBeCloseTo(1.5);
   });
 
@@ -178,28 +227,42 @@ describe("layout draft validation", () => {
     const appliedGround = built.objects.find((object) => object.layoutSource?.componentId === "ground_01")!;
 
     expect(ground.position[1]).toBe(-0.05);
-    expect(previewPosition).toEqual([0, -0.1, 0]);
+    expect(previewPosition).toEqual([0, -0.098, 0]);
     expect(appliedGround.transform.position).toEqual(previewPosition);
     expect(previewPosition[1] + ground.size[1]).toBeCloseTo(0);
   });
 
-  it("surfaces mixed center/bottom Y semantics from the real temple response without flattening valid props", () => {
+  it("normalizes legacy center-Y walls while preserving valid elevated props", () => {
     const draft = validateLayoutDraftCandidate(templeCurrentModelDraft, source, { draftId: "temple_diagnostics" });
     const backWall = draft.components.find((component) => component.id === "wall_back_01")!;
     const vase = draft.components.find((component) => component.id === "prop_vase_01")!;
     const character = draft.characters[0];
 
-    expect(backWall.position[1]).toBe(1.5);
+    expect(backWall.position[1]).toBe(0);
     expect(backWall.uncertain).toBe(true);
-    expect(backWall.notes).toContain("可能是合法悬空墙段/台上柱，也可能误用了几何中心 Y");
+    expect(backWall.notes).toContain("已按底部中心语义修正");
     expect(vase.position[1]).toBe(1.15);
     expect(character.position[1]).toBe(0.12);
     expect(character.uncertain).toBe(true);
     expect(character.notes).toContain("prop_cushion_01 顶面 Y=0.18 不一致");
 
     const revalidated = validateLayoutDraftCandidate(draft, source, { draftId: "temple_diagnostics_again" });
-    expect(revalidated.components.find((component) => component.id === "wall_back_01")!.notes!.match(/误用了几何中心 Y/g)).toHaveLength(1);
+    expect(revalidated.components.find((component) => component.id === "wall_back_01")!.notes!.match(/已按底部中心语义修正/g)).toHaveLength(1);
     expect(revalidated.components.find((component) => component.id === "wall_back_01")!.notes!.length).toBeLessThanOrEqual(240);
+  });
+
+  it("flags a door or window that is not attached to a wall without discarding the editable draft", () => {
+    const value: any = candidate();
+    value.components.push({
+      id: "window_orphan", name: "孤立窗", category: "window", primitive: "box",
+      position: [5, 1, 0], size: [1, 1, 0.1], rotationYDegrees: 0,
+      confidence: 0.9, uncertain: false,
+    });
+
+    const draft = validateLayoutDraftCandidate(value, source);
+    const window = draft.components.find((component) => component.id === "window_orphan")!;
+    expect(window.uncertain).toBe(true);
+    expect(window.notes).toContain("窗未依附可识别墙面");
   });
 
   it("resolves explicit support top-down only when horizontal footprints overlap", () => {

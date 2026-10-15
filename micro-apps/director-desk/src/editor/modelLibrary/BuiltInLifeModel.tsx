@@ -190,11 +190,21 @@ function BuiltInLifeModelContent({ modelId }: { modelId: string }) {
   return <LegacyProp modelId={id} />;
 }
 
-export function BuiltInLifeModel({ color, modelId }: { color?: string; modelId: string }) {
+export function BuiltInLifeModel({ color, modelId, roughness, metalness }: { color?: string; modelId: string; roughness?: number; metalness?: number }) {
   const rootRef = useRef<Group>(null);
   useLayoutEffect(() => {
     if (rootRef.current) isolateAndTintModelMaterials(rootRef.current, color);
-  }, [color]);
+    rootRef.current?.traverse((node) => {
+      if (!("material" in node)) return;
+      const materials = Array.isArray(node.material) ? node.material : [node.material];
+      materials.forEach((material) => {
+        if (!material || !("roughness" in material) || !("metalness" in material)) return;
+        if (roughness !== undefined) material.roughness = roughness;
+        if (metalness !== undefined) material.metalness = metalness;
+        material.needsUpdate = true;
+      });
+    });
+  }, [color, metalness, roughness]);
   useEffect(() => {
     const root = rootRef.current;
     return () => {

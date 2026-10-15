@@ -16,6 +16,7 @@ import type {
   DirectorObject,
   DirectorObjectMotionKeyframe,
   DirectorObjectMotionPath,
+  DirectorLayoutReferenceCamera,
   DirectorProject,
   DirectorTransform,
   GeometryPrimitiveType,
@@ -53,6 +54,7 @@ import { normalizePerformanceProfileId, type PerformanceProfileId } from "../per
 import { getRuntimePlaybackProgress, setRuntimePlaybackProgress } from "../runtime/playbackRuntime";
 import { buildLayoutBatch } from "../schema/layoutDraft";
 import type { ApplyLayoutDraftInput, ApplyLayoutDraftResult, LayoutBatchTransformPatch } from "../schema/layoutDraft";
+import { resolveLayoutCatalogItem } from "../modelLibrary/modelLibraryCatalog";
 
 export type TransformMode = "translate" | "rotate" | "scale";
 export type CameraPilotMode = "idle" | "pilot";
@@ -173,6 +175,8 @@ interface DirectorInternalState {
   cameraPilotFollowTarget: boolean;
   /** 一次性视口聚焦请求：DirectorCanvas 消费后清空。 */
   viewportFocusRequest: { target: [number, number, number]; id: number } | null;
+  /** 未应用草稿的临时同画幅对照；不写入项目，也不影响已有运镜。 */
+  referenceCameraPreview: CameraShotSnapshot | null;
 }
 
 export interface DirectorActions {
@@ -232,6 +236,7 @@ export interface DirectorActions {
   /** 请求导演台视口把镜头对准某个世界坐标（列表行点击联动用）。 */
   requestViewportFocus: (target: [number, number, number]) => void;
   clearViewportFocusRequest: () => void;
+  previewReferenceCamera: (camera: DirectorLayoutReferenceCamera | null) => void;
   addCameraShot: (snapshot?: CameraShotSnapshot) => string;
   ensureMotionCamera: (snapshot?: CameraShotSnapshot) => string;
   deleteSelectedObject: () => void;
@@ -710,6 +715,7 @@ function createRuntimeStateFromPersistedState(state: DirectorState, sceneInstanc
     cameraPilotLockedPoint: null,
     cameraPilotFollowTarget: false,
     viewportFocusRequest: null,
+    referenceCameraPreview: null,
   };
 }
 
@@ -2472,22 +2478,101 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         const requestedBatchId = mode === "replace-batch" && replaceBatchId
           ? replaceBatchId
           : `layout_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-        const replacingIds = mode === "replace-batch" && replaceBatchId
+        const replacingBatch = mode === "replace-batch" && replaceBatchId
+          ? (state.project.layoutBatches ?? []).find((batch) => batch.id === replaceBatchId)
+          : undefined;
+        const replacingIds = replacingBatch
           ? new Set(
               state.project.objects
                 .filter((object) => object.layoutSource?.batchId === replaceBatchId)
                 .map((object) => object.id)
             )
           : new Set<string>();
-        const retainedObjects = state.project.objects.filter((object) => !replacingIds.has(object.id));
+        const existingReferenceCamera = replacingBatch?.referenceCameraId
+          ? state.project.cameras.find((camera) => camera.id === replacingBatch.referenceCameraId)
+          : undefined;
+        const previousReferenceCamera = replacingBatch?.referenceCamera;
+        const previousReferenceCameraRigPosition = previousReferenceCamera
+          ? getCameraRigPositionFromViewSnapshot({
+              position: previousReferenceCamera.position,
+              target: previousReferenceCamera.target,
+              fov: previousReferenceCamera.fov,
+            })
+          : null;
+        const referenceCameraWasEdited = Boolean(existingReferenceCamera && previousReferenceCamera && (
+          (existingReferenceCamera.motionPath?.keyframes.length ?? 0) > 0
+          || existingReferenceCamera.fov !== previousReferenceCamera.fov
+          || existingReferenceCamera.transform.position.some((value, index) => value !== previousReferenceCameraRigPosition?.[index])
+          || existingReferenceCamera.target.some((value, index) => value !== previousReferenceCamera.target[index])
+        ));
+        const replacingReferenceCameraId = referenceCameraWasEdited ? undefined : replacingBatch?.referenceCameraId;
+        const retainedObjects = state.project.objects.filter((object) => (
+          !replacingIds.has(object.id) && (!replacingReferenceCameraId || object.linkedCameraId !== replacingReferenceCameraId)
+        ));
+        const retainedCameras = state.project.cameras.filter((camera) => camera.id !== replacingReferenceCameraId);
         const built = buildLayoutBatch(
           draft,
           requestedBatchId,
           retainedObjects.map((object) => object.id),
           state.project.scene.groundHeight
         );
+        const componentsById = new Map(draft.components.map((component) => [component.id, component]));
+        const layoutCatalogAssets = new Map<string, DirectorAssetRef>();
+        const objectsWithResolvedAssets = built.objects.map((object) => {
+          const component = componentsById.get(object.layoutSource?.componentId ?? "");
+          const catalogItem = component ? resolveLayoutCatalogItem(component) : null;
+          if (!catalogItem) return object;
+          const assetId = `layout_catalog_${catalogItem.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+          const existingAsset = state.project.assets.find((asset) => asset.id === assetId);
+          if (!existingAsset) {
+            layoutCatalogAssets.set(assetId, {
+              id: assetId,
+              kind: catalogItem.kind === "character" ? "character" : "prop",
+              sourceType: "model",
+              fileName: catalogItem.fileName,
+              name: catalogItem.name,
+              url: catalogItem.url,
+              assetSource: "library",
+              modelFormat: catalogItem.fileName.toLowerCase().endsWith(".glb") ? "glb" : catalogItem.fileName.toLowerCase().endsWith(".obj") ? "obj" : "fbx",
+            });
+          }
+          return { ...object, assetRefId: assetId };
+        });
+        const referenceCamera = built.batch.referenceCamera;
+        const referenceCameraId = referenceCamera
+          ? getNextSequentialId(retainedCameras.map((camera) => camera.id), "cam_reference_", retainedCameras.length + 1)
+          : null;
+        const referenceCameraShot = referenceCamera && referenceCameraId
+          ? {
+              id: referenceCameraId,
+              name: `参考机位·${draft.sourceFileName}`.slice(0, 80),
+              fov: referenceCamera.fov,
+              transform: createTransform(getCameraRigPositionFromViewSnapshot({
+                position: referenceCamera.position,
+                target: referenceCamera.target,
+                fov: referenceCamera.fov,
+              })),
+              targetMode: "manual" as const,
+              target: [...referenceCamera.target] as [number, number, number],
+              lastCaptureUrl: null,
+              captures: [],
+              motionPath: { ...DEFAULT_CAMERA_MOTION_PATH, keyframes: [] },
+            } satisfies DirectorCameraShot
+          : null;
+        const referenceCameraObject = referenceCameraShot
+          ? {
+              id: getNextSequentialId(retainedObjects.map((object) => object.id), "cam_object_reference_", retainedObjects.length + 1),
+              name: referenceCameraShot.name,
+              kind: "camera" as const,
+              visible: true,
+              locked: false,
+              linkedCameraId: referenceCameraShot.id,
+              transform: referenceCameraShot.transform,
+            } satisfies DirectorObject
+          : null;
         const retainedBatches = (state.project.layoutBatches ?? []).filter((batch) => batch.id !== requestedBatchId);
-        result = { batchId: requestedBatchId, objectIds: built.objects.map((object) => object.id) };
+        const batch = referenceCameraId ? { ...built.batch, referenceCameraId } : built.batch;
+        result = { batchId: requestedBatchId, objectIds: objectsWithResolvedAssets.map((object) => object.id) };
 
         return {
           ...state,
@@ -2495,10 +2580,15 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
           selectedObjectIds: result.objectIds,
           selectedCrowdId: null,
           directorInspectorMode: "auto",
+          cameraMotionPlaying: false,
+          cameraMotionProgress: 0,
           project: {
             ...state.project,
-            objects: [...retainedObjects, ...built.objects],
-            layoutBatches: [...retainedBatches, built.batch],
+            assets: [...state.project.assets, ...layoutCatalogAssets.values()],
+            objects: [...retainedObjects, ...objectsWithResolvedAssets, ...(referenceCameraObject ? [referenceCameraObject] : [])],
+            cameras: [...retainedCameras, ...(referenceCameraShot ? [referenceCameraShot] : [])],
+            activeCameraId: referenceCameraShot?.id ?? state.project.activeCameraId,
+            layoutBatches: [...retainedBatches, batch],
           },
         };
       });
@@ -2571,6 +2661,13 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
     },
     clearViewportFocusRequest: () => {
       set({ viewportFocusRequest: null });
+    },
+    previewReferenceCamera: (camera) => {
+      set({
+        referenceCameraPreview: camera
+          ? { position: [...camera.position], target: [...camera.target], fov: camera.fov }
+          : null,
+      });
     },
     addCameraShot: (snapshot) => {
       let nextCameraId = "";

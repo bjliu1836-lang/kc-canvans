@@ -2,6 +2,7 @@ import {
   ArrowDownToLine,
   Box,
   CheckCheck,
+  Camera,
   Eye,
   EyeOff,
   ImagePlus,
@@ -30,6 +31,7 @@ import {
 } from "../io/referenceLayoutClient";
 import {
   calibrateLayoutDraft,
+  getLayoutDraftReferenceCamera,
   LAYOUT_ANCHOR_PRESETS,
   LAYOUT_CATEGORY_COLORS,
   LAYOUT_CHARACTER_COLOR,
@@ -144,10 +146,14 @@ function isEditableTarget(target: EventTarget | null) {
 
 export function ReferenceLayoutPanel() {
   const applyLayoutDraft = useDirectorStore((state) => state.applyLayoutDraft);
+  const setViewMode = useDirectorStore((state) => state.setViewMode);
+  const setFinishedShotFov = useDirectorStore((state) => state.setFinishedShotFov);
   const transformLayoutBatch = useDirectorStore((state) => state.transformLayoutBatch);
   const selectObject = useDirectorStore((state) => state.selectObject);
   const toggleObjectSelection = useDirectorStore((state) => state.toggleObjectSelection);
   const requestViewportFocus = useDirectorStore((state) => state.requestViewportFocus);
+  const previewReferenceCamera = useDirectorStore((state) => state.previewReferenceCamera);
+  const referenceCameraPreview = useDirectorStore((state) => state.referenceCameraPreview);
   const groundHeight = useDirectorStore((state) => state.project.scene.groundHeight);
   const sceneObjects = useDirectorStore((state) => state.project.objects);
   const layoutBatches = useDirectorStore((state) => state.project.layoutBatches ?? []);
@@ -193,6 +199,7 @@ export function ReferenceLayoutPanel() {
   );
   const selectedImage = images.find((image) => image.sourceId === selectedSourceId) ?? images[0] ?? null;
   const selectedComponent = draft?.components.find((component) => component.id === selectedComponentId) ?? null;
+  const draftReferenceCamera = draft ? getLayoutDraftReferenceCamera(draft) : null;
   const selectedCharacter = draft?.characters.find((character) => character.id === selectedCharacterId) ?? null;
   const selectedComponentSupport = selectedComponent?.supportComponentId
     ? draft?.components.find((component) => component.id === selectedComponent.supportComponentId) ?? null
@@ -482,15 +489,32 @@ export function ReferenceLayoutPanel() {
 
   function applyDraft(mode: "append" | "replace-batch") {
     if (!draft) return;
+    const wasPreviewingReferenceCamera = Boolean(useDirectorStore.getState().referenceCameraPreview);
     const result = applyLayoutDraft({
       draft,
       mode,
       replaceBatchId: mode === "replace-batch" ? replaceBatchId : null,
     });
+    if (wasPreviewingReferenceCamera) {
+      setFinishedShotFov(null);
+      setViewMode("camera");
+      previewReferenceCamera(null);
+    }
     setAppliedBatchId(result.batchId);
     updateRetainedPanelState(scopeId, { appliedBatchId: result.batchId });
     setDraft(null);
     setError(null);
+  }
+
+  function previewDraftReferenceCamera() {
+    if (!draft) return;
+    if (referenceCameraPreview) {
+      previewReferenceCamera(null);
+      setViewMode("director");
+      return;
+    }
+    setViewMode("director");
+    previewReferenceCamera(getLayoutDraftReferenceCamera(draft));
   }
 
   function selectWholeBatch() {
@@ -653,8 +677,18 @@ export function ReferenceLayoutPanel() {
           <div className="reference-layout-draft" aria-label="粗布景暂存预览">
             <div className="reference-layout-draft-heading">
               <span><Box aria-hidden="true" size={14} />待应用布景 · {draft.components.length} 个组件 / {characterCount} 个人物</span>
-              <em>{draft.scale.mode === "anchored" ? "已按已知尺寸校正" : "未锚定 · 尺度为估计"}</em>
+              <span className="reference-layout-adjust-heading-actions">
+                <em>{draft.scale.mode === "anchored" ? "已按已知尺寸校正" : "未锚定 · 尺度为估计"}</em>
+              <button type="button" onClick={previewDraftReferenceCamera} title={referenceCameraPreview ? "退出参考机位预览" : "按同一推断机位查看可编辑草稿"}>
+                  <Camera aria-hidden="true" size={13} />参考机位
+                </button>
+              </span>
             </div>
+            <p className="reference-layout-anchor-hint">
+              {draftReferenceCamera?.source === "model"
+                ? `参考机位为单图推断（置信度 ${Math.round(draftReferenceCamera.confidence * 100)}%），用于画幅对照。`
+                : "未得到可信相机信息，已按场景边界自动取景；可应用后继续调整机位。"}
+            </p>
             {uncertainCount > 0 ? (
               <div className="reference-layout-batch-actions">
                 <span>{uncertainCount} 个待确认</span>
@@ -891,7 +925,7 @@ export function ReferenceLayoutPanel() {
             <div className="reference-layout-commit-row">
               <button className="reference-layout-primary-button" disabled={!draft.components.length && !characterCount} type="button" onClick={() => applyDraft("append")}>添加到当前场景</button>
               <button className="reference-layout-secondary-button" disabled={!replaceBatchId || (!draft.components.length && !characterCount)} type="button" onClick={() => applyDraft("replace-batch")}>替换此生成批次</button>
-              <button className="reference-layout-secondary-button" type="button" onClick={() => { discardDraft(); setError(null); }}>丢弃草稿</button>
+              <button className="reference-layout-secondary-button" type="button" onClick={() => { discardDraft(); previewReferenceCamera(null); setError(null); }}>丢弃草稿</button>
             </div>
             {characterCount > 0 ? (
               <p className="reference-layout-anchor-hint">将同时创建 {characterCount} 个角色占位（内置素体 + 姿态），可像普通角色一样编辑、排走位。</p>

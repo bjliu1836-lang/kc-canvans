@@ -1143,6 +1143,7 @@ export function DirectorCanvas() {
   const startCameraPilot = useDirectorStore((state) => state.startCameraPilot);
   const stopCameraPilot = useDirectorStore((state) => state.stopCameraPilot);
   const viewportFocusRequest = useDirectorStore((state) => state.viewportFocusRequest);
+  const referenceCameraPreview = useDirectorStore((state) => state.referenceCameraPreview);
   const clearViewportFocusRequest = useDirectorStore((state) => state.clearViewportFocusRequest);
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
@@ -1175,7 +1176,7 @@ export function DirectorCanvas() {
     () => (activeCamera ? getCameraMotionPath(activeCamera) : undefined),
     [activeCamera]
   );
-  const showViewportGrid = shouldRenderViewportGrid(sceneSettings.showGrid);
+  const showViewportGrid = !referenceCameraPreview && viewMode !== "camera" && shouldRenderViewportGrid(sceneSettings.showGrid);
   const hasObjectMotion = useMemo(
     () => sceneObjects.some((item) =>
       (item.motionPath?.keyframes?.length ?? 0) >= 2 || Boolean(item.characterRig?.actionPresetId)
@@ -1555,6 +1556,16 @@ export function DirectorCanvas() {
 
   // 消费一次性聚焦请求：保持当前视线方向，把视点平移到目标附近
   useEffect(() => {
+    if (!referenceCameraPreview || isCameraPiloting) return;
+    if (viewMode !== "director") {
+      setViewMode("director");
+      return;
+    }
+    updateDirectorViewSnapshot(referenceCameraPreview, true);
+  }, [referenceCameraPreview, viewMode, isCameraPiloting]);
+
+  // 消费一次性聚焦请求：保持当前视线方向，把视点平移到目标附近
+  useEffect(() => {
     if (!viewportFocusRequest || viewMode !== "director" || isCameraPiloting) return;
 
     const current = viewportCameraSnapshotRef.current;
@@ -1822,7 +1833,7 @@ export function DirectorCanvas() {
             <OrbitControls
               ref={controlsRef}
               enableDamping
-              enabled={!isCameraPiloting && !isCharacterRoutePlacement}
+              enabled={!isCameraPiloting && !isCharacterRoutePlacement && !referenceCameraPreview}
               makeDefault
               rotateSpeed={viewportRotateSensitivity}
               target={DEFAULT_DIRECTOR_VIEW_SNAPSHOT.target}

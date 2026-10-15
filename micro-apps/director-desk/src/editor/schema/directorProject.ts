@@ -133,6 +133,21 @@ export interface DirectorObject {
     category: DirectorLayoutCategory | "character";
     confidence: number;
     uncertain: boolean;
+    /** 参考图识别出的受限模型语义与材质提示；不等同于外部 image-to-3D 资产。 */
+    modelDescriptor?: string;
+    appearance?: {
+      color?: string;
+      roughness?: number;
+      metalness?: number;
+      /** 局部 +Z 正面在世界中的朝向；由对象 rotation 同步呈现。 */
+      frontDirectionDegrees?: number;
+    };
+    assembly?: Array<{
+      primitive: "box" | "cylinder" | "sphere" | "cone" | "torus";
+      position: [number, number, number];
+      size: [number, number, number];
+      rotation?: [number, number, number];
+    }>;
     /** category === "character" 时携带的占位元数据（姿态与估算身高）。 */
     characterMeta?: {
       posture: "stand" | "sit" | "crouch" | "kneel" | "lie" | "unknown";
@@ -157,6 +172,19 @@ export interface DirectorLayoutBatch {
     anchorDimension?: "width" | "height";
   };
   objectIds: string[];
+  /** 单图透视推断的对照机位；应用时以独立相机保存，绝不覆盖既有运镜。 */
+  referenceCamera?: DirectorLayoutReferenceCamera;
+  referenceCameraId?: string;
+}
+
+export interface DirectorLayoutReferenceCamera {
+  projection: "perspective";
+  position: [number, number, number];
+  target: [number, number, number];
+  fov: number;
+  /** 0 表示按场景边界自动取景，并非模型恢复出的原始相机。 */
+  confidence: number;
+  source: "model" | "bounds-fallback";
 }
 
 export interface DirectorObjectMotionKeyframe {
