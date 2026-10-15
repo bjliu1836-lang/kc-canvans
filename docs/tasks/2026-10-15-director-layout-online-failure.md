@@ -2,7 +2,7 @@
 
 创建：2026-10-15
 
-状态：进行中
+状态：已发布并在线核验
 范围：定位主画布内嵌导演台点击“生成”后显示“图片模型未能返回可用的布景结构，请重试或更换参考图”的真实线上触发原因；对照线上前端资源与 Worker 版本；在不读取或暴露密钥、不绕过认证、不伪造供应商结果的前提下，取得最小真实请求或日志证据，并做窄修复与验收。
 
 ## 验收口径
@@ -30,8 +30,9 @@
   - 同一保存的真实供应商原包分别重放到旧 HEAD 与修复后 Worker handler：旧版 HTTP 502、issue“第 7 个组件的门未依附任何墙面”；修复后 HTTP 200、21 组件，门 [-3,0,0.9] / [0.9,2.05,0.08] / yaw 90° 原样保留且 `uncertain=false`。local server 用相同原包重放也 HTTP 200；没有额外供应商调用。
 - [x] T05 完成本地针对性验证并向主代理提交发布复核信息。
   - 验证：Worker 测试 18/18、导演台定向 Vitest 34/34、`node --check server/server.mjs`、`git diff --check` 和 `npm run build` 全通过。构建更新导演台入口至新 bundle `index-BuX--Qzn.js`；`npx wrangler deploy --dry-run --keep-vars` 成功，上传包 83.16 KiB。
-  - 候选发布：`wrangler.toml` Worker 名为 `kc-canvans`；只读版本列表最新 100% 部署 `2638b355-6a1c-4632-917e-c587427243d5`，前一 100% 部署 `a8ef593d-0934-49e7-a2fc-28d3a5f99d31`。标准命令 `npm run deploy:cloudflare` 会重建并执行 `wrangler deploy --keep-vars`；不改 vars/secrets。入口 HTML 与新前端 bundle 须随 API Worker 同次部署。当前未部署、未推送、未提交，等待主代理安排。
-  - 发布流程核实：当前 checkout 没有 `.github/` 或其他 CI workflow 定义；`package.json` 提供 `deploy:cloudflare` 手动发布脚本。收到主代理授权后，推送 `origin/main` 后执行单次 `npx wrangler deploy --keep-vars`，复用已通过的构建产物，不重复构建。
+  - 发布流程核实：仓库无 `.github/` 或其他 CI workflow，故按授权向 `origin/main` 推送后执行单次 `npx wrangler deploy --keep-vars`，复用已通过构建产物；Wrangler 成功上传入口 HTML 与新前端 assets，无配置变更。
+  - 交付：代码提交 `ce20b80efa5958561a54dca8b0cb95e0f292c0b3` 已推至 `origin/main`。Cloudflare Worker `kc-canvans` 当前 100% 版本 `680be0bf-c3db-4db7-897b-c962e7032a0e`（2026-10-15 09:50:05 UTC）；上一版 `2638b355-6a1c-4632-917e-c587427243d5` 是回退目标。
+  - 线上核验：`/director-desk/` HTTP 200，引用 `/director-desk/assets/index-BuX--Qzn.js` 与 `index-Dg2cOTVD.css`。JS HTTP 200，SHA256 `D3EB95F6C8A3234DBC329BCACAD3209C9FCB3EECA2E9B9F3690D34253F7C7227`，含 invalid-layout code 与安全中文提示。匿名 POST `/api/director-layout` 仍 HTTP 401 `UNAUTHORIZED`；未绕过认证或调用生产模型。线上用户真实点击生成的成功状态尚待用户用同图复试；本地保存的同一真实供应商原包新 handler 重放为 HTTP 200。
 
 ## 外部能力边界
 
