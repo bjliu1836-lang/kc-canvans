@@ -634,16 +634,31 @@ const validateDirectorLayoutCandidate = (candidate) => {
     if (!Array.isArray(opening.position) || !Array.isArray(opening.size)) return false;
     const wallYaw = Number(wall.rotationYDegrees || 0);
     const openingYaw = Number(opening.rotationYDegrees || 0);
-    const halfTurnDifference = Math.abs(((openingYaw - wallYaw + 90) % 180 + 180) % 180 - 90);
+    const wallRunsAlongX = wall.size[0] >= wall.size[2];
+    const expectedOpeningYaw = wallYaw + (wallRunsAlongX ? 0 : 90);
+    const halfTurnDifference = Math.abs(((openingYaw - expectedOpeningYaw + 90) % 180 + 180) % 180 - 90);
     if (halfTurnDifference > 18) return false;
     const radians = wallYaw * Math.PI / 180;
     const dx = opening.position[0] - wall.position[0];
     const dz = opening.position[2] - wall.position[2];
     const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
     const localZ = Math.sin(radians) * dx + Math.cos(radians) * dz;
-    return Math.abs(localX) + opening.size[0] / 2 <= wall.size[0] / 2 + 0.12
-      && Math.abs(localZ) <= (wall.size[2] + opening.size[2]) / 2 + 0.18;
+    const alongWall = wallRunsAlongX ? localX : localZ;
+    const acrossWall = wallRunsAlongX ? localZ : localX;
+    const wallLength = wallRunsAlongX ? wall.size[0] : wall.size[2];
+    const wallThickness = wallRunsAlongX ? wall.size[2] : wall.size[0];
+    const verticalOverlap = opening.position[1] <= wall.position[1] + wall.size[1] + 0.12
+      && opening.position[1] + opening.size[1] >= wall.position[1] - 0.12;
+    return verticalOverlap
+      && Math.abs(alongWall) + opening.size[0] / 2 <= wallLength / 2 + 0.12
+      && Math.abs(acrossWall) <= (wallThickness + opening.size[2]) / 2 + 0.18;
   });
+  const appendOpeningDiagnostic = (notes, diagnostic) => {
+    const current = typeof notes === 'string' ? notes.trim().slice(0, 240) : '';
+    if (current.includes(diagnostic)) return current;
+    const prefix = current.slice(0, Math.max(0, 239 - diagnostic.length)).replace(/[；\s]+$/g, '');
+    return (prefix ? `${prefix}；` : '') + diagnostic.slice(0, 240);
+  };
   components?.forEach((item, index) => {
     if (!item || typeof item !== 'object' || item.supportComponentId === undefined) return;
     const label = `第 ${index + 1} 个组件`;
@@ -657,11 +672,10 @@ const validateDirectorLayoutCandidate = (candidate) => {
       issues.push(`${label}与支撑组件 ${supportId} 的水平足迹不重叠`);
     }
   });
-  components?.forEach((item, index) => {
-    if (!item || typeof item !== 'object' || !['door', 'window'].includes(item.category)) return;
-    if (!openingAttachedToWall(item)) {
-      issues.push(`第 ${index + 1} 个组件的${item.category === 'door' ? '门' : '窗'}未依附任何墙面`);
-    }
+  const diagnosedComponents = (components || []).map((item, index) => {
+    if (!item || typeof item !== 'object' || !['door', 'window'].includes(item.category) || openingAttachedToWall(item)) return item;
+    const label = `${item.category === 'door' ? '门' : '窗'}未依附可识别墙面，待确认位置与朝向`;
+    return { ...item, uncertain: true, notes: appendOpeningDiagnostic(item.notes, label) };
   });
   const supportVisitState = new Map();
   const visitSupport = (id) => {
@@ -738,7 +752,7 @@ const validateDirectorLayoutCandidate = (candidate) => {
     error.issues = issues;
     throw error;
   }
-  return candidate;
+  return components ? { ...candidate, components: diagnosedComponents } : candidate;
 };
 
 const DEFAULT_SCRIPT_ASSET_SYSTEM_PROMPT = [

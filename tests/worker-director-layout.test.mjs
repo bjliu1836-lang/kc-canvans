@@ -62,6 +62,49 @@ test('director-layout accepts an assembly whose rotated bounds remain inside its
   assert.deepEqual((await response.json()).draft, rotatedDraft);
 });
 
+test('director-layout accepts a doorway aligned with the long axis of a Z-oriented wall', async (t) => {
+  const token = await login();
+  const rotatedDraft = structuredClone(validDraft);
+  rotatedDraft.components = [
+    {
+      id: 'wall_left', name: '左墙', category: 'wall', primitive: 'box',
+      position: [-3, 0, 0], size: [0.15, 2.8, 7], rotationYDegrees: 0,
+      confidence: 0.8, uncertain: false,
+    },
+    {
+      id: 'door_left', name: '门', category: 'door', primitive: 'box',
+      position: [-3, 0, 0.9], size: [0.9, 2.05, 0.08], rotationYDegrees: 90,
+      confidence: 0.75, uncertain: false,
+    },
+  ];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(rotatedDraft) } }] });
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const response = await call('/api/director-layout', { method: 'POST', token, env: layoutEnv, body: { image: { url: 'data:image/png;base64,AA==' } } });
+  assert.equal(response.status, 200);
+  const result = (await response.json()).draft;
+  assert.deepEqual(result.components, rotatedDraft.components);
+});
+
+test('director-layout keeps a genuinely detached opening as an uncertain draft diagnostic', async (t) => {
+  const token = await login();
+  const draft = structuredClone(validDraft);
+  draft.components.push({
+    id: 'window_detached', name: '待确认窗', category: 'window', primitive: 'box',
+    position: [5, 0.8, 0], size: [1, 1, 0.08], rotationYDegrees: 0,
+    confidence: 0.8, uncertain: false,
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(draft) } }] });
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const response = await call('/api/director-layout', { method: 'POST', token, env: layoutEnv, body: { image: { url: 'data:image/png;base64,AA==' } } });
+  assert.equal(response.status, 200);
+  const opening = (await response.json()).draft.components.find((item) => item.id === 'window_detached');
+  assert.equal(opening.position[0], 5);
+  assert.equal(opening.uncertain, true);
+  assert.match(opening.notes, /窗未依附可识别墙面，待确认位置与朝向/);
+});
+
 test('director-layout rejects a rotated assembly that escapes its parent bounds and requests one correction', async (t) => {
   const token = await login();
   let modelCalls = 0;

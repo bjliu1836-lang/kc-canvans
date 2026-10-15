@@ -460,16 +460,21 @@ function carveDoorOpenings(components: LayoutDraftComponent[]) {
     const angle = component.rotationYDegrees * Math.PI / 180;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
-    const wallHalfWidth = component.size[0] / 2;
+    const wallRunsAlongX = component.size[0] >= component.size[2];
+    const wallHalfLength = (wallRunsAlongX ? component.size[0] : component.size[2]) / 2;
     const door = doors.find((candidate) => {
-      if (normalizeHalfTurnDifference(candidate.rotationYDegrees, component.rotationYDegrees) > 18) return false;
+      const expectedDoorYaw = component.rotationYDegrees + (wallRunsAlongX ? 0 : 90);
+      if (normalizeHalfTurnDifference(candidate.rotationYDegrees, expectedDoorYaw) > 18) return false;
       const dx = candidate.position[0] - component.position[0];
       const dz = candidate.position[2] - component.position[2];
       const localX = cos * dx - sin * dz;
       const localZ = sin * dx + cos * dz;
-      return Math.abs(localZ) <= (component.size[2] + candidate.size[2]) / 2 + 0.12
-        && localX - candidate.size[0] / 2 > -wallHalfWidth
-        && localX + candidate.size[0] / 2 < wallHalfWidth
+      const alongWall = wallRunsAlongX ? localX : localZ;
+      const acrossWall = wallRunsAlongX ? localZ : localX;
+      const wallThickness = wallRunsAlongX ? component.size[2] : component.size[0];
+      return Math.abs(acrossWall) <= (wallThickness + candidate.size[2]) / 2 + 0.12
+        && alongWall - candidate.size[0] / 2 > -wallHalfLength
+        && alongWall + candidate.size[0] / 2 < wallHalfLength
         && candidate.position[1] <= component.position[1] + 0.2
         && candidate.size[1] < component.size[1] - 0.05;
     });
@@ -481,27 +486,29 @@ function carveDoorOpenings(components: LayoutDraftComponent[]) {
     const dx = door.position[0] - component.position[0];
     const dz = door.position[2] - component.position[2];
     const localDoorX = cos * dx - sin * dz;
-    const doorLeft = localDoorX - door.size[0] / 2;
-    const doorRight = localDoorX + door.size[0] / 2;
-    const segments: Array<{ suffix: string; name: string; localX: number; width: number; y: number; height: number }> = [];
-    const leftWidth = doorLeft + wallHalfWidth;
-    const rightWidth = wallHalfWidth - doorRight;
+    const localDoorZ = sin * dx + cos * dz;
+    const localDoorAlongWall = wallRunsAlongX ? localDoorX : localDoorZ;
+    const doorLeft = localDoorAlongWall - door.size[0] / 2;
+    const doorRight = localDoorAlongWall + door.size[0] / 2;
+    const segments: Array<{ suffix: string; name: string; along: number; width: number; y: number; height: number }> = [];
+    const leftWidth = doorLeft + wallHalfLength;
+    const rightWidth = wallHalfLength - doorRight;
     const topHeight = component.size[1] - door.size[1];
-    if (leftWidth > 0.05) segments.push({ suffix: "left", name: "左段", localX: -wallHalfWidth + leftWidth / 2, width: leftWidth, y: component.position[1], height: component.size[1] });
-    if (rightWidth > 0.05) segments.push({ suffix: "right", name: "右段", localX: doorRight + rightWidth / 2, width: rightWidth, y: component.position[1], height: component.size[1] });
-    if (topHeight > 0.05) segments.push({ suffix: "top", name: "门楣", localX: localDoorX, width: door.size[0], y: component.position[1] + door.size[1], height: topHeight });
+    if (leftWidth > 0.05) segments.push({ suffix: "left", name: "左段", along: -wallHalfLength + leftWidth / 2, width: leftWidth, y: component.position[1], height: component.size[1] });
+    if (rightWidth > 0.05) segments.push({ suffix: "right", name: "右段", along: doorRight + rightWidth / 2, width: rightWidth, y: component.position[1], height: component.size[1] });
+    if (topHeight > 0.05) segments.push({ suffix: "top", name: "门楣", along: localDoorAlongWall, width: door.size[0], y: component.position[1] + door.size[1], height: topHeight });
 
     segments.forEach((segment) => {
       result.push({
         ...component,
         id: `${component.id}_${segment.suffix}`,
         name: `${component.name}·${segment.name}`,
-        position: [
-          component.position[0] + cos * segment.localX,
-          segment.y,
-          component.position[2] - sin * segment.localX,
-        ],
-        size: [segment.width, segment.height, component.size[2]],
+        position: wallRunsAlongX
+          ? [component.position[0] + cos * segment.along, segment.y, component.position[2] - sin * segment.along]
+          : [component.position[0] + sin * segment.along, segment.y, component.position[2] + cos * segment.along],
+        size: wallRunsAlongX
+          ? [segment.width, segment.height, component.size[2]]
+          : [component.size[0], segment.height, segment.width],
         notes: [component.notes, "已为识别到的门保留通道"].filter(Boolean).join("；"),
       });
     });
@@ -546,14 +553,23 @@ function canUseBoundingBoxTopAsSupport(component: LayoutDraftComponent) {
 
 function isOpeningAttachedToWall(opening: LayoutDraftComponent, walls: readonly LayoutDraftComponent[]) {
   return walls.some((wall) => {
-    if (normalizeHalfTurnDifference(opening.rotationYDegrees, wall.rotationYDegrees) > 18) return false;
+    const wallRunsAlongX = wall.size[0] >= wall.size[2];
+    const expectedOpeningYaw = wall.rotationYDegrees + (wallRunsAlongX ? 0 : 90);
+    if (normalizeHalfTurnDifference(opening.rotationYDegrees, expectedOpeningYaw) > 18) return false;
     const radians = wall.rotationYDegrees * Math.PI / 180;
     const dx = opening.position[0] - wall.position[0];
     const dz = opening.position[2] - wall.position[2];
     const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
     const localZ = Math.sin(radians) * dx + Math.cos(radians) * dz;
-    return Math.abs(localX) + opening.size[0] / 2 <= wall.size[0] / 2 + 0.12
-      && Math.abs(localZ) <= (wall.size[2] + opening.size[2]) / 2 + 0.18;
+    const alongWall = wallRunsAlongX ? localX : localZ;
+    const acrossWall = wallRunsAlongX ? localZ : localX;
+    const wallLength = wallRunsAlongX ? wall.size[0] : wall.size[2];
+    const wallThickness = wallRunsAlongX ? wall.size[2] : wall.size[0];
+    const verticalOverlap = opening.position[1] <= wall.position[1] + wall.size[1] + 0.12
+      && opening.position[1] + opening.size[1] >= wall.position[1] - 0.12;
+    return verticalOverlap
+      && Math.abs(alongWall) + opening.size[0] / 2 <= wallLength / 2 + 0.12
+      && Math.abs(acrossWall) <= (wallThickness + opening.size[2]) / 2 + 0.18;
   });
 }
 

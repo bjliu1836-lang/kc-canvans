@@ -5,6 +5,16 @@ import {
 } from "../schema/layoutDraft";
 
 const AUTH_TOKEN_KEY = "KC_CANVAS_AUTH_TOKEN";
+const INVALID_LAYOUT_MESSAGE = "图片模型未能返回可用的布景结构，请重试或更换参考图";
+
+function readableLayoutIssue(data: Record<string, unknown>) {
+  if (!Array.isArray(data.issues)) return "";
+  const issue = data.issues.find((item): item is string => typeof item === "string")?.trim();
+  if (!issue || issue.length > 180) return "";
+  if (/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(issue)) return "";
+  if (/(?:\b(?:api[-_ ]?key|token|secret|authorization|bearer)\b|https?:\/\/|data:image\/|[<>{}\[\]`"'\\])/i.test(issue)) return "";
+  return issue.replace(/\s+/g, " ");
+}
 
 export interface ReferenceLayoutImage extends LayoutDraftSource {
   url: string;
@@ -17,7 +27,10 @@ function readableLayoutError(status: number, data: Record<string, unknown>) {
   if (status === 402) return "图片理解模型额度不足，请补充额度后重试";
   if (code === "DIRECTOR_LAYOUT_MODEL_NOT_CONFIGURED") return "尚未配置图片理解模型，请联系管理员完成模型配置后重试";
   if (code === "DIRECTOR_LAYOUT_IMAGE_REQUIRED") return "参考图无效，请重新选择图片";
-  if (code === "DIRECTOR_LAYOUT_INVALID_MODEL_JSON") return "图片模型未能返回可用的布景结构，请重试或更换参考图";
+  if (code === "DIRECTOR_LAYOUT_INVALID_MODEL_JSON") {
+    const issue = readableLayoutIssue(data);
+    return issue ? `${INVALID_LAYOUT_MESSAGE}（${issue}）` : INVALID_LAYOUT_MESSAGE;
+  }
   return typeof data.message === "string" && data.message.trim()
     ? data.message
     : `粗布景生成失败（${status}）`;

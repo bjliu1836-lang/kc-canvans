@@ -265,6 +265,28 @@ describe("layout draft validation", () => {
     expect(window.notes).toContain("窗未依附可识别墙面");
   });
 
+  it("recognizes and carves a door on the long Z axis of a wall", () => {
+    const value: any = candidate();
+    value.components = [{
+      id: "wall_left", name: "左墙", category: "wall", primitive: "box",
+      position: [-3, 0, 0], size: [0.15, 2.8, 7], rotationYDegrees: 0,
+      confidence: 0.8, uncertain: false,
+    }, {
+      id: "door_left", name: "门", category: "door", primitive: "box",
+      position: [-3, 0, 0.9], size: [0.9, 2.05, 0.08], rotationYDegrees: 90,
+      confidence: 0.75, uncertain: false,
+    }];
+
+    const draft = validateLayoutDraftCandidate(value, source);
+    const door = draft.components.find((component) => component.id === "door_left")!;
+    const carvedWall = draft.components.filter((component) => component.id.startsWith("wall_left_"));
+    expect(door.uncertain).toBe(false);
+    expect(door.notes).toBeUndefined();
+    expect(carvedWall.map((component) => component.id)).toEqual(["wall_left_left", "wall_left_right", "wall_left_top"]);
+    expect(carvedWall.every((component) => component.size[0] === 0.15)).toBe(true);
+    expect(carvedWall.find((component) => component.id === "wall_left_top")!.position[1]).toBe(2.05);
+  });
+
   it("resolves explicit support top-down only when horizontal footprints overlap", () => {
     const value: any = candidateWithCharacters();
     value.components = [
