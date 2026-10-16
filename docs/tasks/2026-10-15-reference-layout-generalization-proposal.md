@@ -201,3 +201,8 @@
 
 - [x] Director Desk 的 hashed JS、CSS 与 HTML 从 `artifacts/codex-root-build-output-20261016-final/director-desk` 原样恢复；三者 SHA-256 与构建归档逐项一致。保留 `index-2_J4Va5y.js` hash 路径，不做手工 bundle 编辑；移除误加的 `director-layout.js`。
 - [x] 生成 bundle 内的 shader literal 保留构建输出自带的尾随空白及混合缩进。源文件与其余提交内容通过普通 `git diff --cached --check`；对原始生成 JS 单独以 `git -c core.whitespace=-blank-at-eol,-space-before-tab diff --cached --check -- public/director-desk/assets/index-2_J4Va5y.js` 检查，并通过 `node --check`。
+
+### 2026-10-16 清理陈旧快照测试与补齐评估文档
+
+- [x] 移除与新通用 assembly preset 输出不兼容的寺庙 normalized snapshot 集成测试。通用 `layoutDraft.test.ts` 定向运行 39/39 通过，覆盖有界既存 assembly 验证、床/帘/书架补齐 assembly 时父组件 position/size、component ID 与 preview/apply payload 保持，以及常见家具/道具语义 assembly 回归。
+- [x] 纳入关联的卧室布局只读评估文档，保留其 2026-10-15 时间、证据范围和“截图无法对应当前模型原包”结论；核对文档不含密钥、图片 base64、登录态或个人信息。
