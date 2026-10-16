@@ -196,3 +196,8 @@
 - [x] 删除旧 `normalizeAssemblyFixture.test.ts` snapshot 集成测试：本轮运行该测试确认，旧 saved-normalized fixture 与当前通用 semantic assembly 归一化输出已不一致（原先只断言 19 个 component、18 个 assembly）；保留更通用的 schema/assembly 回归，不提交 artifacts 快照。
 - [x] 最终验证：相关定向测试 65/65 通过；根 `npm run build` 成功（根 Vite 1746 模块、Director Desk 2270 模块），仅既有大 chunk 警告；浏览器 36/41 固定夹具均显示残差待复核警告且无 console error；`git diff --check` 通过，仅 LF/CRLF 提示。
 - [ ] 视觉拟合尚未达标：卧室/寺庙 bbox 误差 `.2731/.3317` 均高于 `.22`，质量保持 `needsReview/error-too-high`；不宣称视觉验收通过。
+
+### 2026-10-16 静态产物一致性修正
+
+- [x] Director Desk 的 hashed JS、CSS 与 HTML 从 `artifacts/codex-root-build-output-20261016-final/director-desk` 原样恢复；三者 SHA-256 与构建归档逐项一致。保留 `index-2_J4Va5y.js` hash 路径，不做手工 bundle 编辑；移除误加的 `director-layout.js`。
+- [x] 生成 bundle 内的 shader literal 保留构建输出自带的尾随空白及混合缩进。源文件与其余提交内容通过普通 `git diff --cached --check`；对原始生成 JS 单独以 `git -c core.whitespace=-blank-at-eol,-space-before-tab diff --cached --check -- public/director-desk/assets/index-2_J4Va5y.js` 检查，并通过 `node --check`。
