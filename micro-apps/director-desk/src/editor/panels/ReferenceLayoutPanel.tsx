@@ -29,6 +29,7 @@ import {
   requestReferenceLayout,
   type ReferenceLayoutImage,
 } from "../io/referenceLayoutClient";
+import { downloadLayoutDiagnostics, isLayoutDiagnosticsEnabled, recordLayoutDraftApplied, recordLayoutReferencePreview } from "../io/layoutDiagnostics";
 import {
   calibrateLayoutDraft,
   getLayoutDraftReferenceCamera,
@@ -51,6 +52,46 @@ import {
 import { useDirectorStore } from "../store/directorStore";
 import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
 import { InspectorSection } from "./InspectorControls";
+
+const LAYOUT_VALIDATION_WARNING_LABELS: Record<string, string> = {
+  space_type_invalid: "空间类型无法确认。",
+  observations_truncated: "可见性证据较多，部分已省略。",
+  observation_invalid: "部分可见性证据格式无效，已忽略。",
+  observation_component_missing: "部分可见性证据没有对应组件，已忽略。",
+  relations_truncated: "空间关系较多，部分已省略。",
+  relation_invalid: "部分空间关系格式无效，已忽略。",
+  relation_endpoint_missing: "部分空间关系缺少有效组件，已忽略。",
+  attachment_unresolved: "门窗附着关系无法安全应用，请检查位置和朝向。",
+  attachment_geometry_conflict: "门窗与墙的几何不匹配，请检查位置和朝向。",
+  attachment_adjusted_review: "已按明确关系贴合门窗与墙面，请复核结果。",
+  head_at_geometry_conflict: "床头与目标墙的位置关系不一致；床保持原位，请确认。",
+  head_at_requires_visual_review: "床头墙关系需要对照参考图确认。",
+  head_at_endpoint_invalid: "床头关系的端点应为床体（semanticType=bed）指向墙；当前关系待确认。",
+  appearance_color_missing: "未识别原图颜色，当前使用默认材质，请确认",
+  component_exceeds_room_height: "有可见组件顶部超出已识别墙高；已保留原几何，请对照参考图确认。",
+};
+
+function getLayoutValidationWarningLabels(warnings: readonly string[] | undefined) {
+  return [...new Set((warnings ?? []).map((warning) => LAYOUT_VALIDATION_WARNING_LABELS[warning]).filter(Boolean))];
+}
+
+function getProjectionFitReviewMessage(camera: ReturnType<typeof getLayoutDraftReferenceCamera> | undefined | null, components: readonly LayoutDraftComponent[]) {
+  const fit = camera?.fitDiagnostics;
+  if (fit?.qualityStatus !== "needsReview" || fit.passedErrorThreshold !== false || !fit.pairDiagnostics?.length) return null;
+  const componentNames = new Map(components.map((component) => [component.id, component.name]));
+  const residuals = [...fit.pairDiagnostics].sort((a, b) => b.weightedContribution - a.weightedContribution);
+  const total = residuals.reduce((sum, item) => sum + item.weightedContribution, 0);
+  const selected: typeof residuals = [];
+  let contribution = 0;
+  for (const residual of residuals) {
+    if (selected.length >= 3) break;
+    selected.push(residual);
+    contribution += residual.weightedContribution;
+    if (total <= 0 || contribution >= total * 0.7) break;
+  }
+  const items = selected.map((residual) => `${componentNames.get(residual.id) ?? residual.id}（中心 ${residual.centerError.toFixed(2)}、尺度 ${residual.scaleError.toFixed(2)}）`);
+  return `参考机位投影与观察框仍有较大差异，主要在：${items.join("、")}。请复核这些物件的可见范围、遮挡和估算尺寸；物件位置与尺寸未被自动改写。`;
+}
 
 const CATEGORY_LABELS: Record<LayoutDraftComponent["category"], string> = {
   ground: "地面",
@@ -200,6 +241,8 @@ export function ReferenceLayoutPanel() {
   const selectedImage = images.find((image) => image.sourceId === selectedSourceId) ?? images[0] ?? null;
   const selectedComponent = draft?.components.find((component) => component.id === selectedComponentId) ?? null;
   const draftReferenceCamera = draft ? getLayoutDraftReferenceCamera(draft) : null;
+  const draftValidationWarnings = getLayoutValidationWarningLabels(draft?.validationWarnings);
+  const projectionFitReviewMessage = getProjectionFitReviewMessage(draftReferenceCamera, draft?.components ?? []);
   const selectedCharacter = draft?.characters.find((character) => character.id === selectedCharacterId) ?? null;
   const selectedComponentSupport = selectedComponent?.supportComponentId
     ? draft?.components.find((component) => component.id === selectedComponent.supportComponentId) ?? null
@@ -275,6 +318,10 @@ export function ReferenceLayoutPanel() {
 
   useEffect(() => {
     if (activeScopeRef.current === scopeId) return;
+    if (useDirectorStore.getState().referenceCameraPreview) {
+      previewReferenceCamera(null);
+      setViewMode("director");
+    }
     abortRef.current?.abort();
     requestIdRef.current += 1;
     const retained = getRetainedPanelState(scopeId);
@@ -288,7 +335,7 @@ export function ReferenceLayoutPanel() {
     setAppliedBatchId(retained.appliedBatchId);
     setConfirmRegenerate(false);
     setViewingImage(null);
-  }, [scopeId]);
+  }, [previewReferenceCamera, scopeId, setViewMode]);
 
   useEffect(() => {
     const updateConnectedImages = (event: Event) => {
@@ -308,6 +355,10 @@ export function ReferenceLayoutPanel() {
       setConnectedImages([]);
       setConfirmRegenerate(false);
       setViewingImage(null);
+      if (useDirectorStore.getState().referenceCameraPreview) {
+        previewReferenceCamera(null);
+        setViewMode("director");
+      }
     };
     window.addEventListener(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, updateConnectedImages);
     window.addEventListener(DIRECTOR_DESK_SESSION_OPENED_EVENT, resetForInstance);
@@ -316,7 +367,14 @@ export function ReferenceLayoutPanel() {
       window.removeEventListener(DIRECTOR_DESK_SESSION_OPENED_EVENT, resetForInstance);
       abortRef.current?.abort();
     };
-  }, [openDraftScope]);
+  }, [openDraftScope, previewReferenceCamera, setViewMode]);
+
+  useEffect(() => () => {
+    if (useDirectorStore.getState().referenceCameraPreview) {
+      useDirectorStore.getState().previewReferenceCamera(null);
+      useDirectorStore.getState().setViewMode("director");
+    }
+  }, []);
 
   useEffect(() => {
     if (!selectedSourceId && images[0]) {
@@ -326,6 +384,10 @@ export function ReferenceLayoutPanel() {
   }, [images, scopeId, selectedSourceId]);
 
   function chooseSource(sourceId: string) {
+    if (useDirectorStore.getState().referenceCameraPreview) {
+      previewReferenceCamera(null);
+      setViewMode("director");
+    }
     abortRef.current?.abort();
     requestIdRef.current += 1;
     setGenerating(false);
@@ -338,6 +400,14 @@ export function ReferenceLayoutPanel() {
     updateRetainedPanelState(scopeId, { appliedBatchId: null });
     setConfirmRegenerate(false);
     setViewingImage(null);
+  }
+
+  function rememberImageAspectRatio(sourceId: string, width: number, height: number) {
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+    const aspectRatio = width / height;
+    if (aspectRatio < 0.1 || aspectRatio > 10) return;
+    setLocalImage((image) => image?.sourceId === sourceId ? { ...image, aspectRatio } : image);
+    setConnectedImages((images) => images.map((image) => image.sourceId === sourceId ? { ...image, aspectRatio } : image));
   }
 
   function closeImageViewer() {
@@ -366,6 +436,14 @@ export function ReferenceLayoutPanel() {
       if (requestId !== requestIdRef.current || controller.signal.aborted) return;
       setStage("validating");
       setDraft(nextDraft, { edited: false });
+      const estimatedCamera = getLayoutDraftReferenceCamera(nextDraft);
+      if (estimatedCamera.source === "estimated") {
+        setViewMode("director");
+        previewReferenceCamera({
+          ...estimatedCamera,
+          ...(selectedImage.aspectRatio ? { imageAspectRatio: selectedImage.aspectRatio } : {}),
+        });
+      }
       setAnchorWidth("");
     } catch (reason) {
       if (controller.signal.aborted || requestId !== requestIdRef.current) return;
@@ -495,6 +573,8 @@ export function ReferenceLayoutPanel() {
       mode,
       replaceBatchId: mode === "replace-batch" ? replaceBatchId : null,
     });
+    const appliedObjects = useDirectorStore.getState().project.objects.filter((object) => result.objectIds.includes(object.id));
+    recordLayoutDraftApplied(draft.diagnosticGenerationId ?? draft.id, result.batchId, appliedObjects);
     if (wasPreviewingReferenceCamera) {
       setFinishedShotFov(null);
       setViewMode("camera");
@@ -509,12 +589,25 @@ export function ReferenceLayoutPanel() {
   function previewDraftReferenceCamera() {
     if (!draft) return;
     if (referenceCameraPreview) {
+      recordLayoutReferencePreview(draft.diagnosticGenerationId ?? draft.id, false);
       previewReferenceCamera(null);
       setViewMode("director");
       return;
     }
     setViewMode("director");
-    previewReferenceCamera(getLayoutDraftReferenceCamera(draft));
+    const referenceCamera = {
+      ...getLayoutDraftReferenceCamera(draft),
+      ...(selectedImage?.aspectRatio ? { imageAspectRatio: selectedImage.aspectRatio } : {}),
+    };
+    if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("directorLayoutDebugCamera")) {
+      (window as Window & { __directorLayoutDraftCameraDebug?: unknown }).__directorLayoutDraftCameraDebug = {
+        draftReferenceCamera: draft.referenceCamera,
+        previewReferenceCamera: referenceCamera,
+        selectedImageAspectRatio: selectedImage?.aspectRatio,
+      };
+    }
+    recordLayoutReferencePreview(draft.diagnosticGenerationId ?? draft.id, true, referenceCamera);
+    previewReferenceCamera(referenceCamera);
   }
 
   function selectWholeBatch() {
@@ -616,7 +709,11 @@ export function ReferenceLayoutPanel() {
               title="点击查看大图"
               onClick={() => setViewingImage(selectedImage)}
             >
-              <img alt="当前粗布景参考图" src={selectedImage.url} />
+              <img
+                alt="当前粗布景参考图"
+                src={selectedImage.url}
+                onLoad={(event) => rememberImageAspectRatio(selectedImage.sourceId, event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)}
+              />
               <Maximize2 aria-hidden="true" size={13} />
             </button>
             <div><strong>{selectedImage.fileName}</strong><span>{selectedImage.origin === "canvas" ? "来自画布连接" : "本地图片"}</span></div>
@@ -659,6 +756,11 @@ export function ReferenceLayoutPanel() {
             <button className="reference-layout-secondary-button" type="button" onClick={cancelGeneration}><X aria-hidden="true" size={14} />取消</button>
           ) : null}
         </div>
+        {isLayoutDiagnosticsEnabled() ? (
+          <button className="reference-layout-secondary-button" type="button" onClick={downloadLayoutDiagnostics}>
+            <ArrowDownToLine aria-hidden="true" size={14} />导出本次会话的诊断 JSON
+          </button>
+        ) : null}
         {generating && stage ? (
           <p className="reference-layout-progress" role="status">
             {STAGE_LABELS[stage]}{stage === "generating" ? `（已用 ${elapsedSeconds} 秒，通常需要 20-60 秒）` : ""}
@@ -677,18 +779,35 @@ export function ReferenceLayoutPanel() {
           <div className="reference-layout-draft" aria-label="粗布景暂存预览">
             <div className="reference-layout-draft-heading">
               <span><Box aria-hidden="true" size={14} />待应用布景 · {draft.components.length} 个组件 / {characterCount} 个人物</span>
-              <span className="reference-layout-adjust-heading-actions">
+          <span className="reference-layout-adjust-heading-actions">
                 <em>{draft.scale.mode === "anchored" ? "已按已知尺寸校正" : "未锚定 · 尺度为估计"}</em>
+                {draft.referenceCamera?.source === "estimated" ? <em>参考取景 · 待确认</em> : null}
               <button type="button" onClick={previewDraftReferenceCamera} title={referenceCameraPreview ? "退出参考机位预览" : "按同一推断机位查看可编辑草稿"}>
                   <Camera aria-hidden="true" size={13} />参考机位
                 </button>
               </span>
             </div>
             <p className="reference-layout-anchor-hint">
-              {draftReferenceCamera?.source === "model"
-                ? `参考机位为单图推断（置信度 ${Math.round(draftReferenceCamera.confidence * 100)}%），用于画幅对照。`
-                : "未得到可信相机信息，已按场景边界自动取景；可应用后继续调整机位。"}
+              {draftReferenceCamera?.source === "estimated"
+                ? "已按原图估算视角与布局，请核对物品位置、比例和遮挡；可直接转动视角调整。"
+                : draftReferenceCamera?.fitDiagnostics?.qualityStatus === "needsReview"
+                ? "已按原图估算视角与布局，请核对物品位置、比例和遮挡；可直接转动视角调整。"
+                : draftReferenceCamera?.fitDiagnostics?.qualityStatus === "accepted"
+                  ? "已按原图估算视角与布局，请核对物品位置、比例和遮挡；可直接转动视角调整。"
+                  : draftReferenceCamera?.source === "model"
+                    ? `参考机位为单图推断（置信度 ${Math.round(draftReferenceCamera.confidence * 100)}%），用于画幅对照。`
+                    : "未得到可信相机信息，已按场景边界自动取景；可应用后继续调整机位。"}
             </p>
+            {projectionFitReviewMessage ? (
+              <div className="reference-layout-diagnostic is-warning" role="alert" aria-label="参考机位残差待复核">
+                <p>{projectionFitReviewMessage}</p>
+              </div>
+            ) : null}
+            {draftValidationWarnings.length ? (
+              <div className="reference-layout-diagnostic is-warning" role="status" aria-label="布景校验提示">
+                {draftValidationWarnings.map((warning) => <p key={warning}>{warning}</p>)}
+              </div>
+            ) : null}
             {uncertainCount > 0 ? (
               <div className="reference-layout-batch-actions">
                 <span>{uncertainCount} 个待确认</span>

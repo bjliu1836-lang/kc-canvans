@@ -3,6 +3,13 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  DIRECTOR_LAYOUT_OBSERVATION_FORMAT,
+  DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT,
+  parseDirectorLayoutObservation,
+  summarizeDirectorLayoutProviderEnvelope,
+  summarizeDirectorLayoutObservationOutput,
+} from '../functions/shared/director-layout-observations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -497,17 +504,19 @@ const MEDIA_ANALYSIS_SYSTEM_PROMPT = [
 const DIRECTOR_LAYOUT_SYSTEM_PROMPT = [
   '你是 3D 影视预演的室内粗布景与人物占位分析器。',
   '只依据一张参考图估计可编辑的粗布景和人物，不要虚构图中不可见的精细结构。',
+  '先判断空间类型 spaceType：enclosed（明确封闭）、open（开放但有可见边界）、outdoor（室外）、unknown（无法判断）。开放/室外只输出图中确实可见的墙、围栏或立面；禁止补齐看不见的四面墙。',
   '========== 第一部分：布景组件 components ==========',
   '只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet, pillar, prop。pillar 表示从支撑面延伸到顶面的柱；prop 表示香炉、花瓶、雕像等需要占位的非家具物件。',
   '只使用这些 primitive：box, cylinder。不要返回模型名、GLB、纹理或外部资产。',
-  '床不是合法 category：如图中有床，床体用 sofa + box 表示，床头板用独立 cabinet + box 表示；在 name/notes 标明“床体”或“床头板”，不要输出 bed。',
+  '床不是合法 category：如图中有床，只输出床体一个 sofa + box 组件并给 semanticType="bed"；现有 bed 语义预设已在该床体内表达床架、床垫、床头板和枕头，不要把这些预设内部子部件重复输出为同级 components。head_at 关系必须 fromId=床体组件（semanticType="bed"）、toId=该床所属 wall；床体 local -Z 为床头方向。不要使用床头板→床体或床头板→墙作为 head_at。',
   '共享右手世界基准以参考机位为准：+X 为画面右，+Y 向上，+Z 朝观察者/默认机位，-Z 为后墙方向。透视倾斜时，依据墙线和消失方向判断房间轴；不要把屏幕二维左右、上下或像素距离直接当作世界距离或米。',
   '坐标单位是米；position 是物体底面中心，也是物体与支撑面的接触中心：落地物体 Y=地面高度，桌台上的香炉、花瓶、雕像等 prop 的 Y=承载台面高度，不能把所有组件 Y 都写成 0。size 顺序是局部宽、高、深，且每项必须大于 0。yaw=0 时局部 width 沿 +X、local depth 沿 +Z；正 rotationYDegrees 使 local +Z 转向 +X。size 只写局部尺寸，rotationYDegrees 只写朝向，不能把宽深旋转两次。',
   '提交前逐项检查 Y 语义：落地 wall、pillar 的 position.y 通常等于地面高度 0，而不是 size[1]/2；例如 3 米高的落地墙应写 position.y=0、size[1]=3，不能写 position.y=1.5。window、桌面 prop 等悬空物体仍写真实支撑面高度，不得统一贴地。',
   '柜体或有开口面的家具，局部正面/开放面定义为 local +Z；床体的床头定义在 local -Z，床头板与床体分别输出并邻近该端。普通 box 的前后或 +/-180 度视觉不可区分时，在 notes 写明朝向依据或不确定性，不要假装可从对称外形恢复。',
-  '组件可选输出 modelDescriptor（不超过120字的受限语义描述）和 appearance：appearance.color 为 #RRGGBB，roughness/metalness 在0到1，frontDirectionDegrees 表示局部 +Z 正面方向。它们只驱动已有程序构件/本地库外观，不得输出外部模型、GLB 或纹理。',
-  '关键物件可选 assembly，最多24个局部轴对齐子件：primitive 只能为 box/cylinder/sphere/cone/torus，position 和 size 均为父组件包围盒内的归一化三元组；position 每项0到1，size每项大于0且不超过1，position±size/2 不得越界，rotation 如出现必须为 [0,0,0]。不得执行代码或输出任意几何。',
-  '先识别空间关系，再填写坐标：门、窗依附所在墙面；柱应从可见支撑面延伸到顶面；门洞附近的墙应拆成门洞左右或上方的墙段，不要用一整块墙堵住门洞；家具长轴、柜开放面、床头端与相邻墙/家具的关系要自洽；承载于桌台的 prop 必须保持与对应台面的垂直层次。床头柜（cabinet）应靠近床头端，并按图判断其在床的哪一侧。以上是一般关系规则，不能硬编码为某个房间。',
+  '组件可选输出 semanticType（短英文语义标签，最多48字母/数字/下划线/连字符；例如 bed、bookshelf、curtain），不改变 category。modelDescriptor（不超过120字）和 appearance 只在图像证据清楚时输出；对原图中主色明确可辨的组件，必须输出 appearance.color 近似值（格式 #RRGGBB），不要因为客户端有中性类别色 fallback 而省略；颜色被遮挡、过暗或无法可靠分辨时才省略并将 uncertain 置为 true 或降低 confidence。roughness/metalness 只有图像证据足以支持时才输出，范围 0 到 1；frontDirectionDegrees 表示局部 +Z 正面方向。示例 appearance 结构：{"color":"#8A6741","roughness":0.7,"metalness":0.0}，其中颜色仅演示合法字段格式，不能套用于图中物件。它们只驱动已有程序构件/本地库外观，不得输出外部模型、GLB 或纹理。',
+  '需要精确轮廓的关键物件可输出 assembly，最多24个局部轴对齐子件。现有可复用 semanticType 预设为 bed、curtain、bookshelf：优先为该对象输出一个父组件并使用对应预设，不要再把预设内部子部件重复输出为同级 components；这几类组件可省略 assembly。没有可用预设、但可见轮廓明确由多个主要部分组成的物件，应使用少量有证据的 assembly 子件表达，不要把明显的多部分轮廓都退化为单一 box/cylinder。primitive 只能为 box/cylinder/sphere/cone/torus，position 和 size 均为父组件包围盒内的归一化三元组；position 每项0到1，size每项大于0且不超过1，position±size/2 不得越界，rotation 如出现必须为 [0,0,0]。仅编码影响轮廓的主要部分，单个组件建议不超过8件；细小装饰、材质纹理或缺乏可见证据的部件不输出，避免堆砌子件。不得执行代码或输出任意几何。',
+  '先识别空间关系，再填写坐标：门、窗依附所在墙面；柱应从可见支撑面延伸到顶面；门洞附近的墙应拆成门洞左右或上方的墙段，不要用一整块墙堵住门洞；家具长轴、柜开放面、床头端与相邻墙/家具的关系要自洽；承载于桌台的 prop 必须保持与对应台面的垂直层次。床头柜（cabinet）应靠近床头端，并按原图语义视角判断左右，不能按世界X轴或自由机位判断。以上是一般关系规则，不能硬编码为某个房间。',
+  '最多输出12条 observations，每条包含可选 componentId、state（visible/occluded/cropped/ambiguous）、confidence（0..1）和可选简短 evidence。最多24条 relations，每条包含 fromId、toId、type（attached_to/adjacent_to/supports/head_at/parallel_to/faces/left_of/right_of）和 confidence（0..1）；只输出看得清且有用的关系，端点必须引用 components 中稳定 id。缺证据就省略，不得猜。left_of/right_of 永远表示原图观察者视角。attached_to 只用于门窗等薄面附着物；head_at 必须从床体组件（semanticType=bed）指向所属 wall，表达床体 local -Z 床头端靠墙；不得反向填写，也不得引用床头板等 assembly/preset 内部子部件作为关系端点。',
   '输出 referenceCamera 作为参考图的透视起始机位：projection 固定 perspective，position 与 target 都是世界米坐标，fov 为 20 到 100 的度数，confidence 为 0 到 1。单张图无法可靠恢复时宁可降低 confidence；它只用于同画幅对照，不得把它当作真实拍摄内参。',
   '组件明确承载在另一组件的水平顶面时，输出 supportComponentId=承载组件 id；只允许引用 ground、table、cabinet、prop。不要用 wall/window/door/pillar 作为水平支撑。chair/sofa 的包围盒顶通常不是座面，坐姿人物不要引用整个 chair/sofa；没有独立可确认座面组件时省略 supportComponentId，并直接填写观察到的座面 Y。',
   '最多 30 个组件。无法确认的物体请降低 confidence 并设置 uncertain=true。',
@@ -527,10 +536,10 @@ const DIRECTOR_LAYOUT_SYSTEM_PROMPT = [
   '成年人身高、门高、座面高、沙发宽、餐桌高等常识只用于选择或校验统一尺度，不能覆盖图中已观察到的相对关系。参考范围：站立成年人约 1.6~1.8 米、坐姿座面到头顶约 0.9 米、座面约 0.45 米、标准门高约 2.05 米。',
   'height 是人物估算身高，必须在 0.5 到 2.5 米之间；看不清时保留同一尺度下的估计并降低 confidence/设置 uncertain=true，不要用默认成年身高破坏图中比例。',
   '========== 输出格式 ==========',
-  'scale.mode 固定为 estimated。没有要创建的人物时输出空数组 characters: []，不要省略该字段。',
+  'scale.mode 固定为 estimated。必须返回 spaceType、observations、relations；没有证据时 spaceType="unknown" 且 observations/relations 用空数组。没有要创建的人物时输出空数组 characters: []，不要省略该字段。',
   '无法确认的人物请降低 confidence 并设置 uncertain=true（例如被遮挡、只露出部分身体）。',
   '只输出一个 JSON 对象，不要 Markdown，不要解释。格式：',
-  '{"scale":{"mode":"estimated","confidence":0.4},"referenceCamera":{"projection":"perspective","position":[0,1.6,8],"target":[0,1.2,-2],"fov":50,"confidence":0.35},"components":[{"id":"pillar_01","name":"立柱","category":"pillar","primitive":"cylinder","position":[0,0,-3],"size":[0.45,2.8,0.45],"rotationYDegrees":0,"confidence":0.8,"uncertain":false,"notes":""}],"characters":[{"id":"char_01","name":"人物甲","position":[-0.6,0.12,0.2],"height":1.7,"rotationYDegrees":15,"posture":"kneel","kneelVariant":"seiza","handGesture":"prayer","bodyTypeHint":"female","confidence":0.7,"uncertain":false,"notes":"跪坐在坐垫上"}]}'
+  '{"spaceType":"enclosed","observations":[{"componentId":"pillar_01","state":"visible","confidence":0.8,"evidence":"顶面可见"}],"relations":[],"scale":{"mode":"estimated","confidence":0.4},"referenceCamera":{"projection":"perspective","position":[0,1.6,8],"target":[0,1.2,-2],"fov":50,"confidence":0.35},"components":[{"id":"pillar_01","name":"立柱","category":"pillar","primitive":"cylinder","semanticType":"pillar","position":[0,0,-3],"size":[0.45,2.8,0.45],"rotationYDegrees":0,"confidence":0.8,"uncertain":false,"notes":""}],"characters":[]}'
 ].join('\n');
 
 const DIRECTOR_LAYOUT_CATEGORIES = new Set(['ground', 'wall', 'door', 'window', 'table', 'chair', 'sofa', 'cabinet', 'pillar', 'prop']);
@@ -581,7 +590,8 @@ const validateDirectorLayoutCandidate = (candidate) => {
     if (!part || typeof part !== 'object' || !['box', 'cylinder', 'sphere', 'cone', 'torus'].includes(part.primitive)
       || !Array.isArray(part.position) || part.position.length !== 3 || !part.position.every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1)
       || !Array.isArray(part.size) || part.size.length !== 3 || !part.size.every(value => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 1)
-      || (part.rotation !== undefined && (!Array.isArray(part.rotation) || part.rotation.length !== 3 || !part.rotation.every(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 360)))) return false;
+      || (part.rotation !== undefined && (!Array.isArray(part.rotation) || part.rotation.length !== 3 || !part.rotation.every(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 360)))
+      || (part.opacity !== undefined && (typeof part.opacity !== 'number' || !Number.isFinite(part.opacity) || part.opacity < 0.15 || part.opacity > 1))) return false;
     const [rx, ry, rz] = (part.rotation || [0, 0, 0]).map(value => value * Math.PI / 180);
     const sx = Math.sin(rx), cx = Math.cos(rx), sy = Math.sin(ry), cy = Math.cos(ry), sz = Math.sin(rz), cz = Math.cos(rz);
     const matrix = [[cy * cz, -cy * sz, sy], [sx * sy * cz + cx * sz, -sx * sy * sz + cx * cz, -sx * cy], [-cx * sy * cz + sx * sz, cx * sy * sz + sx * cz, cx * cy]];
@@ -1262,6 +1272,8 @@ const handleTextGeneration = async (req, res) => {
 
 const handleDirectorLayoutGeneration = async (req, res) => {
   const body = await readBody(req);
+  const observationMode = body?.outputFormat === DIRECTOR_LAYOUT_OBSERVATION_FORMAT;
+  if (body?.outputFormat !== undefined && !observationMode) return json(res, 400, { error: 'DIRECTOR_LAYOUT_FORMAT_UNSUPPORTED' });
   const imageUrl = typeof body?.image?.url === 'string' ? body.image.url.trim() : '';
   if (!imageUrl || !(imageUrl.startsWith('data:image/') || imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
     return json(res, 400, { error: 'DIRECTOR_LAYOUT_IMAGE_REQUIRED' });
@@ -1274,6 +1286,56 @@ const handleDirectorLayoutGeneration = async (req, res) => {
   const baseUrl = resolveMimoBaseUrl(apiKey);
   const endpoint = process.env.MIMO_TEXT_ENDPOINT || process.env.TEXT_ENDPOINT || '/chat/completions';
   const model = process.env.MIMO_VISION_MODEL_ID || resolveMimoTextModel('2.5');
+  if (observationMode) {
+    let result;
+    try {
+      result = await callModelApi({
+      baseUrl, endpoint, apiKey,
+      payload: {
+        model,
+        messages: [
+          { role: 'system', content: DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT },
+          { role: 'user', content: [
+            { type: 'image_url', image_url: { url: imageUrl } },
+            { type: 'text', text: '请按约定只返回这张图的二维可见观察 JSON。' },
+          ] },
+        ],
+        max_completion_tokens: 2048,
+        temperature: 0.1,
+        top_p: 0.9,
+        stream: false,
+        thinking: { type: 'disabled' },
+      },
+      timeoutMs: 180000,
+      });
+    } catch (error) {
+      const upstreamStatus = Number.isInteger(error?.statusCode) ? error.statusCode : null;
+      return json(res, upstreamStatus || 502, {
+        error: upstreamStatus ? 'DIRECTOR_LAYOUT_UPSTREAM_HTTP' : 'DIRECTOR_LAYOUT_UPSTREAM_FAILURE',
+        message: '视觉模型上游请求失败',
+        ...(upstreamStatus ? { upstreamStatus } : {}),
+      });
+    }
+    const modelText = extractText(result);
+    if (!modelText.trim()) return json(res, 502, {
+      error: 'DIRECTOR_LAYOUT_UPSTREAM_RESPONSE_INVALID',
+      message: '视觉模型上游响应缺少文本内容',
+      providerEnvelope: summarizeDirectorLayoutProviderEnvelope(result),
+    });
+    const outputShape = summarizeDirectorLayoutObservationOutput(modelText);
+    try {
+      const visualObservations = parseDirectorLayoutObservation(modelText);
+      return json(res, 200, { observationFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT, visualObservations, providerOutputShape: outputShape, usage: result.usage || null });
+    } catch (error) {
+      return json(res, 422, {
+        error: error?.kind === 'model-json' ? 'DIRECTOR_LAYOUT_MODEL_JSON_INVALID' : 'DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID',
+        message: error?.kind === 'model-json' ? '视觉模型返回内容不是有效 JSON' : '视觉模型 JSON 未通过观察结构校验',
+        issues: error?.issues || ['图像观察结构无效'],
+        issuePaths: error?.issuePaths || [],
+        outputShape,
+      });
+    }
+  }
   let previousText = '';
   let previousIssues = [];
 

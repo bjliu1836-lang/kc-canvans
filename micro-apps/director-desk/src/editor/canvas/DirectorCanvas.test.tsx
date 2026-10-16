@@ -754,6 +754,36 @@ it("captures every four-view screenshot using the selected viewport aspect ratio
   expect(cropCanvas.width / cropCanvas.height).toBeCloseTo(4 / 3, 2);
 });
 
+it("captures the fitted reference-camera canvas as-is instead of cropping it again to the project ratio", async () => {
+  useDirectorStore.setState({
+    ...useDirectorStore.getState(),
+    viewportAspectRatio: "16:9",
+    referenceCameraPreview: {
+      position: [0, 2, 5],
+      target: [0, 1, 0],
+      fov: 42,
+      imageAspectRatio: 9 / 16,
+    },
+  });
+  const originalCreateElement = document.createElement.bind(document);
+  const drawImage = vi.fn();
+  const cropCanvas = {
+    width: 0,
+    height: 0,
+    getContext: vi.fn(() => ({ drawImage })),
+    toDataURL: vi.fn(() => "data:image/png;base64,reference-frame"),
+  };
+  vi.spyOn(document, "createElement").mockImplementation(((tagName: string) => {
+    if (tagName === "canvas") return cropCanvas as unknown as HTMLCanvasElement;
+    return originalCreateElement(tagName);
+  }) as typeof document.createElement);
+
+  render(<App />);
+  await requestViewportCapture({ preset: "current", source: "capture-panel" });
+
+  expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 1000, 700, 0, 0, 1000, 700);
+});
+
 it("synchronizes the real render camera on every first-person motion preview update", () => {
   const state = useDirectorStore.getState();
   const firstCharacter = state.project.objects.find((item) => item.id === "char_default_a")!;

@@ -6,6 +6,7 @@ import { createInitialDirectorState, useDirectorStore } from "../store/directorS
 import type { LayoutDraft } from "../schema/layoutDraft";
 import { getUE4SeatedPelvisSupportHeight } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
+import { getDirectorObjectSceneNodeName } from "../runtime/semanticBodyTracking";
 import { getImportedModelNormalization, getLayoutDraftPreviewStyle, SceneRoot } from "./SceneRoot";
 
 const mockCharacterModelShouldSuspend = vi.hoisted(() => ({ current: false }));
@@ -281,6 +282,53 @@ it("renders outlined layout draft components only in the interactive viewport", 
 
   rerender(<SceneRoot renderMode="clean-camera" />);
   expect(container.querySelector('group[name="layout-draft-preview"]')).not.toBeInTheDocument();
+});
+
+it("isolates host scene objects during draft preview and restores them after discard", () => {
+  const hostCharacter = useDirectorStore.getState().project.objects.find((item) => item.kind === "character")!;
+  useLayoutDraftPreviewStore.getState().setDraft({
+    ...layoutDraftFixture,
+    characters: [{
+      id: "source_person", name: "源识别人物", position: [0, 0, 0], height: 1.7, rotationYDegrees: 0,
+      posture: "kneel", bodyTypeHint: "female", confidence: 0.9, uncertain: false, visible: true,
+    }],
+  });
+
+  const { container, rerender } = render(<SceneRoot />);
+  expect(container.querySelector(`group[name="${getDirectorObjectSceneNodeName(hostCharacter.id)}"]`)).not.toBeInTheDocument();
+  expect(container.querySelector('group[name="source_person-layout-draft-character"]')).toBeInTheDocument();
+
+  useLayoutDraftPreviewStore.getState().discardDraft();
+  rerender(<SceneRoot />);
+  expect(container.querySelector(`group[name="${getDirectorObjectSceneNodeName(hostCharacter.id)}"]`)).toBeInTheDocument();
+  expect(container.querySelector('group[name="source_person-layout-draft-character"]')).not.toBeInTheDocument();
+});
+
+it("preserves estimated draft appearance", () => {
+  useLayoutDraftPreviewStore.getState().setDraft({
+    ...layoutDraftFixture,
+    components: layoutDraftFixture.components.map((component) => component.id === "sofa"
+      ? { ...component, uncertain: true, appearance: { color: "#654321" } }
+      : component),
+  });
+  const { container } = render(<SceneRoot />);
+  const sofa = container.querySelector('mesh[name="sofa-layout-draft-mesh"] meshstandardmaterial');
+  expect(sofa).toHaveAttribute("color", "#654321");
+  expect(sofa).toHaveAttribute("emissive", "#000000");
+});
+
+it("does not overlay an inferred draft ground with the editor ground plane", () => {
+  useLayoutDraftPreviewStore.getState().setDraft(layoutDraftFixture);
+  const { container, rerender } = render(<SceneRoot />);
+  expect(container.querySelector('group[name="layout-draft-preview"] mesh[name="ground-layout-draft-mesh"]')).toBeInTheDocument();
+  expect(container.querySelector('mesh[name="editor-ground-plane"]')).not.toBeInTheDocument();
+
+  useLayoutDraftPreviewStore.getState().setDraft({
+    ...layoutDraftFixture,
+    components: layoutDraftFixture.components.filter((component) => component.category !== "ground"),
+  });
+  rerender(<SceneRoot />);
+  expect(container.querySelector('mesh[name="editor-ground-plane"]')).toBeInTheDocument();
 });
 
 it("renders draft people through the same character model adapter used after apply", () => {

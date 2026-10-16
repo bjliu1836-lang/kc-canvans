@@ -524,6 +524,7 @@ function CanvasCaptureBridge({
   activeCamera,
   bottomPadding,
   controlsRef,
+  referenceImageAspectRatio,
   safeAreaInsets,
   viewportAspectRatio,
   viewMode,
@@ -540,6 +541,7 @@ function CanvasCaptureBridge({
     | undefined;
   bottomPadding: number;
   controlsRef: MutableRefObject<OrbitControlsImpl | null>;
+  referenceImageAspectRatio?: number;
   safeAreaInsets: ViewportSafeAreaInsets;
   viewportAspectRatio: ReturnType<typeof useDirectorStore.getState>["viewportAspectRatio"];
   viewMode: "director" | "camera";
@@ -548,6 +550,14 @@ function CanvasCaptureBridge({
 
   useEffect(() => {
     const workingCamera = camera as ThreePerspectiveCamera;
+    const captureAspectRatio = referenceImageAspectRatio ? "auto" : viewportAspectRatio;
+    const captureBottomPadding = referenceImageAspectRatio ? 0 : bottomPadding;
+    const captureSafeAreaInsets = referenceImageAspectRatio
+      ? { left: 0, right: 0, top: 0, bottom: 0 }
+      : safeAreaInsets;
+    const screenshotAspectRatio = referenceImageAspectRatio
+      ? `${referenceImageAspectRatio.toFixed(3)}:1`
+      : viewportAspectRatio;
 
     const capture = async ({
       cameraId,
@@ -577,7 +587,7 @@ function CanvasCaptureBridge({
         const viewDirection = workingCamera.getWorldDirection(new Vector3());
         return {
           label,
-          dataUrl: captureViewportCanvas(gl.domElement, viewportAspectRatio, bottomPadding, safeAreaInsets, {
+          dataUrl: captureViewportCanvas(gl.domElement, captureAspectRatio, captureBottomPadding, captureSafeAreaInsets, {
             camera: workingCamera,
             labels: getViewportCaptureLabels(),
           }),
@@ -589,7 +599,7 @@ function CanvasCaptureBridge({
             fov: workingCamera.fov,
             position: [workingCamera.position.x, workingCamera.position.y, workingCamera.position.z],
             target: [target.x, target.y, target.z],
-            aspectRatio: viewportAspectRatio,
+            aspectRatio: screenshotAspectRatio,
             viewDirection: [viewDirection.x, viewDirection.y, viewDirection.z],
             targetMode: viewMode === "camera" ? activeCamera?.targetMode : undefined,
             targetObjectId: viewMode === "camera" ? activeCamera?.targetObjectId ?? null : undefined,
@@ -630,7 +640,7 @@ function CanvasCaptureBridge({
 
     setViewportCaptureHandler(capture);
     return () => clearViewportCaptureHandler();
-  }, [activeCamera, bottomPadding, camera, controlsRef, gl, safeAreaInsets, scene, viewMode, viewportAspectRatio]);
+  }, [activeCamera, bottomPadding, camera, controlsRef, gl, referenceImageAspectRatio, safeAreaInsets, scene, viewMode, viewportAspectRatio]);
 
   return null;
 }
@@ -653,6 +663,17 @@ function DirectorViewCameraSync({
 
     const perspectiveCamera = camera as ThreePerspectiveCamera;
     applySnapshotToCamera(perspectiveCamera, snapshot);
+    if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("directorLayoutDebugCamera")) {
+      const direction = perspectiveCamera.getWorldDirection(new Vector3());
+      const target = perspectiveCamera.position.clone().add(direction);
+      (window as Window & { __directorLayoutCameraDebug?: unknown }).__directorLayoutCameraDebug = {
+        snapshot,
+        position: perspectiveCamera.position.toArray(),
+        direction: direction.toArray(),
+        target: target.toArray(),
+        fov: perspectiveCamera.fov,
+      };
+    }
 
     if (controlsRef.current) {
       controlsRef.current.target.set(...snapshot.target);
@@ -1144,6 +1165,7 @@ export function DirectorCanvas() {
   const stopCameraPilot = useDirectorStore((state) => state.stopCameraPilot);
   const viewportFocusRequest = useDirectorStore((state) => state.viewportFocusRequest);
   const referenceCameraPreview = useDirectorStore((state) => state.referenceCameraPreview);
+  const previewReferenceCamera = useDirectorStore((state) => state.previewReferenceCamera);
   const clearViewportFocusRequest = useDirectorStore((state) => state.clearViewportFocusRequest);
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
@@ -1163,6 +1185,7 @@ export function DirectorCanvas() {
   const [referenceVideoQuality, setReferenceVideoQuality] = useState<"720p" | "1080p">("720p");
   const [referenceVideoRendering, setReferenceVideoRendering] = useState(false);
   const [automaticViewportAspect, setAutomaticViewportAspect] = useState(16 / 9);
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const [cameraRecording, setCameraRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [reviewTake, setReviewTake] = useState<CameraRecordingTake | null>(null);
@@ -1214,8 +1237,9 @@ export function DirectorCanvas() {
   const viewportPanelsCollapsed = useDirectorStore((state) => state.viewportPanelsCollapsed);
   const setViewMode = useDirectorStore((state) => state.setViewMode);
   const setViewportRuleOfThirdsEnabled = useDirectorStore((state) => state.setViewportRuleOfThirdsEnabled);
-  const visibleViewportSnapshot =
-    viewMode === "camera" && activeCameraView ? activeCameraView : directorViewSnapshot;
+  const visibleViewportSnapshot = referenceCameraPreview
+    ? referenceCameraPreview
+    : viewMode === "camera" && activeCameraView ? activeCameraView : directorViewSnapshot;
   const viewportSafeAreaInsets: ViewportSafeAreaInsets = {
     left: viewportPanelsCollapsed || isCameraPiloting || isCameraPreviewing ? 0 : LEFT_PANEL_WIDTH,
     right:
@@ -1379,6 +1403,9 @@ export function DirectorCanvas() {
     const updateAspect = () => {
       if (element.clientWidth > 0 && element.clientHeight > 0) {
         setAutomaticViewportAspect(element.clientWidth / element.clientHeight);
+        setViewportSize((size) => size.width === element.clientWidth && size.height === element.clientHeight
+          ? size
+          : { width: element.clientWidth, height: element.clientHeight });
       }
     };
     updateAspect();
@@ -1555,15 +1582,6 @@ export function DirectorCanvas() {
   }
 
   // 消费一次性聚焦请求：保持当前视线方向，把视点平移到目标附近
-  useEffect(() => {
-    if (!referenceCameraPreview || isCameraPiloting) return;
-    if (viewMode !== "director") {
-      setViewMode("director");
-      return;
-    }
-    updateDirectorViewSnapshot(referenceCameraPreview, true);
-  }, [referenceCameraPreview, viewMode, isCameraPiloting]);
-
   // 消费一次性聚焦请求：保持当前视线方向，把视点平移到目标附近
   useEffect(() => {
     if (!viewportFocusRequest || viewMode !== "director" || isCameraPiloting) return;
@@ -1773,6 +1791,24 @@ export function DirectorCanvas() {
 
   const aspectOverlayBottomPadding =
     VIEWPORT_FRAME_PADDING + VIEWPORT_TOOLBAR_BOTTOM_OFFSET + toolbarHeight;
+  const referencePreviewFrameRect = referenceCameraPreview?.imageAspectRatio && viewportSize.width > 0 && viewportSize.height > 0
+    ? getViewportAspectFrameRect(
+        referenceCameraPreview.imageAspectRatio,
+        viewportSize.width,
+        viewportSize.height,
+        aspectOverlayBottomPadding,
+        viewportSafeAreaInsets,
+      )
+    : null;
+  const mainCanvasStyle: CSSProperties | undefined = referencePreviewFrameRect
+    ? {
+        position: "absolute",
+        left: `${referencePreviewFrameRect.left}px`,
+        top: `${referencePreviewFrameRect.top}px`,
+        width: `${referencePreviewFrameRect.width}px`,
+        height: `${referencePreviewFrameRect.height}px`,
+      }
+    : undefined;
 
   return (
     <div className="canvas-frame" data-benchmark-mode={benchmarkMode ?? "off"}>
@@ -1780,6 +1816,7 @@ export function DirectorCanvas() {
         <Canvas
           key={`main-${contextPerformanceConfig.antialias ? "aa" : "no-aa"}-${contextPerformanceConfig.preserveDrawingBuffer ? "capture" : "standard"}`}
           camera={{ position: directorViewSnapshot.position, fov: directorViewSnapshot.fov }}
+          style={mainCanvasStyle}
           dpr={performanceConfig.mainDpr}
           gl={{
             antialias: contextPerformanceConfig.antialias,
@@ -1833,12 +1870,27 @@ export function DirectorCanvas() {
             <OrbitControls
               ref={controlsRef}
               enableDamping
-              enabled={!isCameraPiloting && !isCharacterRoutePlacement && !referenceCameraPreview}
+              enabled={!isCameraPiloting && !isCharacterRoutePlacement}
               makeDefault
               rotateSpeed={viewportRotateSensitivity}
               target={DEFAULT_DIRECTOR_VIEW_SNAPSHOT.target}
               zoomSpeed={viewportZoomSensitivity}
+              onStart={() => {
+                if (!referenceCameraPreview) return;
+                const controls = controlsRef.current;
+                const camera = controls?.object as ThreePerspectiveCamera | undefined;
+                const target = controls?.target;
+                if (camera && target) {
+                  updateDirectorViewSnapshot({
+                    fov: camera.fov,
+                    position: [camera.position.x, camera.position.y, camera.position.z],
+                    target: [target.x, target.y, target.z],
+                  }, true);
+                }
+                previewReferenceCamera(null);
+              }}
               onChange={(event) => {
+                if (referenceCameraPreview) return;
                 const perspectiveCamera = event?.target?.object as ThreePerspectiveCamera | undefined;
                 const target = event?.target?.target as Vector3 | undefined;
                 if (!perspectiveCamera || !target) return;
@@ -1857,7 +1909,7 @@ export function DirectorCanvas() {
           <DirectorViewCameraSync
             controlsRef={controlsRef}
             disabled={isCameraPiloting}
-            snapshot={directorViewSnapshot}
+            snapshot={referenceCameraPreview ?? directorViewSnapshot}
             viewMode={viewMode}
           />
           <CameraViewCameraSync snapshot={activeCameraView} viewMode={viewMode} />
@@ -1865,6 +1917,7 @@ export function DirectorCanvas() {
             activeCamera={activeCamera}
             bottomPadding={aspectOverlayBottomPadding}
             controlsRef={controlsRef}
+            referenceImageAspectRatio={referenceCameraPreview?.imageAspectRatio}
             safeAreaInsets={viewportSafeAreaInsets}
             viewportAspectRatio={viewportAspectRatio}
             viewMode={viewMode}
@@ -1920,7 +1973,7 @@ export function DirectorCanvas() {
       <ViewportAspectOverlay
         bottomPadding={aspectOverlayBottomPadding}
         onToggleRuleOfThirds={setViewportRuleOfThirdsEnabled}
-        ratio={viewportAspectRatio}
+        ratio={referenceCameraPreview?.imageAspectRatio ?? viewportAspectRatio}
         safeAreaInsets={viewportSafeAreaInsets}
         showRuleOfThirds={viewportRuleOfThirdsEnabled}
       />

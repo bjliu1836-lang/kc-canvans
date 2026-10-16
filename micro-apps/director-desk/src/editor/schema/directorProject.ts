@@ -147,10 +147,13 @@ export interface DirectorObject {
       position: [number, number, number];
       size: [number, number, number];
       rotation?: [number, number, number];
+      /** Bounded per-part opacity for semantic preset details such as a sheer curtain. */
+      opacity?: number;
     }>;
     /** category === "character" 时携带的占位元数据（姿态与估算身高）。 */
     characterMeta?: {
       posture: "stand" | "sit" | "crouch" | "kneel" | "lie" | "unknown";
+      facingDirection?: "image_left" | "image_right" | "toward_camera" | "away_from_camera" | "image_up" | "image_down" | "unknown";
       kneelVariant?: "one-knee" | "two-knee" | "seiza";
       handGesture?: "prayer";
       height: number;
@@ -182,9 +185,44 @@ export interface DirectorLayoutReferenceCamera {
   position: [number, number, number];
   target: [number, number, number];
   fov: number;
+  /** Intrinsic source-image aspect used to fit a matching preview frame when known. */
+  imageAspectRatio?: number;
   /** 0 表示按场景边界自动取景，并非模型恢复出的原始相机。 */
   confidence: number;
-  source: "model" | "bounds-fallback";
+  source: "model" | "bounds-fallback" | "estimated";
+  /** Numeric-only audit trail for bounded observation-based camera fitting. */
+  fitDiagnostics?: {
+    qualityStatus?: "accepted" | "needsReview" | "unavailable";
+    itemCount: number;
+    candidateCount: number;
+    baselineProjectionError: number | null;
+    bestProjectionError: number | null;
+    cameraOnlyBestProjectionError?: number | null;
+    pairDiagnostics?: Array<{
+      id: string;
+      observedCenter: [number, number];
+      observedSize: [number, number];
+      predictedCenter: [number, number];
+      predictedSize: [number, number];
+      centerError: number;
+      scaleError: number;
+      weightedContribution: number;
+    }>;
+    bestCandidate: { position: [number, number, number]; target: [number, number, number]; fov: number } | null;
+    applied: boolean;
+    passedErrorThreshold?: boolean;
+    movedGroundItems?: number;
+    movedComponents?: number;
+    positionAdjustmentMeters?: number;
+    collisionPairs?: Array<{ firstId: string; secondId: string; classification: "hard" | "review" | "allowed"; reason: string }>;
+    physicalValidity?: {
+      withinRoom: boolean;
+      cameraOutsideGeometry: boolean;
+      hardCollisionCount: number;
+      roomBoundaryViolations?: Array<{ componentId: string; edge: "left" | "right" | "front" | "back"; overflowMeters: number }>;
+    };
+    rejectionReason: "insufficient-evidence" | "no-safe-candidate" | "insufficient-improvement" | "error-too-high" | "unsafe-collision" | null;
+  };
 }
 
 export interface DirectorObjectMotionKeyframe {

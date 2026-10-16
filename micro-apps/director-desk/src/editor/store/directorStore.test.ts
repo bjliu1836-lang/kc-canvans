@@ -133,6 +133,44 @@ it("adds and replaces one generated layout batch as one undoable transaction", (
     .toMatchObject({ name: "后墙", transform: { scale: [6, 2.8, 0.15] } });
 });
 
+it("preserves the observed kneeling pose in the applied DirectorProject object", () => {
+  const draft = createLayoutDraftFixture();
+  draft.characters = [{
+    id: "person_praying",
+    name: "祈祷女子",
+    position: [0, 0, 0],
+    height: 1.6,
+    rotationYDegrees: 90,
+    posture: "kneel",
+    kneelVariant: "seiza",
+    handGesture: "prayer",
+    bodyTypeHint: "female",
+    confidence: 0.95,
+    uncertain: false,
+    visible: true,
+  }];
+
+  const result = useDirectorStore.getState().applyLayoutDraft({ draft, mode: "append" });
+  const appliedCharacter = useDirectorStore.getState().project.objects.find((object) =>
+    object.layoutSource?.batchId === result.batchId && object.layoutSource.category === "character"
+  );
+
+  expect(appliedCharacter).toMatchObject({
+    kind: "character",
+    bodyType: "female",
+    characterRig: {
+      rigType: "ue4-mannequin",
+      posePresetId: "seiza",
+      controls: {
+        "leftHip.pitch": 68,
+        "rightKnee.bend": 142,
+        "leftElbow.bend": 96,
+      },
+    },
+    layoutSource: { characterMeta: { posture: "kneel", kneelVariant: "seiza", handGesture: "prayer" } },
+  });
+});
+
 it("keeps an edited reference camera when replacing its generated layout batch", () => {
   const first = useDirectorStore.getState().applyLayoutDraft({ draft: createLayoutDraftFixture(), mode: "append" });
   const oldReferenceCameraId = useDirectorStore.getState().project.layoutBatches?.[0]?.referenceCameraId;

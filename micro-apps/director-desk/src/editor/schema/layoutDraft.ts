@@ -6,6 +6,7 @@ import type {
   DirectorObject,
   GeometryPrimitiveType,
 } from "./directorProject";
+import { resolveLayoutSemanticProfile } from "./layoutSemanticProfiles";
 import { MANNEQUIN_POSE_PRESETS } from "../presets/mannequinPosePresets";
 import {
   getUE4GroundedLabelY,
@@ -28,6 +29,21 @@ export const LAYOUT_COMPONENT_CATEGORIES = [
 ] as const satisfies readonly DirectorLayoutCategory[];
 
 export const LAYOUT_COMPONENT_PRIMITIVES = ["box", "cylinder"] as const satisfies readonly GeometryPrimitiveType[];
+export const LAYOUT_SPACE_TYPES = ["enclosed", "open", "outdoor", "unknown"] as const;
+export type LayoutSpaceType = (typeof LAYOUT_SPACE_TYPES)[number];
+export const LAYOUT_OBSERVATION_STATES = ["visible", "occluded", "cropped", "ambiguous"] as const;
+export type LayoutObservationState = (typeof LAYOUT_OBSERVATION_STATES)[number];
+export const LAYOUT_RELATION_TYPES = [
+  "attached_to",
+  "adjacent_to",
+  "supports",
+  "head_at",
+  "parallel_to",
+  "faces",
+  "left_of",
+  "right_of",
+] as const;
+export type LayoutRelationType = (typeof LAYOUT_RELATION_TYPES)[number];
 
 /* ------------------------------------------------------------------ */
 /* 人物占位（参考图识别的第二类产物）                                   */
@@ -48,6 +64,8 @@ export type LayoutHandGesture = (typeof LAYOUT_HAND_GESTURES)[number];
 
 export const LAYOUT_CHARACTER_BODY_HINTS = ["male", "female", "unknown"] as const;
 export type LayoutCharacterBodyHint = (typeof LAYOUT_CHARACTER_BODY_HINTS)[number];
+export const LAYOUT_CHARACTER_FACING_DIRECTIONS = ["image_left", "image_right", "toward_camera", "away_from_camera", "unknown", "image_up", "image_down"] as const;
+export type LayoutCharacterFacingDirection = (typeof LAYOUT_CHARACTER_FACING_DIRECTIONS)[number];
 
 /** 姿态 → 现有姿态预设（mannequinPosePresets）的映射。 */
 export const LAYOUT_POSTURE_TO_POSE_PRESET: Record<LayoutCharacterPosture, string> = {
@@ -90,6 +108,8 @@ export interface LayoutDraftCharacter {
   /** 估算身高（与组件同单位；校准后为米）。 */
   height: number;
   rotationYDegrees: number;
+  /** Source-image facing evidence; image_up/down remain accepted for previously saved drafts. */
+  facingDirection?: LayoutCharacterFacingDirection;
   posture: LayoutCharacterPosture;
   /** 跪姿细分；旧草稿没有该字段时继续沿用历史的单膝跪映射。 */
   kneelVariant?: LayoutKneelVariant;
@@ -124,18 +144,18 @@ export const LAYOUT_ANCHOR_PRESETS: Record<DirectorLayoutCategory, {
   prop: { dimension: "height", hint: "道具可能是坐垫、供器或雕像，尺寸差异较大" },
 };
 
-/** 各类组件的语义配色，预览与应用后保持一致，帮助用户分辨谁是谁。 */
+/** 中性占位材质色；只有 appearance.color 明确存在时才表达识别出的颜色。 */
 export const LAYOUT_CATEGORY_COLORS: Record<DirectorLayoutCategory, string> = {
-  ground: "#7A8494",
-  wall: "#8FA3C4",
-  door: "#C9A06C",
-  window: "#7FD4E8",
-  table: "#B98A5E",
-  chair: "#D4A6A0",
-  sofa: "#6F9E8F",
-  cabinet: "#A88BB5",
-  pillar: "#A87868",
-  prop: "#C9A850",
+  ground: "#92979D",
+  wall: "#92979D",
+  door: "#92979D",
+  window: "#92979D",
+  table: "#92979D",
+  chair: "#92979D",
+  sofa: "#92979D",
+  cabinet: "#92979D",
+  pillar: "#92979D",
+  prop: "#92979D",
 };
 
 export interface LayoutBatchTransformPatch {
@@ -160,11 +180,15 @@ export interface LayoutDraftComponent {
   size: [number, number, number];
   /** 明确承载该组件重量的另一组件 id；存在时底面 Y 由支撑组件顶面计算。 */
   supportComponentId?: string;
+  /** Parent component whose local-space motion should carry this separate observed part. */
+  partOfComponentId?: string;
   rotationYDegrees: number;
   confidence: number;
   uncertain: boolean;
   /** 可编辑的受限语义描述，用于选择已有程序构件或本地库，绝不承诺生成新模型。 */
   modelDescriptor?: string;
+  /** 扩展语义标签，不影响旧 category/geometry；例如 bed、bookshelf、curtain。 */
+  semanticType?: string;
   appearance?: {
     color?: string;
     roughness?: number;
@@ -178,6 +202,7 @@ export interface LayoutDraftComponent {
     position: [number, number, number];
     size: [number, number, number];
     rotation?: [number, number, number];
+    opacity?: number;
   }>;
   notes?: string;
   visible: boolean;
@@ -186,6 +211,8 @@ export interface LayoutDraftComponent {
 export interface LayoutDraft {
   version: 1;
   id: string;
+  /** Client-only trace association; excluded from generated DirectorProject objects. */
+  diagnosticGenerationId?: string;
   sourceId: string;
   sourceFileName: string;
   createdAt: string;
@@ -198,6 +225,23 @@ export interface LayoutDraft {
   };
   /** 参考图的透视起始机位；无可信输入时由布局边界生成并明确标为自动取景。 */
   referenceCamera?: DirectorLayoutReferenceCamera;
+  /** 旧 Draft 缺省为 unknown；仅描述可见/不确定证据，不替代几何。 */
+  spaceType?: LayoutSpaceType;
+  observations?: Array<{
+    componentId?: string;
+    state: LayoutObservationState;
+    confidence: number;
+    evidence?: string;
+  }>;
+  /** 关系 ID 引用同一 Draft 的组件；left/right 始终按原图语义视角。 */
+  relations?: Array<{
+    fromId: string;
+    toId: string;
+    type: LayoutRelationType;
+    confidence: number;
+  }>;
+  /** 仅包含可安全展示的本地校验提示码，不保存模型原文或图片内容。 */
+  validationWarnings?: string[];
   components: LayoutDraftComponent[];
   /** 参考图识别到的人物占位；旧数据/纯布景图为空数组。 */
   characters: LayoutDraftCharacter[];
@@ -285,9 +329,166 @@ function normalizeLayoutAssembly(raw: unknown): LayoutDraftComponent["assembly"]
     ];
     const half = matrix.map((row) => row.reduce((sum, value, axis) => sum + Math.abs(value) * size[axis] / 2, 0));
     if (position.some((value, axis) => value - half[axis] < 0 || value + half[axis] > 1)) return [];
-    return [{ primitive: part.primitive as "box" | "cylinder" | "sphere" | "cone" | "torus", position: [...position] as [number, number, number], size: [...size] as [number, number, number], ...(rotation ? { rotation } : {}) }];
+    const opacity = typeof part.opacity === "number" && Number.isFinite(part.opacity) && part.opacity >= 0.15 && part.opacity <= 1
+      ? part.opacity
+      : undefined;
+    if (part.opacity !== undefined && opacity === undefined) return [];
+    return [{ primitive: part.primitive as "box" | "cylinder" | "sphere" | "cone" | "torus", position: [...position] as [number, number, number], size: [...size] as [number, number, number], ...(rotation ? { rotation } : {}), ...(opacity !== undefined ? { opacity } : {}) }];
   });
   return parts.length === raw.length && parts.every((part) => part.length === 1) ? parts.flat() : undefined;
+}
+
+function buildSemanticLayoutAssembly(semanticType: string | undefined): LayoutDraftComponent["assembly"] {
+  const shape = (
+    primitive: "box" | "cylinder" | "sphere" | "cone" | "torus",
+    position: [number, number, number],
+    size: [number, number, number],
+    opacity?: number,
+  ): NonNullable<LayoutDraftComponent["assembly"]>[number] => ({
+    primitive,
+    position,
+    size,
+    ...(opacity !== undefined ? { opacity } : {}),
+  });
+  const box = (position: [number, number, number], size: [number, number, number], opacity?: number) => ({
+    primitive: "box" as const,
+    position,
+    size,
+    ...(opacity !== undefined ? { opacity } : {}),
+  });
+  if (semanticType === "bed") {
+    return [
+      box([0.5, 0.08, 0.5], [0.98, 0.14, 0.92]),
+      box([0.5, 0.31, 0.5], [0.94, 0.34, 0.86]),
+      box([0.5, 0.72, 0.08], [0.98, 0.54, 0.08]),
+      box([0.31, 0.55, 0.2], [0.28, 0.1, 0.22]),
+      box([0.69, 0.55, 0.2], [0.28, 0.1, 0.22]),
+    ];
+  }
+  if (semanticType === "curtain") {
+    return [
+      box([0.5, 0.96, 0.5], [0.98, 0.035, 0.06]),
+      box([0.17, 0.5, 0.5], [0.26, 0.92, 0.045]),
+      box([0.83, 0.5, 0.5], [0.26, 0.92, 0.045]),
+      box([0.5, 0.5, 0.52], [0.48, 0.9, 0.02], 0.35),
+    ];
+  }
+  if (semanticType === "bookshelf") {
+    return [
+      box([0.05, 0.5, 0.5], [0.08, 0.98, 0.92]),
+      box([0.95, 0.5, 0.5], [0.08, 0.98, 0.92]),
+      ...[0.05, 0.275, 0.5, 0.725, 0.95].map((y) => box([0.5, y, 0.5], [0.84, 0.05, 0.88])),
+    ];
+  }
+  if (semanticType === "table") {
+    return [
+      box([0.5, 0.91, 0.5], [0.98, 0.12, 0.92]),
+      box([0.5, 0.78, 0.08], [0.82, 0.12, 0.12]),
+      box([0.5, 0.78, 0.92], [0.82, 0.12, 0.12]),
+      box([0.08, 0.78, 0.5], [0.12, 0.12, 0.76]),
+      box([0.92, 0.78, 0.5], [0.12, 0.12, 0.76]),
+      ...[0.1, 0.9].flatMap((x) => [0.1, 0.9].map((z) => box([x, 0.4, z], [0.11, 0.72, 0.11]))),
+    ];
+  }
+  if (semanticType === "nightstand") {
+    return [
+      box([0.5, 0.92, 0.5], [0.98, 0.12, 0.92]),
+      box([0.5, 0.08, 0.5], [0.9, 0.1, 0.84]),
+      box([0.07, 0.5, 0.5], [0.1, 0.82, 0.84]),
+      box([0.93, 0.5, 0.5], [0.1, 0.82, 0.84]),
+      box([0.5, 0.5, 0.08], [0.82, 0.82, 0.08]),
+      box([0.5, 0.57, 0.92], [0.78, 0.34, 0.045]),
+      box([0.5, 0.17, 0.92], [0.78, 0.34, 0.045]),
+    ];
+  }
+  if (semanticType === "cabinet") {
+    return [
+      box([0.05, 0.5, 0.5], [0.1, 0.98, 0.9]),
+      box([0.95, 0.5, 0.5], [0.1, 0.98, 0.9]),
+      box([0.5, 0.05, 0.5], [0.82, 0.1, 0.9]),
+      box([0.5, 0.95, 0.5], [0.82, 0.1, 0.9]),
+      box([0.5, 0.5, 0.06], [0.82, 0.8, 0.08]),
+      box([0.29, 0.5, 0.92], [0.39, 0.8, 0.045]),
+      box([0.71, 0.5, 0.92], [0.39, 0.8, 0.045]),
+      box([0.5, 0.5, 0.95], [0.02, 0.8, 0.03]),
+      box([0.49, 0.5, 0.98], [0.025, 0.08, 0.02]),
+      box([0.51, 0.5, 0.98], [0.025, 0.08, 0.02]),
+    ];
+  }
+  if (semanticType === "sculpture") {
+    return [
+      shape("cylinder", [0.5, 0.08, 0.5], [0.72, 0.16, 0.72]),
+      shape("sphere", [0.5, 0.33, 0.5], [0.58, 0.38, 0.5]),
+      shape("sphere", [0.5, 0.58, 0.5], [0.86, 0.26, 0.68]),
+      shape("sphere", [0.5, 0.8, 0.5], [0.48, 0.34, 0.44]),
+      box([0.5, 0.98, 0.5], [0.7, 0.04, 0.58]),
+    ];
+  }
+  if (semanticType === "plant") {
+    return [
+      shape("cylinder", [0.5, 0.12, 0.5], [0.48, 0.24, 0.48]),
+      shape("cylinder", [0.5, 0.48, 0.5], [0.09, 0.5, 0.09]),
+      shape("sphere", [0.5, 0.68, 0.5], [0.52, 0.48, 0.52]),
+      shape("sphere", [0.32, 0.73, 0.52], [0.42, 0.36, 0.42]),
+      shape("sphere", [0.68, 0.73, 0.48], [0.42, 0.36, 0.42]),
+      shape("sphere", [0.5, 0.88, 0.5], [0.4, 0.24, 0.4]),
+    ];
+  }
+  if (semanticType === "pillow") {
+    return [
+      shape("sphere", [0.5, 0.5, 0.5], [0.9, 0.72, 0.9]),
+      box([0.5, 0.5, 0.96], [0.72, 0.045, 0.025], 0.8),
+    ];
+  }
+  if (semanticType === "blanket") {
+    return [
+      box([0.5, 0.18, 0.5], [0.98, 0.28, 0.94]),
+      box([0.5, 0.56, 0.93], [0.98, 0.54, 0.12]),
+      box([0.5, 0.91, 0.82], [0.98, 0.18, 0.2]),
+    ];
+  }
+  if (semanticType === "container") {
+    return [
+      shape("cylinder", [0.5, 0.06, 0.5], [0.42, 0.12, 0.42]),
+      shape("sphere", [0.5, 0.39, 0.5], [0.76, 0.62, 0.76]),
+      shape("cylinder", [0.5, 0.78, 0.5], [0.35, 0.24, 0.35]),
+      shape("torus", [0.5, 0.94, 0.5], [0.42, 0.06, 0.42]),
+    ];
+  }
+  if (semanticType === "candlestick") {
+    return [
+      shape("cylinder", [0.5, 0.06, 0.5], [0.72, 0.12, 0.72]),
+      shape("cylinder", [0.5, 0.48, 0.5], [0.2, 0.72, 0.2]),
+      shape("cylinder", [0.5, 0.86, 0.5], [0.52, 0.08, 0.52]),
+      shape("cylinder", [0.5, 0.92, 0.5], [0.16, 0.14, 0.16]),
+    ];
+  }
+  if (semanticType === "lantern") {
+    return [
+      box([0.5, 0.5, 0.5], [0.66, 0.58, 0.66], 0.3),
+      ...[0.17, 0.83].flatMap((x) => [0.17, 0.83].map((z) => box([x, 0.5, z], [0.07, 0.72, 0.07]))),
+      box([0.5, 0.11, 0.5], [0.86, 0.1, 0.86]),
+      shape("cone", [0.5, 0.87, 0.5], [0.92, 0.24, 0.92]),
+      shape("torus", [0.5, 0.98, 0.5], [0.24, 0.04, 0.24]),
+    ];
+  }
+  if (semanticType === "table_lamp") {
+    return [
+      shape("cylinder", [0.5, 0.06, 0.5], [0.62, 0.12, 0.62]),
+      shape("cylinder", [0.5, 0.45, 0.5], [0.14, 0.68, 0.14]),
+      shape("cone", [0.5, 0.82, 0.5], [0.84, 0.34, 0.84]),
+      shape("sphere", [0.5, 0.98, 0.5], [0.1, 0.04, 0.1]),
+    ];
+  }
+  if (semanticType === "ceiling_lamp") {
+    return [
+      shape("torus", [0.5, 0.96, 0.5], [0.64, 0.06, 0.64]),
+      shape("cylinder", [0.5, 0.76, 0.5], [0.12, 0.4, 0.12]),
+      shape("cone", [0.5, 0.35, 0.5], [0.9, 0.56, 0.9]),
+      shape("sphere", [0.5, 0.08, 0.5], [0.14, 0.16, 0.14]),
+    ];
+  }
+  return undefined;
 }
 
 function parseJsonCandidate(value: unknown) {
@@ -297,7 +498,7 @@ function parseJsonCandidate(value: unknown) {
   return JSON.parse(withoutFence) as unknown;
 }
 
-function getLayoutReferenceCameraFallback(components: readonly LayoutDraftComponent[]): DirectorLayoutReferenceCamera {
+function getLayoutReferenceCameraFallback(components: readonly LayoutDraftComponent[], imageAspectRatio?: number): DirectorLayoutReferenceCamera {
   const bounds = components.reduce(
     (current, component) => ({
       minX: Math.min(current.minX, component.position[0] - component.size[0] / 2),
@@ -324,24 +525,113 @@ function getLayoutReferenceCameraFallback(components: readonly LayoutDraftCompon
     fov: 50,
     confidence: 0,
     source: "bounds-fallback",
+    ...(imageAspectRatio ? { imageAspectRatio } : {}),
   };
 }
 
-function normalizeLayoutReferenceCamera(raw: unknown, components: readonly LayoutDraftComponent[]): DirectorLayoutReferenceCamera {
+function normalizeLayoutReferenceCamera(raw: unknown, components: readonly LayoutDraftComponent[], imageAspectRatio?: number): DirectorLayoutReferenceCamera {
   if (!isRecord(raw) || !isFiniteTuple3(raw.position) || !isFiniteTuple3(raw.target)
     || typeof raw.fov !== "number" || !Number.isFinite(raw.fov) || raw.fov < 20 || raw.fov > 100) {
-    return getLayoutReferenceCameraFallback(components);
+    return getLayoutReferenceCameraFallback(components, imageAspectRatio);
   }
   const confidence = typeof raw.confidence === "number" && Number.isFinite(raw.confidence)
     ? Math.min(1, Math.max(0, raw.confidence))
     : 0;
+  const rawFit = isRecord(raw.fitDiagnostics) ? raw.fitDiagnostics : undefined;
+  const rawPairDiagnostics = rawFit && Array.isArray(rawFit.pairDiagnostics) ? rawFit.pairDiagnostics : undefined;
+  const pairDiagnostics = rawPairDiagnostics?.slice(0, 32).flatMap((entry) => {
+    const isTuple2 = (value: unknown, min: number, max: number): value is [number, number] => Array.isArray(value) && value.length === 2
+      && value.every((item) => typeof item === "number" && Number.isFinite(item) && item >= min && item <= max);
+    if (!isRecord(entry) || typeof entry.id !== "string" || entry.id.length > 48
+      || !isTuple2(entry.observedCenter, -100, 100) || !isTuple2(entry.predictedCenter, -100, 100)
+      || !isTuple2(entry.observedSize, 0.01, 100) || !isTuple2(entry.predictedSize, 0.01, 100)
+      || typeof entry.centerError !== "number" || !Number.isFinite(entry.centerError) || entry.centerError < 0 || entry.centerError > 10
+      || typeof entry.scaleError !== "number" || !Number.isFinite(entry.scaleError) || entry.scaleError < 0 || entry.scaleError > 20
+      || typeof entry.weightedContribution !== "number" || !Number.isFinite(entry.weightedContribution) || entry.weightedContribution < 0 || entry.weightedContribution > 10) return [];
+    return [{
+      id: entry.id,
+      observedCenter: [...entry.observedCenter] as [number, number],
+      observedSize: [...entry.observedSize] as [number, number],
+      predictedCenter: [...entry.predictedCenter] as [number, number],
+      predictedSize: [...entry.predictedSize] as [number, number],
+      centerError: entry.centerError,
+      scaleError: entry.scaleError,
+      weightedContribution: entry.weightedContribution,
+    }];
+  }).slice(0, 10);
+  const rawBestCandidate = rawFit && isRecord(rawFit.bestCandidate) ? rawFit.bestCandidate : undefined;
+  const bestCandidate = rawBestCandidate && isFiniteTuple3(rawBestCandidate.position) && isFiniteTuple3(rawBestCandidate.target)
+    && Math.max(...rawBestCandidate.position.map(Math.abs)) <= 100
+    && Math.max(...rawBestCandidate.target.map(Math.abs)) <= 100
+    && typeof rawBestCandidate.fov === "number" && Number.isFinite(rawBestCandidate.fov) && rawBestCandidate.fov >= 20 && rawBestCandidate.fov <= 100
+    ? { position: [...rawBestCandidate.position] as [number, number, number], target: [...rawBestCandidate.target] as [number, number, number], fov: rawBestCandidate.fov }
+    : undefined;
+  const fitDiagnostics = rawFit
+    && (rawFit.qualityStatus === undefined || ["accepted", "needsReview", "unavailable"].includes(String(rawFit.qualityStatus)))
+    && Number.isInteger(rawFit.itemCount) && Number(rawFit.itemCount) >= 0 && Number(rawFit.itemCount) <= 10
+    && Number.isInteger(rawFit.candidateCount) && Number(rawFit.candidateCount) >= 0 && Number(rawFit.candidateCount) <= 600
+    && typeof rawFit.applied === "boolean"
+    && (rawFit.passedErrorThreshold === undefined || typeof rawFit.passedErrorThreshold === "boolean")
+    && (rawFit.movedGroundItems === undefined || Number.isInteger(rawFit.movedGroundItems) && Number(rawFit.movedGroundItems) >= 0 && Number(rawFit.movedGroundItems) <= 10)
+    && (rawFit.movedComponents === undefined || Number.isInteger(rawFit.movedComponents) && Number(rawFit.movedComponents) >= 0 && Number(rawFit.movedComponents) <= LAYOUT_DRAFT_MAX_COMPONENTS)
+    && (rawFit.positionAdjustmentMeters === undefined || typeof rawFit.positionAdjustmentMeters === "number" && Number.isFinite(rawFit.positionAdjustmentMeters) && rawFit.positionAdjustmentMeters >= 0 && rawFit.positionAdjustmentMeters <= 100)
+    && ([null, "insufficient-evidence", "no-safe-candidate", "insufficient-improvement", "error-too-high", "unsafe-collision"] as unknown[]).includes(rawFit.rejectionReason)
+    && (rawFit.bestCandidate === null || Boolean(bestCandidate))
+    && (rawFit.baselineProjectionError === null || typeof rawFit.baselineProjectionError === "number" && Number.isFinite(rawFit.baselineProjectionError) && rawFit.baselineProjectionError >= 0 && rawFit.baselineProjectionError <= 10)
+    && (rawFit.bestProjectionError === null || typeof rawFit.bestProjectionError === "number" && Number.isFinite(rawFit.bestProjectionError) && rawFit.bestProjectionError >= 0 && rawFit.bestProjectionError <= 10)
+    && (rawFit.cameraOnlyBestProjectionError === undefined || rawFit.cameraOnlyBestProjectionError === null || typeof rawFit.cameraOnlyBestProjectionError === "number" && Number.isFinite(rawFit.cameraOnlyBestProjectionError) && rawFit.cameraOnlyBestProjectionError >= 0 && rawFit.cameraOnlyBestProjectionError <= 10)
+    ? {
+      qualityStatus: (rawFit.qualityStatus ?? (rawFit.applied ? "accepted" : "unavailable")) as "accepted" | "needsReview" | "unavailable",
+      itemCount: Number(rawFit.itemCount),
+      candidateCount: Number(rawFit.candidateCount),
+      baselineProjectionError: rawFit.baselineProjectionError as number | null,
+      bestProjectionError: rawFit.bestProjectionError as number | null,
+      ...(rawFit.cameraOnlyBestProjectionError !== undefined ? { cameraOnlyBestProjectionError: rawFit.cameraOnlyBestProjectionError as number | null } : {}),
+      ...(rawPairDiagnostics ? { pairDiagnostics: pairDiagnostics ?? [] } : {}),
+      bestCandidate: bestCandidate ?? null,
+      applied: rawFit.applied,
+      ...(rawFit.passedErrorThreshold !== undefined ? { passedErrorThreshold: rawFit.passedErrorThreshold } : {}),
+      ...(rawFit.movedGroundItems !== undefined ? { movedGroundItems: Number(rawFit.movedGroundItems) } : {}),
+      ...(rawFit.movedComponents !== undefined ? { movedComponents: Number(rawFit.movedComponents) } : {}),
+      ...(rawFit.positionAdjustmentMeters !== undefined ? { positionAdjustmentMeters: Number(rawFit.positionAdjustmentMeters) } : {}),
+      ...(Array.isArray(rawFit.collisionPairs) ? {
+        collisionPairs: rawFit.collisionPairs.slice(0, 32).flatMap((pair) => isRecord(pair)
+          && typeof pair.firstId === "string" && pair.firstId.length <= 48
+          && typeof pair.secondId === "string" && pair.secondId.length <= 48
+          && ["hard", "review", "allowed"].includes(String(pair.classification))
+          && typeof pair.reason === "string" && pair.reason.length <= 96
+          ? [{ firstId: pair.firstId, secondId: pair.secondId, classification: pair.classification as "hard" | "review" | "allowed", reason: pair.reason }]
+          : []),
+      } : {}),
+      ...(isRecord(rawFit.physicalValidity) && typeof rawFit.physicalValidity.withinRoom === "boolean"
+        && typeof rawFit.physicalValidity.cameraOutsideGeometry === "boolean"
+        && Number.isInteger(rawFit.physicalValidity.hardCollisionCount) && Number(rawFit.physicalValidity.hardCollisionCount) >= 0
+        ? { physicalValidity: {
+          withinRoom: rawFit.physicalValidity.withinRoom,
+          cameraOutsideGeometry: rawFit.physicalValidity.cameraOutsideGeometry,
+          hardCollisionCount: Number(rawFit.physicalValidity.hardCollisionCount),
+          ...(Array.isArray(rawFit.physicalValidity.roomBoundaryViolations) ? {
+            roomBoundaryViolations: rawFit.physicalValidity.roomBoundaryViolations.slice(0, 32).flatMap((entry) => isRecord(entry)
+              && typeof entry.componentId === "string" && entry.componentId.length <= 48
+              && ["left", "right", "front", "back"].includes(String(entry.edge))
+              && typeof entry.overflowMeters === "number" && Number.isFinite(entry.overflowMeters) && entry.overflowMeters >= 0
+              ? [{ componentId: entry.componentId, edge: entry.edge as "left" | "right" | "front" | "back", overflowMeters: entry.overflowMeters }]
+              : []),
+          } : {}),
+        } }
+        : {}),
+      rejectionReason: rawFit.rejectionReason as "insufficient-evidence" | "no-safe-candidate" | "insufficient-improvement" | "error-too-high" | "unsafe-collision" | null,
+    }
+    : undefined;
   return {
     projection: "perspective",
     position: [...raw.position] as [number, number, number],
     target: [...raw.target] as [number, number, number],
     fov: raw.fov,
     confidence,
-    source: "model",
+    source: raw.source === "estimated" ? "estimated" : raw.source === "bounds-fallback" ? "bounds-fallback" : "model",
+    ...(fitDiagnostics ? { fitDiagnostics } : {}),
+    ...(imageAspectRatio ? { imageAspectRatio } : {}),
   };
 }
 
@@ -412,6 +702,9 @@ function normalizeLayoutCharacter(raw: unknown, index: number, seenIds: Set<stri
   const rotationYDegrees = typeof raw.rotationYDegrees === "number" && Number.isFinite(raw.rotationYDegrees)
     ? raw.rotationYDegrees
     : 0;
+  const facingDirection = LAYOUT_CHARACTER_FACING_DIRECTIONS.includes(raw.facingDirection as LayoutCharacterFacingDirection)
+    ? raw.facingDirection as LayoutCharacterFacingDirection
+    : undefined;
   const confidence = typeof raw.confidence === "number" && Number.isFinite(raw.confidence)
     ? Math.min(1, Math.max(0, raw.confidence))
     : 0.4;
@@ -426,17 +719,19 @@ function normalizeLayoutCharacter(raw: unknown, index: number, seenIds: Set<stri
     position: clampedPosition,
     height,
     rotationYDegrees,
+    ...(facingDirection ? { facingDirection } : {}),
     posture,
     kneelVariant,
     handGesture,
-    supportComponentId,
+    ...(supportComponentId ? { supportComponentId } : {}),
     bodyTypeHint,
     confidence,
     uncertain: raw.uncertain === true
       || confidence < 0.65
       || positionWasInvalid
       || heightWasOutOfRange
-      || postureWasUnknown,
+      || postureWasUnknown
+      || facingDirection === "unknown",
     notes: [
       boundedString(raw.notes, "", 240),
       positionWasInvalid ? "位置缺失，已置于原点" : "",
@@ -541,14 +836,30 @@ function isPointInsideComponentFootprint(
     && Math.abs(localZ) <= component.size[2] / 2 + padding;
 }
 
+function assemblySupportTopRatio(component: LayoutDraftComponent) {
+  // Resolve the top of a broad horizontal piece in an assembly (mattress, shelf,
+  // tabletop) instead of treating the assembly's whole bounding box as a surface.
+  const horizontalSupportParts = component.assembly?.filter((part) => {
+    const horizontalArea = part.size[0] * part.size[2];
+    return part.size[1] <= Math.min(part.size[0], part.size[2]) * 0.5
+      && horizontalArea >= 0.25;
+  }) ?? [];
+  return horizontalSupportParts.length
+    ? Math.max(...horizontalSupportParts.map((part) => part.position[1] + part.size[1] / 2))
+    : undefined;
+}
+
 function getSupportTopY(component: LayoutDraftComponent, groundHeight: number) {
   // ground 的语义以场景地面顶面为准；服务返回的 ground.position.y 不参与支撑计算。
   if (component.category === "ground") return groundHeight;
+  const assemblyTopRatio = assemblySupportTopRatio(component);
+  if (assemblyTopRatio !== undefined) return component.position[1] + component.size[1] * assemblyTopRatio;
   return component.position[1] + component.size[1];
 }
 
 function canUseBoundingBoxTopAsSupport(component: LayoutDraftComponent) {
-  return ["ground", "table", "cabinet", "prop"].includes(component.category);
+  return ["ground", "table", "cabinet", "prop"].includes(component.category)
+    || assemblySupportTopRatio(component) !== undefined;
 }
 
 function isOpeningAttachedToWall(opening: LayoutDraftComponent, walls: readonly LayoutDraftComponent[]) {
@@ -583,6 +894,185 @@ function appendOpeningAttachmentDiagnostics(components: LayoutDraftComponent[]) 
       notes: appendLayoutDiagnostic(component.notes, `${component.category === "door" ? "门" : "窗"}未依附可识别墙面，待确认位置与朝向`),
     };
   });
+}
+
+const LAYOUT_OBSERVATION_MAX_COUNT = 12;
+const LAYOUT_RELATION_MAX_COUNT = 24;
+const LAYOUT_SEMANTIC_TYPE_MAX_LENGTH = 48;
+
+function normalizeLayoutSpaceType(value: unknown): LayoutSpaceType | undefined {
+  return LAYOUT_SPACE_TYPES.includes(value as LayoutSpaceType) ? value as LayoutSpaceType : undefined;
+}
+
+function normalizeLayoutObservations(raw: unknown, componentIds: ReadonlySet<string>, warnings: Set<string>) {
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length > LAYOUT_OBSERVATION_MAX_COUNT) warnings.add("observations_truncated");
+  const output: NonNullable<LayoutDraft["observations"]> = [];
+  for (const item of raw.slice(0, LAYOUT_OBSERVATION_MAX_COUNT)) {
+    if (!isRecord(item) || !LAYOUT_OBSERVATION_STATES.includes(item.state as LayoutObservationState)
+      || typeof item.confidence !== "number" || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) {
+      warnings.add("observation_invalid");
+      continue;
+    }
+    const componentId = typeof item.componentId === "string"
+      ? boundedString(item.componentId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
+      : undefined;
+    if (componentId && !componentIds.has(componentId)) {
+      warnings.add("observation_component_missing");
+      continue;
+    }
+    output.push({
+      ...(componentId ? { componentId } : {}),
+      state: item.state as LayoutObservationState,
+      confidence: item.confidence,
+      ...(typeof item.evidence === "string" && item.evidence.trim()
+        ? { evidence: item.evidence.trim().slice(0, 160) }
+        : {}),
+    });
+  }
+  return output.length ? output : undefined;
+}
+
+function normalizeLayoutRelations(raw: unknown, componentIds: ReadonlySet<string>, warnings: Set<string>) {
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length > LAYOUT_RELATION_MAX_COUNT) warnings.add("relations_truncated");
+  const output: NonNullable<LayoutDraft["relations"]> = [];
+  for (const item of raw.slice(0, LAYOUT_RELATION_MAX_COUNT)) {
+    if (!isRecord(item) || typeof item.fromId !== "string" || typeof item.toId !== "string"
+      || !LAYOUT_RELATION_TYPES.includes(item.type as LayoutRelationType)
+      || typeof item.confidence !== "number" || !Number.isFinite(item.confidence)
+      || item.confidence < 0 || item.confidence > 1) {
+      warnings.add("relation_invalid");
+      continue;
+    }
+    const fromId = boundedString(item.fromId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_");
+    const toId = boundedString(item.toId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_");
+    if (!fromId || !toId || fromId === toId || !componentIds.has(fromId) || !componentIds.has(toId)) {
+      warnings.add("relation_endpoint_missing");
+      continue;
+    }
+    output.push({ fromId, toId, type: item.type as LayoutRelationType, confidence: item.confidence });
+  }
+  return output.length ? output : undefined;
+}
+
+/** Only high-confidence wall attachment for thin openings may alter their yaw/position. */
+function resolveExplicitLayoutRelations(
+  components: LayoutDraftComponent[],
+  relations: NonNullable<LayoutDraft["relations"]>,
+  warnings: Set<string>,
+) {
+  const byId = new Map(components.map((component) => [component.id, component]));
+  const patches = new Map<string, LayoutDraftComponent>();
+  for (const relation of relations) {
+    const from = patches.get(relation.fromId) ?? byId.get(relation.fromId)!;
+    const to = patches.get(relation.toId) ?? byId.get(relation.toId)!;
+    if (relation.type === "attached_to") {
+      const opening = ["door", "window"].includes(from.category) ? from : ["door", "window"].includes(to.category) ? to : undefined;
+      const wall = from.category === "wall" ? from : to.category === "wall" ? to : undefined;
+      if (!opening || !wall || relation.confidence < 0.8 || opening.confidence < 0.65 || wall.confidence < 0.65) {
+        warnings.add("attachment_unresolved");
+        continue;
+      }
+      const wallRunsAlongX = wall.size[0] >= wall.size[2];
+      const expectedYaw = wall.rotationYDegrees + (wallRunsAlongX ? 0 : 90);
+      const radians = wall.rotationYDegrees * Math.PI / 180;
+      const dx = opening.position[0] - wall.position[0];
+      const dz = opening.position[2] - wall.position[2];
+      const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
+      const localZ = Math.sin(radians) * dx + Math.cos(radians) * dz;
+      const along = wallRunsAlongX ? localX : localZ;
+      const wallLength = wallRunsAlongX ? wall.size[0] : wall.size[2];
+      const openingWidth = opening.size[0];
+      const verticalOverlap = opening.position[1] <= wall.position[1] + wall.size[1] + 0.12
+        && opening.position[1] + opening.size[1] >= wall.position[1] - 0.12;
+      if (Math.abs(along) + openingWidth / 2 > wallLength / 2 + 0.12 || !verticalOverlap) {
+        warnings.add("attachment_geometry_conflict");
+        continue;
+      }
+      const snappedPosition: [number, number, number] = wallRunsAlongX
+        ? [wall.position[0] + Math.cos(radians) * along, opening.position[1], wall.position[2] - Math.sin(radians) * along]
+        : [wall.position[0] + Math.sin(radians) * along, opening.position[1], wall.position[2] + Math.cos(radians) * along];
+      const changed = Math.abs(normalizeHalfTurnDifference(opening.rotationYDegrees, expectedYaw)) > 0.1
+        || Math.hypot(opening.position[0] - snappedPosition[0], opening.position[2] - snappedPosition[2]) > 0.02;
+      if (changed) {
+        patches.set(opening.id, {
+          ...opening,
+          position: snappedPosition,
+          rotationYDegrees: expectedYaw,
+          uncertain: true,
+          notes: appendLayoutDiagnostic(opening.notes, "已按明确的 attached_to 关系吸附到墙面，位置/朝向已自动修正，请复核"),
+        });
+        warnings.add("attachment_adjusted_review");
+      }
+    } else if (relation.type === "head_at" && from.semanticType === "bed" && to.category === "wall") {
+      // Bed local -Z is its head end. Measure that point against the rotated wall plane
+      // and along-wall bounds; never rotate or translate the bed from this soft relation.
+      const radians = to.rotationYDegrees * Math.PI / 180;
+      const bedHalfDepth = from.size[2] / 2;
+      const headX = from.position[0] - Math.sin(from.rotationYDegrees * Math.PI / 180) * bedHalfDepth;
+      const headZ = from.position[2] - Math.cos(from.rotationYDegrees * Math.PI / 180) * bedHalfDepth;
+      const dx = headX - to.position[0];
+      const dz = headZ - to.position[2];
+      const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
+      const localZ = Math.sin(radians) * dx + Math.cos(radians) * dz;
+      const wallRunsAlongX = to.size[0] >= to.size[2];
+      const along = wallRunsAlongX ? localX : localZ;
+      const across = wallRunsAlongX ? localZ : localX;
+      const wallLength = wallRunsAlongX ? to.size[0] : to.size[2];
+      const wallThickness = wallRunsAlongX ? to.size[2] : to.size[0];
+      const inWallSpan = Math.abs(along) <= wallLength / 2 + 0.2;
+      const nearWallPlane = Math.abs(across) <= wallThickness / 2 + 0.25;
+      if (!inWallSpan || !nearWallPlane) {
+        patches.set(from.id, {
+          ...from,
+          uncertain: true,
+          notes: appendLayoutDiagnostic(from.notes, "head_at 关系与床头点/目标墙几何不符；保留原位，待确认"),
+        });
+        warnings.add("head_at_geometry_conflict");
+      }
+    } else if (relation.type === "head_at") {
+      const note = "head_at端点应为床体（semanticType=bed）指向墙；关系待确认";
+      patches.set(from.id, {
+        ...from,
+        uncertain: true,
+        notes: appendLayoutDiagnostic(from.notes, note),
+      });
+      patches.set(to.id, {
+        ...to,
+        uncertain: true,
+        notes: appendLayoutDiagnostic(to.notes, note),
+      });
+      warnings.add("head_at_endpoint_invalid");
+    }
+  }
+  return components.map((component) => patches.get(component.id) ?? component);
+}
+
+function warnComponentsAboveKnownRoomHeight(
+  components: LayoutDraftComponent[],
+  spaceType: LayoutSpaceType | undefined,
+  warnings: Set<string>,
+) {
+  if (spaceType !== "enclosed") return components;
+  const knownWallTops = components
+    .filter((component) => component.category === "wall" && component.visible && !component.uncertain && component.confidence >= 0.65)
+    .map((wall) => wall.position[1] + wall.size[1]);
+  if (!knownWallTops.length) return components;
+  const roomTop = Math.max(...knownWallTops);
+  let hasOutlier = false;
+  const result = components.map((component) => {
+    if (!component.visible || component.category === "ground" || component.category === "wall"
+      || component.position[1] + component.size[1] <= roomTop + 0.1) return component;
+    hasOutlier = true;
+    return {
+      ...component,
+      uncertain: true,
+      notes: appendLayoutDiagnostic(component.notes, "组件顶部超出已识别墙高；保留原几何，待对照参考图确认"),
+    };
+  });
+  if (hasOutlier) warnings.add("component_exceeds_room_height");
+  return result;
 }
 
 function resolveLayoutSupportGraph(
@@ -778,7 +1268,7 @@ function resolveLayoutSupportGraph(
 export function validateLayoutDraftCandidate(
   candidate: unknown,
   source: LayoutDraftSource,
-  options: { draftId?: string; createdAt?: string } = {}
+  options: { draftId?: string; createdAt?: string; imageAspectRatio?: number } = {}
 ): LayoutDraft {
   let parsed: unknown;
   try {
@@ -822,6 +1312,16 @@ export function validateLayoutDraftCandidate(
       issues.push(`${label}的朝向必须是有限数字`);
     }
     const confidence = raw.confidence;
+    const semanticType = boundedString(raw.semanticType, "", LAYOUT_SEMANTIC_TYPE_MAX_LENGTH).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined;
+    const normalizedAssembly = normalizeLayoutAssembly(raw.assembly);
+    const semanticProfile = resolveLayoutSemanticProfile(semanticType, boundedString(raw.name, "", 80));
+    const assembly = normalizedAssembly ?? buildSemanticLayoutAssembly(semanticProfile?.canonicalType ?? semanticType);
+    const supportComponentId = typeof raw.supportComponentId === "string"
+      ? boundedString(raw.supportComponentId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
+      : undefined;
+    const partOfComponentId = typeof raw.partOfComponentId === "string"
+      ? boundedString(raw.partOfComponentId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
+      : undefined;
     if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
       issues.push(`${label}的置信度必须在 0 到 1 之间`);
     }
@@ -856,15 +1356,15 @@ export function validateLayoutDraftCandidate(
       primitive: primitive as "box" | "cylinder",
       position: [...raw.position] as [number, number, number],
       size: [...raw.size] as [number, number, number],
-      supportComponentId: typeof raw.supportComponentId === "string"
-        ? boundedString(raw.supportComponentId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
-        : undefined,
+      ...(supportComponentId ? { supportComponentId } : {}),
+      ...(partOfComponentId ? { partOfComponentId } : {}),
       rotationYDegrees,
       confidence,
       uncertain: raw.uncertain === true || confidence < 0.65,
       modelDescriptor: boundedString(raw.modelDescriptor, "", 120) || undefined,
+      ...(semanticType ? { semanticType } : {}),
       appearance: normalizeLayoutAppearance(raw.appearance, rotationYDegrees),
-      assembly: normalizeLayoutAssembly(raw.assembly),
+      ...(assembly ? { assembly } : {}),
       notes: boundedString(raw.notes, "", 240) || undefined,
       visible: raw.visible !== false,
     };
@@ -881,6 +1381,21 @@ export function validateLayoutDraftCandidate(
       : 0.35;
 
   const normalizedComponents = components.filter((item): item is LayoutDraftComponent => Boolean(item));
+  const metadataWarnings = new Set<string>();
+  const componentIds = new Set(normalizedComponents.map((component) => component.id));
+  const spaceType = normalizeLayoutSpaceType(parsed.spaceType);
+  if (parsed.spaceType !== undefined && !spaceType) metadataWarnings.add("space_type_invalid");
+  const observations = normalizeLayoutObservations(parsed.observations, componentIds, metadataWarnings);
+  const relations = normalizeLayoutRelations(parsed.relations, componentIds, metadataWarnings);
+  const hasStructuredMetadata = parsed.spaceType !== undefined
+    || parsed.observations !== undefined
+    || parsed.relations !== undefined
+    || normalizedComponents.some((component) => Boolean(component.semanticType || component.assembly));
+  const visibleComponents = normalizedComponents.filter((component) => component.visible);
+  if (hasStructuredMetadata && visibleComponents.length > 0
+    && visibleComponents.every((component) => !component.appearance?.color)) {
+    metadataWarnings.add("appearance_color_missing");
+  }
 
   // 人物解析：缺省为空数组（纯布景图合法）；超过上限截断而非报错；
   // 单个结构非法的人物跳过，取值范围外夹紧并标记 uncertain。
@@ -889,6 +1404,10 @@ export function validateLayoutDraftCandidate(
     .map((raw, index) => normalizeLayoutCharacter(raw, index, seenIds))
     .filter((item): item is LayoutDraftCharacter => Boolean(item));
   const supported = resolveLayoutSupportGraph(normalizedComponents, characters);
+  const relatedComponents = relations
+    ? resolveExplicitLayoutRelations(supported.components, relations, metadataWarnings)
+    : supported.components;
+  const checkedComponents = warnComponentsAboveKnownRoomHeight(relatedComponents, spaceType, metadataWarnings);
 
   return {
     version: 1,
@@ -900,8 +1419,18 @@ export function validateLayoutDraftCandidate(
       mode: "estimated",
       confidence: scaleConfidence,
     },
-    referenceCamera: normalizeLayoutReferenceCamera(parsed.referenceCamera, supported.components),
-    components: carveDoorOpenings(supported.components),
+    referenceCamera: normalizeLayoutReferenceCamera(
+      parsed.referenceCamera,
+      supported.components,
+      Number.isFinite(options.imageAspectRatio) && options.imageAspectRatio! >= 0.1 && options.imageAspectRatio! <= 10
+        ? options.imageAspectRatio
+        : undefined,
+    ),
+    ...(spaceType ? { spaceType } : {}),
+    ...(observations ? { observations } : {}),
+    ...(relations ? { relations } : {}),
+    ...(metadataWarnings.size ? { validationWarnings: [...metadataWarnings].slice(0, 12) } : {}),
+    components: carveDoorOpenings(appendOpeningAttachmentDiagnostics(checkedComponents)),
     characters: supported.characters,
   };
 }
@@ -1080,6 +1609,7 @@ export function buildLayoutBatch(
         uncertain: character.uncertain,
         characterMeta: {
           posture: character.posture,
+          ...(character.facingDirection ? { facingDirection: character.facingDirection } : {}),
           ...(character.kneelVariant ? { kneelVariant: character.kneelVariant } : {}),
           ...(character.handGesture ? { handGesture: character.handGesture } : {}),
           height: character.height,

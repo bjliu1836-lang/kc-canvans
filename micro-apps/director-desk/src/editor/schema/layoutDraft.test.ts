@@ -87,6 +87,15 @@ describe("layout draft validation", () => {
     });
   });
 
+  it("omits new optional layout metadata when normalizing legacy components and characters", () => {
+    const draft = validateLayoutDraftCandidate(candidateWithCharacters(), source);
+
+    expect(draft.components[0]).not.toHaveProperty("semanticType");
+    expect(draft.components[0]).not.toHaveProperty("supportComponentId");
+    expect(draft.components[0]).not.toHaveProperty("assembly");
+    expect(draft.characters[0]).not.toHaveProperty("supportComponentId");
+  });
+
   it.each([
     ["negative size", { size: [-1, 2, 3] }],
     ["NaN position", { position: [0, Number.NaN, 0] }],
@@ -136,6 +145,30 @@ describe("layout draft validation", () => {
     expect(built.batch.referenceCamera).toEqual(draft.referenceCamera);
   });
 
+  it("bounds numeric camera-fit pair diagnostics to ten safe entries", () => {
+    const value: any = candidate();
+    const pair = {
+      id: "object_01",
+      observedCenter: [0.5, 0.5], observedSize: [0.2, 0.3],
+      predictedCenter: [0.51, 0.49], predictedSize: [0.19, 0.31],
+      centerError: 0.014, scaleError: 0.1, weightedContribution: 0.01,
+    };
+    value.referenceCamera = {
+      projection: "perspective", position: [0, 1.6, 6], target: [0, 1, 0], fov: 50, confidence: 0.1, source: "estimated",
+      fitDiagnostics: {
+        qualityStatus: "needsReview", itemCount: 10, candidateCount: 512,
+        baselineProjectionError: 0.8, bestProjectionError: 0.3, cameraOnlyBestProjectionError: 0.3,
+        bestCandidate: { position: [0, 1.6, 6], target: [0, 1, 0], fov: 50 },
+        applied: true, rejectionReason: "error-too-high",
+        pairDiagnostics: [{ ...pair, observedCenter: [0, Number.NaN] }, ...Array.from({ length: 11 }, (_, index) => ({ ...pair, id: `object_${index}` }))],
+      },
+    };
+    const draft = validateLayoutDraftCandidate(value, source);
+    expect(draft.referenceCamera?.fitDiagnostics?.candidateCount).toBe(512);
+    expect(draft.referenceCamera?.fitDiagnostics?.pairDiagnostics).toHaveLength(10);
+    expect(draft.referenceCamera?.fitDiagnostics?.pairDiagnostics?.[0]).toEqual({ ...pair, id: "object_0" });
+  });
+
   it("preserves constrained model and material hints through the applied object", () => {
     const value: any = candidate();
     value.components[0] = {
@@ -153,8 +186,109 @@ describe("layout draft validation", () => {
     expect(built.objects[0].transform.rotation[1]).toBeCloseTo(Math.PI / 2);
   });
 
+  it("normalizes bounded spatial metadata and safely snaps an explicitly attached opening to a rotated wall", () => {
+    const value: any = candidate();
+    value.spaceType = "open";
+    value.observations = [{ componentId: "wall_01", state: "visible", confidence: 0.9, evidence: "visible wall" }];
+    value.components.push({
+      id: "door_01", name: "门", category: "door", primitive: "box",
+      position: [0.25, 0, -2.8], size: [0.9, 2, 0.12], rotationYDegrees: 0,
+      confidence: 0.9, visible: true,
+    });
+    value.components[0] = { ...value.components[0], position: [0, 0, 0], rotationYDegrees: 37, semanticType: "wall" };
+    const radians = 37 * Math.PI / 180;
+    value.components[1].position = [Math.sin(radians) * 0.5, 0, Math.cos(radians) * 0.5];
+    value.relations = [{ fromId: "door_01", toId: "wall_01", type: "attached_to", confidence: 0.96 }];
+
+    const draft = validateLayoutDraftCandidate(value, source);
+    const door = draft.components.find((component) => component.id === "door_01")!;
+    expect(draft.spaceType).toBe("open");
+    expect(draft.observations).toEqual([{ componentId: "wall_01", state: "visible", confidence: 0.9, evidence: "visible wall" }]);
+    expect(draft.relations).toEqual(value.relations);
+    expect(draft.validationWarnings).toContain("attachment_adjusted_review");
+    expect(door.rotationYDegrees).toBeCloseTo(37);
+    expect(door.position[0]).toBeCloseTo(0);
+    expect(door.position[2]).toBeCloseTo(0);
+    expect(door.uncertain).toBe(true);
+  });
+
+  it("drops invalid or unknown relation endpoints as warnings without changing geometry", () => {
+    const value: any = candidate();
+    value.components[0].semanticType = "bed";
+    value.relations = [
+      { fromId: "wall_01", toId: "missing", type: "attached_to", confidence: 0.99 },
+      { fromId: "wall_01", toId: "wall_01", type: "nearish", confidence: 0.9 },
+    ];
+    const draft = validateLayoutDraftCandidate(value, source);
+    expect(draft.components[0].position).toEqual([0, 0, -3]);
+    expect(draft.relations).toBeUndefined();
+    expect(draft.validationWarnings).toContain("relation_endpoint_missing");
+    expect(draft.validationWarnings).toContain("relation_invalid");
+  });
+
+  it("warns when a structured draft has no visible colors while keeping legacy drafts compatible", () => {
+    const structured: any = candidate();
+    structured.spaceType = "enclosed";
+    structured.observations = [{ componentId: "wall_01", state: "visible", confidence: 0.9 }];
+    const draft = validateLayoutDraftCandidate(structured, source);
+    expect(draft.validationWarnings).toContain("appearance_color_missing");
+
+    const legacyDraft = validateLayoutDraftCandidate(candidate(), source);
+    expect(legacyDraft.validationWarnings ?? []).not.toContain("appearance_color_missing");
+  });
+
+  it("marks invalid head_at endpoint direction for review instead of silently accepting it", () => {
+    const value: any = candidate();
+    value.components.push({
+      id: "headboard_01", name: "床头板", category: "cabinet", primitive: "box",
+      position: [0, 0.6, -2], size: [2, 1, 0.15], rotationYDegrees: 0,
+      confidence: 0.9, visible: true,
+    });
+    value.relations = [{ fromId: "headboard_01", toId: "wall_01", type: "head_at", confidence: 0.9 }];
+    const draft = validateLayoutDraftCandidate(value, source);
+    expect(draft.validationWarnings).toContain("head_at_endpoint_invalid");
+    expect(draft.components.find((component) => component.id === "headboard_01")?.uncertain).toBe(true);
+  });
+
+  it("warns and preserves geometry when a visible component exceeds known enclosed wall height", () => {
+    const value: any = candidate();
+    value.spaceType = "enclosed";
+    value.components.push({
+      id: "tall_object", name: "物件", category: "cabinet", primitive: "box",
+      position: [0, 1.5, 0], size: [1, 2, 1], rotationYDegrees: 0,
+      confidence: 0.9, visible: true,
+    });
+    const draft = validateLayoutDraftCandidate(value, source);
+    const item = draft.components.find((component) => component.id === "tall_object")!;
+    expect(draft.validationWarnings).toContain("component_exceeds_room_height");
+    expect(item.position).toEqual([0, 1.5, 0]);
+    expect(item.uncertain).toBe(true);
+
+    value.spaceType = "open";
+    const openDraft = validateLayoutDraftCandidate(value, source);
+    expect(openDraft.validationWarnings ?? []).not.toContain("component_exceeds_room_height");
+    expect(openDraft.components.find((component) => component.id === "tall_object")?.uncertain).toBe(false);
+  });
+
+  it("reports a conflicting head_at relation against a rotated wall without moving the bed", () => {
+    const value: any = candidate();
+    value.components[0] = { ...value.components[0], position: [4, 0, 0], rotationYDegrees: 31 };
+    value.components.push({
+      id: "bed_01", name: "床", category: "prop", primitive: "box", semanticType: "bed",
+      position: [0, 0, 3], size: [2, 0.5, 2], rotationYDegrees: 0, confidence: 0.9, visible: true,
+    });
+    value.relations = [{ fromId: "bed_01", toId: "wall_01", type: "head_at", confidence: 0.92 }];
+    const draft = validateLayoutDraftCandidate(value, source);
+    const bed = draft.components.find((component) => component.id === "bed_01")!;
+    expect(bed.position).toEqual([0, 0, 3]);
+    expect(bed.uncertain).toBe(true);
+    expect(bed.notes).toContain("head_at");
+    expect(draft.validationWarnings).toContain("head_at_geometry_conflict");
+  });
+
   it("keeps a bounded declarative assembly and rejects parts outside the parent bounds", () => {
     const value: any = candidate();
+    value.components[0].semanticType = "bed";
     value.components[0] = { ...value.components[0], assembly: [
       { primitive: "box", position: [0.5, 0.82, 0.5], size: [0.9, 0.1, 0.7] },
       { primitive: "cylinder", position: [0.15, 0.4, 0.18], size: [0.1, 0.75, 0.1] },
@@ -162,6 +296,69 @@ describe("layout draft validation", () => {
     expect(buildLayoutBatch(validateLayoutDraftCandidate(value, source), "layout_assembly", []).objects[0].layoutSource?.assembly).toHaveLength(2);
     value.components[0].assembly[0].position = [1, 0.5, 0.5];
     expect(() => validateLayoutDraftCandidate(value, source)).toThrow("assembly");
+  });
+
+  it("fills missing bed, curtain, and bookshelf assemblies while preserving the parent box and preview/apply payload", () => {
+    const value: any = candidate();
+    value.components = ["bed", "curtain", "bookshelf"].map((semanticType, index) => ({
+      id: semanticType,
+      name: semanticType,
+      category: "prop",
+      primitive: "box",
+      semanticType,
+      position: [index * 3, 0, 0],
+      size: [2, 1, 0.8],
+      rotationYDegrees: index * 37,
+      confidence: 0.9,
+      visible: true,
+    }));
+    const draft = validateLayoutDraftCandidate(value, source);
+    const built = buildLayoutBatch(draft, "layout_semantic", []);
+    expect(draft.components.map((component) => component.assembly?.length)).toEqual([5, 4, 7]);
+    expect(draft.components[1].assembly?.find((part) => part.opacity !== undefined)?.opacity).toBe(0.35);
+    draft.components.forEach((component) => {
+      const applied = built.objects.find((object) => object.layoutSource?.componentId === component.id)!;
+      expect(applied.layoutSource?.assembly).toEqual(component.assembly);
+      expect(applied.transform).toMatchObject({ position: component.position, scale: component.size });
+      expect(component.assembly?.every((part) => part.opacity === undefined || (part.opacity >= 0.15 && part.opacity <= 1))).toBe(true);
+    });
+  });
+
+  it("builds shared normalized assemblies for common furniture and prop profiles", () => {
+    const semanticTypes = ["table", "altar_table", "small_table", "nightstand", "cabinet", "sculpture", "figurine", "vase", "bottle", "jar", "container", "urn", "censer", "incense_burner", "candlestick", "lantern", "table_lamp", "desk_lamp", "floor_lamp", "hanging_lamp", "plant", "flower", "potted_plant", "pillow", "cushion", "blanket"];
+    const value: any = candidate();
+    value.components = semanticTypes.map((semanticType, index) => ({
+      id: `generic_${index}`,
+      name: semanticType,
+      category: "prop",
+      primitive: "box",
+      semanticType,
+      position: [index * 3, 0, 0],
+      size: [1.2, 1.5, 0.8],
+      rotationYDegrees: 0,
+      confidence: 0.9,
+      visible: true,
+    }));
+    value.components.push({ ...value.components[0], id: "unknown", name: "unclassified prop", semanticType: "unclassified_prop" });
+    const draft = validateLayoutDraftCandidate(value, source);
+
+    for (const component of draft.components.slice(0, semanticTypes.length)) {
+      expect(component.assembly?.length).toBeGreaterThanOrEqual(2);
+      expect(component.assembly?.every((part) => [0, 1, 2].every((axis) =>
+        part.position[axis] - part.size[axis] / 2 >= -1e-6 && part.position[axis] + part.size[axis] / 2 <= 1 + 1e-6,
+      )), component.id).toBe(true);
+    }
+    expect(draft.components[draft.components.length - 1]?.assembly).toBeUndefined();
+    const assemblyFor = (semanticType: string) => draft.components.find((component) => component.semanticType === semanticType)?.assembly;
+    expect(assemblyFor("table")).toEqual(assemblyFor("altar_table"));
+    expect(assemblyFor("table")).toEqual(assemblyFor("small_table"));
+    expect(assemblyFor("sculpture")).toEqual(assemblyFor("figurine"));
+    expect(assemblyFor("vase")).toEqual(assemblyFor("bottle"));
+    expect(assemblyFor("vase")).toEqual(assemblyFor("jar"));
+    expect(assemblyFor("vase")).toEqual(assemblyFor("censer"));
+    expect(assemblyFor("vase")).toEqual(assemblyFor("incense_burner"));
+    expect(assemblyFor("table_lamp")).toEqual(assemblyFor("floor_lamp"));
+    expect(assemblyFor("plant")).toEqual(assemblyFor("flower"));
   });
 
   it("calibrates from the height axis when the anchor dimension is height", () => {
@@ -202,21 +399,28 @@ describe("layout draft validation", () => {
     ))).toBe(true);
   });
 
-  it("places a generated ground box below the scene floor without changing other component coordinates", () => {
-    const value = candidate();
-    value.components[0] = {
-      ...value.components[0],
-      id: "ground_01",
-      name: "地面",
-      category: "ground",
-      position: [0, 0, 0],
-      size: [6, 0.1, 6],
-    };
-    const draft = validateLayoutDraftCandidate(value, source);
-    const built = buildLayoutBatch(draft, "layout_ground", [], 1.5);
+  it("keeps preview and applied ground top 2mm above the scene floor for different thicknesses", () => {
+    for (const thickness of [0.02, 0.1]) {
+      const value = candidate();
+      value.components[0] = {
+        ...value.components[0],
+        id: "ground_01",
+        name: "地面",
+        category: "ground",
+        position: [0, 0.3, 0],
+        size: [6, thickness, 6],
+      };
+      const draft = validateLayoutDraftCandidate(value, source);
+      const ground = draft.components[0];
+      const previewPosition = getLayoutComponentRenderPosition(ground, 0.75);
+      const applied = buildLayoutBatch(draft, `layout_ground_${thickness}`, [], 0.75).objects[0];
+      const previewWorldTop = previewPosition[1] + ground.size[1];
+      const appliedWorldTop = applied.transform.position[1] + applied.transform.scale[1];
 
-    expect(built.objects[0].transform.position).toEqual([0, 1.402, 0]);
-    expect(built.objects[0].transform.position[1] + built.objects[0].transform.scale[1]).toBeCloseTo(1.5);
+      expect(previewWorldTop).toBeCloseTo(0.752);
+      expect(appliedWorldTop).toBeCloseTo(previewWorldTop);
+      expect(applied.transform.position).toEqual(previewPosition);
+    }
   });
 
   it("keeps preview and apply ground placement identical for the real temple response", () => {

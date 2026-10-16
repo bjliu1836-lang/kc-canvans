@@ -1634,7 +1634,7 @@ textarea:focus-visible {
 .director-canvas > div:first-child,
 .director-canvas canvas {
   display: block;
-  width: 100% !important;
+  width: 100%;
   height: 100%;
 }
 

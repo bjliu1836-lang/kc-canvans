@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { onRequest } from '../functions/api/[[path]].js';
+import { DIRECTOR_LAYOUT_OBSERVATION_FORMAT, parseDirectorLayoutObservation, summarizeDirectorLayoutObservationOutput } from '../functions/shared/director-layout-observations.js';
 
 const origin = 'https://worker.test';
 const baseEnv = {
@@ -49,6 +50,152 @@ const validDraft = {
 };
 
 const layoutEnv = { ...baseEnv, DIRECTOR_LAYOUT_API_KEY: 'test-key' };
+
+test('director-layout observation mode uses one model call and returns only bounded visual observations', async (t) => {
+  const token = await login();
+  const observation = {
+    spaceType: 'open',
+    surfaces: [{ id: 'wall', kind: 'wall', side: 'image_back', bbox: [0, 0.1, 1, 0.8], confidence: 0.9 }],
+    items: [{ id: 'desk', name: '桌子', semanticType: 'desk', bbox: [0.2, 0.4, 0.6, 0.7], confidence: 0.8, visibility: 'visible', appearance: { color: '#aabbcc', roughness: 0.3 }, contactWallSide: 'image_right', rearFeature: { name: '背板', bbox: [0.4, 0.4, 0.5, 0.5] }, bodyExtendsToward: 'image_left', coordinates3d: [9, 9, 9] }],
+    people: [{ id: 'actor', name: '人物', bbox: [0.4, 0.3, 0.6, 0.8], confidence: 0.7, visibility: 'visible', posture: 'kneel', facingDirection: 'image_up', kneelVariant: 'seiza', handGesture: 'prayer', worldPosition: [9, 9, 9] }],
+    globalYaw: 180,
+  };
+  let calls = 0;
+  let providerPayload;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    calls += 1;
+    providerPayload = JSON.parse(String(options?.body));
+    return Response.json({ choices: [{ message: { content: JSON.stringify(observation) } }], usage: { total_tokens: 10 } });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const response = await call('/api/director-layout', {
+    method: 'POST', token, env: layoutEnv,
+    body: { outputFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT, image: { url: 'data:image/png;base64,AA==' } },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(calls, 1);
+  assert.equal(providerPayload.messages[0].role, 'system');
+  assert.match(providerPayload.messages[0].content, /只负责从参考图提取可见的二维视觉事实/);
+  assert.match(providerPayload.messages[0].content, /每个人物都必须输出 posture/);
+  assert.match(providerPayload.messages[0].content, /不确定时必须显式写 unknown/);
+  assert.match(providerPayload.messages[0].content, /不能从跪姿或人物名称推断/);
+  assert.match(providerPayload.messages[0].content, /facingDirection/);
+  assert.match(providerPayload.messages[0].content, /toward_camera\/away_from_camera/);
+  assert.match(providerPayload.messages[0].content, /supportId/);
+  const data = await response.json();
+  assert.equal(data.observationFormat, DIRECTOR_LAYOUT_OBSERVATION_FORMAT);
+  assert.deepEqual(data.visualObservations, {
+    spaceType: 'open',
+    surfaces: [{ id: 'wall', kind: 'wall', side: 'image_back', bbox: [0, 0.1, 1, 0.8], confidence: 0.9 }],
+    items: [{ id: 'desk', name: '桌子', semanticType: 'desk', bbox: [0.2, 0.4, 0.6, 0.7], confidence: 0.8, visibility: 'visible', mainColor: '#AABBCC', contactWallSide: 'image_right', rearFeature: { name: '背板', bbox: [0.4, 0.4, 0.5, 0.5] }, bodyExtendsToward: 'image_left' }],
+    people: [{ id: 'actor', name: '人物', bbox: [0.4, 0.3, 0.6, 0.8], confidence: 0.7, visibility: 'visible', posture: 'kneel', facingDirection: 'image_up', kneelVariant: 'seiza', handGesture: 'prayer' }],
+  });
+  assert.equal(data.providerOutputShape.itemsItems[0].types.appearance, 'object');
+  assert.equal(data.providerOutputShape.itemsItems[0].appearance.types.color, 'string');
+  assert.deepEqual(data.usage, { total_tokens: 10 });
+});
+
+test('image observation parser rejects unbounded arrays and malformed boxes', () => {
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: Array(31).fill({}) })), /结构无效/);
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({
+    surfaces: [], items: [{ id: 'bad', name: '物件', category: 'prop', bbox: [-1, 0, 0.2, 0.3], confidence: 0.8, visibility: 'visible' }],
+  })), /对象无效/);
+});
+
+test('image observation parser requires explicit posture and preserves unknown without guessing', () => {
+  const basePerson = { id: 'actor', name: '跪拜女子', bbox: [0.2, 0.2, 0.4, 0.9], confidence: 0.9, visibility: 'visible' };
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [], people: [basePerson] })), /对象无效/);
+  const parsed = parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [], people: [{ ...basePerson, posture: 'unknown', facingDirection: 'unknown' }] }));
+  assert.equal(parsed.people[0].posture, 'unknown');
+  assert.equal(parsed.people[0].facingDirection, 'unknown');
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [], people: [{ ...basePerson, posture: 'kneel', facingDirection: 'unknown' }] })), /对象无效/);
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [], people: [{ ...basePerson, posture: 'unknown', facingDirection: 'unknown', visibility: 'partly_occluded', handGesture: 'prayer' }] })), /对象无效/);
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [], people: [{ ...basePerson, visibility: 'partly_occluded', posture: 'kneel', facingDirection: 'unknown', kneelVariant: 'seiza' }] })), /对象无效/);
+});
+
+test('image observation parser preserves camera-relative facing and person supportId', () => {
+  const parsed = parseDirectorLayoutObservation(JSON.stringify({
+    surfaces: [],
+    items: [{ id: 'cushion', name: '坐垫', semanticType: 'cushion', bbox: [0.3, 0.6, 0.6, 0.75], confidence: 0.9, visibility: 'visible' }],
+    people: [{ id: 'actor', name: '人物', bbox: [0.35, 0.25, 0.55, 0.65], confidence: 0.9, visibility: 'visible', posture: 'kneel', facingDirection: 'toward_camera', kneelVariant: 'seiza', supportId: 'cushion' }],
+  }));
+  assert.equal(parsed.people[0].facingDirection, 'toward_camera');
+  assert.equal(parsed.people[0].supportId, 'cushion');
+});
+
+test('image observation parser normalizes bounded color aliases and preserves explicit unknown color', () => {
+  const parsed = parseDirectorLayoutObservation(JSON.stringify({
+    surfaces: [{ id: 'wall', kind: 'wall', side: 'image_back', bbox: [0, 0, 1, 0.8], confidence: 0.9, color: '#abcdef' }],
+    items: [
+      { id: 'desk', name: '桌', semanticType: 'desk', bbox: [0.2, 0.3, 0.8, 0.7], confidence: 0.9, visibility: 'visible', appearance: { color: '#123456', roughness: 0.4 } },
+      { id: 'chair', name: '椅子', semanticType: 'chair', bbox: [0.2, 0.3, 0.4, 0.8], confidence: 0.8, visibility: 'visible', mainColor: null },
+    ],
+  }));
+  assert.deepEqual(parsed.surfaces[0].mainColor, '#ABCDEF');
+  assert.deepEqual(parsed.items.map((item) => item.mainColor), ['#123456', null]);
+  assert.equal('appearance' in parsed.items[0], false);
+});
+
+test('image observation failures expose bounded paths and key/type shape without provider values', async (t) => {
+  const token = await login();
+  const bad = { surfaces: [], items: [{ id: 'secret-object-name', name: '机密文本', bbox: [0, 0, 1, 1], confidence: 0.8, visibility: 'visible' }] };
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { calls += 1; return Response.json({ choices: [{ message: { content: JSON.stringify(bad) } }] }); };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const response = await call('/api/director-layout', {
+    method: 'POST', token, env: layoutEnv,
+    body: { outputFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT, image: { url: 'data:image/png;base64,AA==' } },
+  });
+  const data = await response.json();
+  assert.equal(response.status, 422);
+  assert.equal(calls, 1);
+  assert.equal(data.error, 'DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID');
+  assert.ok(data.issuePaths.includes('$.items[0].semanticType|category:required'));
+  assert.deepEqual(data.outputShape.rootKeys, ['surfaces', 'items']);
+  assert.equal(data.outputShape.itemsItems[0].types.name, 'string');
+  assert.equal(JSON.stringify(data).includes('secret-object-name'), false);
+  assert.equal(JSON.stringify(data).includes('机密文本'), false);
+  const summary = summarizeDirectorLayoutObservationOutput('{"token":"do-not-retain"}');
+  assert.deepEqual(summary.rootKeys, []);
+  assert.equal(summary.unknownRootKeyCount, 1);
+  assert.equal(JSON.stringify(summary).includes('do-not-retain'), false);
+});
+
+test('director-layout distinguishes provider HTTP errors from model parsing failures', async (t) => {
+  const token = await login();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: 'provider-secret-detail' } }), { status: 429 });
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const response = await call('/api/director-layout', {
+    method: 'POST', token, env: layoutEnv,
+    body: { outputFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT, image: { url: 'data:image/png;base64,AA==' } },
+  });
+  const data = await response.json();
+  assert.equal(response.status, 429);
+  assert.equal(data.error, 'DIRECTOR_LAYOUT_UPSTREAM_HTTP');
+  assert.equal(data.upstreamStatus, 429);
+  assert.equal(JSON.stringify(data).includes('provider-secret-detail'), false);
+});
+
+test('director-layout labels an invalid provider envelope separately and keeps only its shape', async (t) => {
+  const token = await login();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ id: 'private-id', unexpected: 'secret', choices: [{ message: { content: null, private: 'text' } }] });
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const response = await call('/api/director-layout', {
+    method: 'POST', token, env: layoutEnv,
+    body: { outputFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT, image: { url: 'data:image/png;base64,AA==' } },
+  });
+  const data = await response.json();
+  assert.equal(response.status, 502);
+  assert.equal(data.error, 'DIRECTOR_LAYOUT_UPSTREAM_RESPONSE_INVALID');
+  assert.equal(data.providerEnvelope.choices[0].message.types.content, 'null');
+  assert.equal(JSON.stringify(data).includes('private-id'), false);
+  assert.equal(JSON.stringify(data).includes('secret'), false);
+});
 
 test('director-layout accepts an assembly whose rotated bounds remain inside its parent component', async (t) => {
   const token = await login();
@@ -222,6 +369,19 @@ test('director-layout sends the spatial and uniform-scale contract to the config
     assert.match(systemPrompt, /整张图只能使用一次统一的比例尺/);
     assert.match(systemPrompt, /(?:不要|不能)把屏幕二维左右、上下或像素距离直接当作世界距离或米/);
     assert.match(systemPrompt, /床不是合法 category/);
+    assert.match(systemPrompt, /head_at 关系必须 fromId=床体组件（semanticType="bed"）、toId=该床所属 wall/);
+    assert.match(systemPrompt, /现有可复用 semanticType 预设为 bed、curtain、bookshelf/);
+    assert.match(systemPrompt, /不要把这些预设内部子部件重复输出为同级 components/);
+    assert.match(systemPrompt, /head_at 必须从床体组件（semanticType=bed）指向所属 wall/);
+    assert.match(systemPrompt, /spaceType：enclosed.*open.*outdoor.*unknown/);
+    assert.match(systemPrompt, /最多输出12条 observations/);
+    assert.match(systemPrompt, /最多24条 relations/);
+    assert.match(systemPrompt, /left_of\/right_of 永远表示原图观察者视角/);
+    assert.match(systemPrompt, /semanticType="bed"/);
+    assert.match(systemPrompt, /主色明确可辨的组件，必须输出 appearance\.color 近似值/);
+    assert.match(systemPrompt, /示例 appearance 结构：\{"color":"#8A6741","roughness":0\.7,"metalness":0\.0\}/);
+    assert.match(systemPrompt, /没有可用预设、但可见轮廓明确由多个主要部分组成的物件，应使用少量有证据的 assembly 子件表达/);
+    assert.match(systemPrompt, /单个组件建议不超过8件/);
     assert.match(systemPrompt, /只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet, pillar, prop/);
     assert.match(systemPrompt, /桌台上的香炉、花瓶、雕像等 prop 的 Y=承载台面高度/);
     assert.match(systemPrompt, /落地 wall、pillar 的 position\.y 通常等于地面高度 0，而不是 size\[1\]\/2/);

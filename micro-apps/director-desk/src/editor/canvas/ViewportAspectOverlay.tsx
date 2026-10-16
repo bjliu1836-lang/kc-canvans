@@ -14,7 +14,7 @@ export function ViewportAspectOverlay({
   onToggleRuleOfThirds,
   safeAreaInsets,
 }: {
-  ratio: ViewportAspectRatio;
+  ratio: ViewportAspectRatio | number;
   bottomPadding?: number;
   showRuleOfThirds?: boolean;
   onToggleRuleOfThirds?: (enabled: boolean) => void;

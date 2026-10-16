@@ -56,13 +56,15 @@ export function fitFrameWithinViewport(
 }
 
 export function getViewportAspectFrameRect(
-  ratio: ViewportAspectRatio,
+  ratio: ViewportAspectRatio | number,
   width: number,
   height: number,
   bottomPadding: number = FRAME_TOP_PADDING,
   safeAreaInsets: ViewportSafeAreaInsets = { left: 0, right: 0, top: 0, bottom: 0 }
 ) {
-  const ratioValue = getViewportAspectRatioValue(ratio);
+  const ratioValue = typeof ratio === "number"
+    ? (Number.isFinite(ratio) && ratio > 0 ? ratio : null)
+    : getViewportAspectRatioValue(ratio);
   if (!ratioValue) return null;
 
   return fitFrameWithinViewport(width, height, ratioValue, bottomPadding, safeAreaInsets);

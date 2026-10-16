@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, vi } from "vitest";
-import { DIRECTOR_DESK_REFERENCE_IMAGES_EVENT } from "../io/hostBridge";
+import { DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, DIRECTOR_DESK_SESSION_OPENED_EVENT } from "../io/hostBridge";
 import { getUE4SeatedPelvisSupportHeight } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { getCameraViewSnapshotFromShot } from "../schema/cameraGeometry";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
@@ -111,6 +111,22 @@ it("edits a controlled layout fixture in preview and commits it as one generated
   window.removeEventListener("keydown", windowKeydown);
 });
 
+it("shows safe, user-facing explanations for spatial validation warnings", async () => {
+  const user = userEvent.setup();
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ draft: { ...fixtureDraft, relations: [{ fromId: "wall_01", toId: "wall_01", type: "unknown", confidence: 0.9 }] } }),
+  })));
+  render(<ReferenceLayoutPanel />);
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "desk_warnings", images: [{ edgeId: "edge_warning", sourceNodeId: "image_warning", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "房间.png" }] },
+  })));
+  await user.click(await screen.findByRole("button", { name: "生成粗布景" }));
+  const warning = await screen.findByRole("status", { name: "布景校验提示" });
+  expect(within(warning).getByText("部分空间关系格式无效，已忽略。")).toBeInTheDocument();
+});
+
 it("keeps the inferred reference framing when applying from reference-camera preview", async () => {
   const user = userEvent.setup();
   vi.stubGlobal("fetch", vi.fn(async () => ({
@@ -131,6 +147,10 @@ it("keeps the inferred reference framing when applying from reference-camera pre
     }));
   });
 
+  const referenceImage = await screen.findByAltText("当前粗布景参考图");
+  Object.defineProperty(referenceImage, "naturalWidth", { configurable: true, value: 1600 });
+  Object.defineProperty(referenceImage, "naturalHeight", { configurable: true, value: 900 });
+  fireEvent.load(referenceImage);
   await user.click(await screen.findByRole("button", { name: "生成粗布景" }));
   const previewButton = screen.getByTitle("按同一推断机位查看可编辑草稿");
   await user.click(previewButton);
@@ -138,6 +158,7 @@ it("keeps the inferred reference framing when applying from reference-camera pre
     position: [0, 2.1, 10],
     target: [0, 1.2, -2.8],
     fov: 48,
+    imageAspectRatio: 16 / 9,
   });
   expect(useDirectorStore.getState().viewMode).toBe("director");
   await user.click(screen.getByTitle("退出参考机位预览"));
@@ -159,6 +180,115 @@ it("keeps the inferred reference framing when applying from reference-camera pre
     target: [0, 1.2, -2.8],
     fov: 48,
   });
+});
+
+it("uses user-facing estimated-framing copy without exposing internal projection thresholds", async () => {
+  const user = userEvent.setup();
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ draft: {
+      ...fixtureDraft,
+      referenceCamera: {
+        projection: "perspective", position: [0, 2.1, 10], target: [0, 1.2, -2.8], fov: 48,
+        confidence: 0.2, source: "estimated",
+        fitDiagnostics: {
+          qualityStatus: "needsReview", itemCount: 5, candidateCount: 500, applied: true,
+          bestCandidate: { position: [0, 2.1, 10], target: [0, 1.2, -2.8], fov: 48 },
+          baselineProjectionError: 0.8, bestProjectionError: 0.168, passedErrorThreshold: true,
+          rejectionReason: null,
+        },
+      },
+    } }),
+  })));
+  render(<ReferenceLayoutPanel />);
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "desk_estimated_copy", images: [{ edgeId: "edge_estimated_copy", sourceNodeId: "image_estimated_copy", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "寺庙.png" }] },
+  })));
+  await user.click(await screen.findByRole("button", { name: "生成粗布景" }));
+  expect(screen.getByText("参考取景 · 待确认")).toBeInTheDocument();
+  expect(screen.getByText("已按原图估算视角与布局，请核对物品位置、比例和遮挡；可直接转动视角调整。")).toBeInTheDocument();
+  expect(screen.queryByText(/bbox|0\.22|投影框误差/)).not.toBeInTheDocument();
+});
+
+it("shows dominant per-object residuals when reference-camera fitting fails its quality gate", async () => {
+  const user = userEvent.setup();
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ draft: {
+      ...fixtureDraft,
+      referenceCamera: {
+        projection: "perspective", position: [0, 2.1, 10], target: [0, 1.2, -2.8], fov: 48,
+        confidence: 0.2, source: "estimated",
+        fitDiagnostics: {
+          qualityStatus: "needsReview", itemCount: 5, candidateCount: 500, applied: true,
+          bestCandidate: { position: [0, 2.1, 10], target: [0, 1.2, -2.8], fov: 48 },
+          baselineProjectionError: 0.8, bestProjectionError: 0.31, passedErrorThreshold: false,
+          rejectionReason: "error-too-high",
+          pairDiagnostics: [
+            { id: "sofa_01", observedCenter: [0.5, 0.5], observedSize: [0.4, 0.3], predictedCenter: [0.8, 0.6], predictedSize: [0.5, 0.4], centerError: 0.32, scaleError: 0.41, weightedContribution: 0.18 },
+            { id: "wall_01", observedCenter: [0.5, 0.5], observedSize: [0.8, 0.7], predictedCenter: [0.5, 0.5], predictedSize: [0.3, 0.2], centerError: 0.01, scaleError: 1.12, weightedContribution: 0.09 },
+            { id: "other", observedCenter: [0.2, 0.5], observedSize: [0.1, 0.2], predictedCenter: [0.2, 0.5], predictedSize: [0.1, 0.2], centerError: 0.01, scaleError: 0.01, weightedContribution: 0.02 },
+          ],
+        },
+      },
+    } }),
+  })));
+  render(<ReferenceLayoutPanel />);
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "desk_residual_review", images: [{ edgeId: "edge_residual_review", sourceNodeId: "image_residual_review", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "reference.png" }] },
+  })));
+  await user.click(await screen.findByRole("button", { name: "生成粗布景" }));
+  expect(screen.getByLabelText("参考机位残差待复核")).toHaveTextContent("沙发（估计）");
+  expect(screen.getByLabelText("参考机位残差待复核")).toHaveTextContent("后墙");
+  expect(screen.getByLabelText("参考机位残差待复核")).toHaveTextContent("未被自动改写");
+});
+
+it("clears a reference preview when the source image or Director Desk instance changes", async () => {
+  const user = userEvent.setup();
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ draft: fixtureDraft }),
+  })));
+  render(<ReferenceLayoutPanel />);
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "desk_switch", images: [
+      { edgeId: "edge_a", sourceNodeId: "image_a", imageUrl: "data:image/png;base64,AA==", fileName: "a.png" },
+      { edgeId: "edge_b", sourceNodeId: "image_b", imageUrl: "data:image/png;base64,AA==", fileName: "b.png" },
+    ] },
+  })));
+  await user.click(await screen.findByRole("button", { name: "生成粗布景" }));
+  await user.click(screen.getByTitle("按同一推断机位查看可编辑草稿"));
+  expect(useDirectorStore.getState().referenceCameraPreview).not.toBeNull();
+  fireEvent.change(screen.getByRole("combobox", { name: "选择粗布景参考图" }), { target: { value: "image_b" } });
+  expect(useDirectorStore.getState().referenceCameraPreview).toBeNull();
+  expect(useDirectorStore.getState().viewMode).toBe("director");
+
+  await user.click(screen.getByTitle("按同一推断机位查看可编辑草稿"));
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_SESSION_OPENED_EVENT, { detail: { instanceId: "desk_next" } })));
+  expect(useDirectorStore.getState().referenceCameraPreview).toBeNull();
+  expect(useDirectorStore.getState().viewMode).toBe("director");
+});
+
+it("clears reference preview on panel unmount", async () => {
+  const user = userEvent.setup();
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ draft: fixtureDraft }),
+  })));
+  const { unmount } = render(<ReferenceLayoutPanel />);
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "desk_unmount", images: [{ edgeId: "edge_unmount", sourceNodeId: "image_unmount", imageUrl: "data:image/png;base64,AA==", fileName: "unmount.png" }] },
+  })));
+  await user.click(await screen.findByRole("button", { name: "生成粗布景" }));
+  await user.click(screen.getByTitle("按同一推断机位查看可编辑草稿"));
+  expect(useDirectorStore.getState().referenceCameraPreview).not.toBeNull();
+  unmount();
+  expect(useDirectorStore.getState().referenceCameraPreview).toBeNull();
+  expect(useDirectorStore.getState().viewMode).toBe("director");
 });
 
 it("requires measured scale values for pillar and prop while preserving legacy category presets", async () => {
@@ -302,7 +432,7 @@ it("scales the applied batch around its center from the adjust section", async (
     .toBe(0);
 });
 
-it("shows category colors, hovers rows, focuses the viewport and snaps a floating component", async () => {
+it("shows neutral category markers, hovers rows, focuses the viewport and snaps a floating component", async () => {
   const user = userEvent.setup();
   render(<ReferenceLayoutPanel />);
   act(() => {

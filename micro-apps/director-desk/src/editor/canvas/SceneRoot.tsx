@@ -68,6 +68,7 @@ import { parseImportedCharacterActionId } from "../schema/importedCharacterActio
 import { GROUND_PLANE_SIZE, createGroundMaterialTexture, getGroundMaterialPreset } from "./groundMaterialPresets";
 import { getRuntimePlaybackProgress, subscribeRuntimePlayback } from "../runtime/playbackRuntime";
 import { disposeIsolatedModelMaterials, isolateAndTintModelMaterials } from "../runtime/modelMaterialTint";
+import { fitLayoutGeometryToUnitBounds } from "./layoutGeometryBounds";
 import {
   createCameraTrackingSmoothingState,
   getRuntimeCameraPlaybackSnapshot,
@@ -577,20 +578,7 @@ function GeometryPrimitiveModel({
 }
 
 /** 参考布景预览与确认后的对象共同使用的可编辑程序构件。 */
-function LayoutComponentGeometry({
-  category,
-  primitive,
-  color,
-  roughness,
-  metalness,
-  meshName,
-  outline,
-  opacity,
-  depthWrite,
-  emissive,
-  descriptor,
-  assembly,
-}: {
+type LayoutComponentGeometryProps = {
   category: DirectorLayoutCategory;
   primitive: Extract<GeometryPrimitiveType, "box" | "cylinder">;
   color: string;
@@ -603,14 +591,37 @@ function LayoutComponentGeometry({
   emissive?: string;
   descriptor?: string;
   assembly?: NonNullable<DirectorObject["layoutSource"]>["assembly"];
-}) {
+};
+
+function LayoutComponentGeometry(props: LayoutComponentGeometryProps) {
+  const boundsRoot = useRef<Group>(null);
+  useLayoutEffect(() => {
+    if (boundsRoot.current?.isObject3D) fitLayoutGeometryToUnitBounds(boundsRoot.current);
+  }, [props.category, props.primitive, props.descriptor, props.assembly]);
+  return <group ref={boundsRoot}><LayoutComponentGeometryContent {...props} /></group>;
+}
+
+function LayoutComponentGeometryContent({
+  category,
+  primitive,
+  color,
+  roughness,
+  metalness,
+  meshName,
+  outline,
+  opacity,
+  depthWrite,
+  emissive,
+  descriptor,
+  assembly,
+}: LayoutComponentGeometryProps) {
   const material = <meshStandardMaterial color={color} metalness={metalness ?? 0.02} roughness={roughness ?? 0.68} opacity={opacity} depthWrite={depthWrite} emissive={emissive} transparent={opacity !== undefined && opacity < 1} />;
   const box = <boxGeometry args={[1, 1, 1]} />;
   const legMaterial = <meshStandardMaterial color={color} metalness={metalness ?? 0.02} roughness={roughness ?? 0.68} />;
   if (assembly?.length) return <group>{assembly.map((part, index) => (
     <mesh key={`${part.primitive}-${index}`} name={index === 0 ? meshName : undefined} position={part.position} scale={part.size} rotation={part.rotation?.map((value) => value * Math.PI / 180) as [number, number, number] | undefined}>
       {part.primitive === "cylinder" ? <cylinderGeometry args={[0.5, 0.5, 1, 18]} /> : part.primitive === "sphere" ? <sphereGeometry args={[0.5, 14, 10]} /> : part.primitive === "cone" ? <coneGeometry args={[0.5, 1, 16]} /> : part.primitive === "torus" ? <torusGeometry args={[0.5, 0.08, 10, 20]} /> : box}
-      {material}
+      {part.opacity === undefined ? material : <meshStandardMaterial color={color} metalness={metalness ?? 0.02} roughness={roughness ?? 0.68} opacity={part.opacity} transparent={part.opacity < 1} depthWrite={part.opacity >= 1} />}
     </mesh>
   ))}</group>;
   const structuralParts = category === "table" ? (
@@ -647,11 +658,11 @@ function LayoutComponentGeometry({
       <mesh position={[0, 0.7, 0]} scale={[0.32, 0.45, 0.32]}><cylinderGeometry args={[0.5, 0.5, 1, 18]} />{legMaterial}</mesh>
     </>
   ) : category === "prop" && /(佛像|buddha|雕像|statue)/i.test(descriptor ?? "") ? (
-    <>
+    <group position={[0, -0.08 / 1.21, 0]} scale={[1, 1 / 1.21, 1]}>
       <mesh name={meshName} position={[0, 0.22, 0]} scale={[0.86, 0.28, 0.56]}>{box}{material}</mesh>
       <mesh position={[0, 0.66, 0]} scale={[0.44, 0.72, 0.3]}><cylinderGeometry args={[0.5, 0.5, 1, 18]} />{legMaterial}</mesh>
       <mesh position={[0, 1.12, 0]} scale={[0.34, 0.34, 0.34]}><sphereGeometry args={[0.5, 14, 10]} />{legMaterial}</mesh>
-    </>
+    </group>
   ) : null;
   if (structuralParts) return <group>{structuralParts}</group>;
   return (
@@ -1754,6 +1765,8 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
   const selectedLayoutCharacterId = useLayoutDraftPreviewStore((state) => state.selectedCharacterId);
   const hoveredLayoutCharacterId = useLayoutDraftPreviewStore((state) => state.hoveredCharacterId);
   const interactive = renderMode === "interactive";
+  const previewingLayoutDraft = interactive && Boolean(layoutDraft);
+  const hasVisibleDraftGround = interactive && Boolean(layoutDraft?.components.some((component) => component.visible && component.category === "ground"));
   const effectiveViewMode = renderMode === "clean-camera" ? "camera" : renderMode === "director-monitor" ? "director" : viewMode;
   const translationSnap = scene.snapToGrid ? 1 : null;
   const groundMaterialPreset = useMemo(
@@ -1799,7 +1812,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
 
     return result;
   }, [objects]);
-  const routePlacementCharacter = interactive
+  const routePlacementCharacter = interactive && !previewingLayoutDraft
     ? objects.find((item) => item.id === characterRoutePlacementId && item.kind === "character")
     : null;
 
@@ -1819,8 +1832,8 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
       rotation={scene.rotation}
       scale={[scene.scale, scene.scale, scene.scale]}
     >
-      {scene.showGround ? (
-        <mesh position={[0, scene.groundHeight, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      {scene.showGround && !hasVisibleDraftGround ? (
+        <mesh name="editor-ground-plane" position={[0, scene.groundHeight, 0]} rotation={[-Math.PI / 2, 0, 0]}>
           <planeGeometry args={[GROUND_PLANE_SIZE, GROUND_PLANE_SIZE]} />
           <meshStandardMaterial
             color={groundColor}
@@ -1855,6 +1868,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
             return (
               <group
                 key={component.id}
+                name={`${component.id}-layout-draft-component`}
                 position={getLayoutComponentRenderPosition(component, scene.groundHeight)}
                 rotation={[0, getLayoutComponentRotationYDegrees(component) * Math.PI / 180, 0]}
                 scale={component.size}
@@ -1868,11 +1882,14 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
                   meshName={`${component.id}-layout-draft-mesh`}
                   opacity={previewStyle.opacity}
                   depthWrite={previewStyle.depthWrite}
-                  emissive={component.uncertain ? "#8a6a1e" : "#000000"}
+                  emissive="#000000"
                   descriptor={`${component.name} ${component.modelDescriptor ?? ""} ${component.notes ?? ""}`}
                   assembly={component.assembly}
-                  outline={isHovered || isSelected
-                    ? { color: previewStyle.outlineColor, lineWidth: previewStyle.outlineWidth }
+                  outline={isHovered || isSelected || component.uncertain
+                    ? {
+                      color: isHovered || isSelected ? previewStyle.outlineColor : "#D9A441",
+                      lineWidth: isHovered || isSelected ? previewStyle.outlineWidth : 0.8,
+                    }
                     : undefined}
                 />
               </group>
@@ -1918,6 +1935,8 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
       ) : null}
       {objects
         .filter((item) => (
+          !previewingLayoutDraft
+          &&
           item.visible
           && item.kind !== "camera"
         ))
@@ -1965,7 +1984,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
             />
           );
         })}
-      {interactive ? Array.from(new Set(objects.map((item) => item.crowdId).filter((item): item is string => typeof item === "string"))).map(
+      {interactive && !previewingLayoutDraft ? Array.from(new Set(objects.map((item) => item.crowdId).filter((item): item is string => typeof item === "string"))).map(
         (crowdId) => (
           <CrowdTransformRig
             key={crowdId}
@@ -1978,7 +1997,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
           />
         )
       ) : null}
-      {effectiveViewMode === "director" && (interactive || renderMode === "director-monitor") && showCharacterRoutes && cameraPilotMode === "idle" ? objects
+      {effectiveViewMode === "director" && !previewingLayoutDraft && (interactive || renderMode === "director-monitor") && showCharacterRoutes && cameraPilotMode === "idle" ? objects
         .filter((item) => item.visible && item.kind === "character" && (item.motionPath?.keyframes.length ?? 0) > 0)
         .map((character) => (
           <CharacterRouteRig
@@ -1994,7 +2013,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
             translationSnap={translationSnap}
           />
         )) : null}
-      {effectiveViewMode === "director" && !referenceCameraPreview
+      {effectiveViewMode === "director" && !referenceCameraPreview && !previewingLayoutDraft
         ? cameras
             .map((camera) => ({ camera, object: cameraObjectsByCameraId.get(camera.id) }))
             .filter(({ object }) => object?.visible ?? true)

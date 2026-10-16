@@ -101,6 +101,7 @@ export interface CameraShotSnapshot {
   fov: number;
   position: [number, number, number];
   target: [number, number, number];
+  imageAspectRatio?: number;
 }
 
 export interface CameraCaptureInput {
@@ -2665,7 +2666,12 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
     previewReferenceCamera: (camera) => {
       set({
         referenceCameraPreview: camera
-          ? { position: [...camera.position], target: [...camera.target], fov: camera.fov }
+          ? {
+              position: [...camera.position],
+              target: [...camera.target],
+              fov: camera.fov,
+              ...(camera.imageAspectRatio ? { imageAspectRatio: camera.imageAspectRatio } : {}),
+            }
           : null,
       });
     },
