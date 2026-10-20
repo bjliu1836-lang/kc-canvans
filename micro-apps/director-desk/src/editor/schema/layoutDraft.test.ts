@@ -437,7 +437,9 @@ describe("layout draft validation", () => {
   });
 
   it("normalizes legacy center-Y walls while preserving valid elevated props", () => {
-    const draft = validateLayoutDraftCandidate(templeCurrentModelDraft, source, { draftId: "temple_diagnostics" });
+    const withExplicitCushionSupport = structuredClone(templeCurrentModelDraft) as any;
+    withExplicitCushionSupport.characters[0].supportComponentId = "prop_cushion_01";
+    const draft = validateLayoutDraftCandidate(withExplicitCushionSupport, source, { draftId: "temple_diagnostics" });
     const backWall = draft.components.find((component) => component.id === "wall_back_01")!;
     const vase = draft.components.find((component) => component.id === "prop_vase_01")!;
     const character = draft.characters[0];
@@ -448,7 +450,7 @@ describe("layout draft validation", () => {
     expect(vase.position[1]).toBe(1.15);
     expect(character.position[1]).toBe(0.12);
     expect(character.uncertain).toBe(true);
-    expect(character.notes).toContain("prop_cushion_01 顶面 Y=0.18 不一致");
+    expect(character.notes).toContain("顶面不等于可确认座面/承载面");
 
     const revalidated = validateLayoutDraftCandidate(draft, source, { draftId: "temple_diagnostics_again" });
     expect(revalidated.components.find((component) => component.id === "wall_back_01")!.notes!.match(/已按底部中心语义修正/g)).toHaveLength(1);
@@ -523,10 +525,35 @@ describe("layout draft validation", () => {
     const cushion = draft.components.find((component) => component.id === "cushion_01")!;
     const farProp = draft.components.find((component) => component.id === "far_prop")!;
     expect(cushion.position[1]).toBe(0);
-    expect(draft.characters[0].position[1]).toBe(0.12);
+    expect(draft.characters[0].position[1]).toBe(0.06);
+    expect(draft.characters[0].uncertain).toBe(true);
     expect(farProp.position[1]).toBe(0.4);
     expect(farProp.uncertain).toBe(true);
-    expect(farProp.notes).toContain("水平足迹不重叠");
+    expect(farProp.notes).toContain("包围盒顶面不代表可确认承载面");
+  });
+
+  it("does not accept support through a confidently observed assembly opening", () => {
+    const value: any = candidateWithCharacters();
+    value.components = [
+      {
+        id: "open_table", name: "桌", category: "table", primitive: "box",
+        position: [0, 0.5, 0], size: [2, 1, 2], rotationYDegrees: 0,
+        confidence: 0.95, uncertain: false, supportComponentId: "ground_01",
+        assembly: [
+          { primitive: "box", position: [0.5, 0.91, 0.5], size: [0.98, 0.12, 0.92] },
+          ...[0.1, 0.9].flatMap((x) => [0.1, 0.9].map((z) => ({ primitive: "box", position: [x, 0.4, z], size: [0.11, 0.72, 0.11] }))),
+        ],
+        groundFootprint: [{ confidence: 0.95, outer: [[0, 0], [1, 0], [1, 1], [0, 1]], holes: [[[0.35, 0.35], [0.65, 0.35], [0.65, 0.65], [0.35, 0.65]]] }],
+      },
+      { id: "ground_01", name: "地面", category: "ground", primitive: "box", position: [0, -0.05, 0], size: [8, 0.1, 8], rotationYDegrees: 0, confidence: 0.95, uncertain: false },
+      { id: "bowl", name: "碗", category: "prop", primitive: "box", position: [0, 1.2, 0], size: [0.2, 0.2, 0.2], rotationYDegrees: 0, confidence: 0.95, uncertain: false, supportComponentId: "open_table" },
+    ];
+    value.characters = [];
+    const draft = validateLayoutDraftCandidate(value, source);
+    const bowl = draft.components.find((component) => component.id === "bowl")!;
+    expect(bowl.position[1]).toBe(1.2);
+    expect(bowl.uncertain).toBe(true);
+    expect(bowl.notes).toContain("水平足迹不重叠");
   });
 });
 

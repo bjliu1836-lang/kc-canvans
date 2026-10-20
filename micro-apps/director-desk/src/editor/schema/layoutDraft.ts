@@ -7,6 +7,7 @@ import type {
   GeometryPrimitiveType,
 } from "./directorProject";
 import { resolveLayoutSemanticProfile } from "./layoutSemanticProfiles";
+import { deriveObservedAssemblyPrisms, getDefaultLayoutCategoryAssembly, getLayoutAssemblyUnitBoundsTransform } from "../canvas/layoutGeometryBounds";
 import { MANNEQUIN_POSE_PRESETS } from "../presets/mannequinPosePresets";
 import {
   getUE4GroundedLabelY,
@@ -204,8 +205,18 @@ export interface LayoutDraftComponent {
     rotation?: [number, number, number];
     opacity?: number;
   }>;
+  /** Observed planar occupancy only; this never implies a solid full-height render volume. */
+  groundFootprint?: Array<{
+    outer: [number, number][];
+    holes?: [number, number][][];
+    confidence: number;
+  }>;
   notes?: string;
   visible: boolean;
+}
+
+export function getLayoutComponentAssembly(component: Pick<LayoutDraftComponent, "assembly" | "category" | "name" | "modelDescriptor" | "primitive">) {
+  return component.assembly ?? getDefaultLayoutCategoryAssembly(component.category, `${component.name} ${component.modelDescriptor ?? ""}`, component.primitive);
 }
 
 export interface LayoutDraft {
@@ -336,6 +347,27 @@ function normalizeLayoutAssembly(raw: unknown): LayoutDraftComponent["assembly"]
     return [{ primitive: part.primitive as "box" | "cylinder" | "sphere" | "cone" | "torus", position: [...position] as [number, number, number], size: [...size] as [number, number, number], ...(rotation ? { rotation } : {}), ...(opacity !== undefined ? { opacity } : {}) }];
   });
   return parts.length === raw.length && parts.every((part) => part.length === 1) ? parts.flat() : undefined;
+}
+
+function normalizeGroundFootprint(raw: unknown): LayoutDraftComponent["groundFootprint"] {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 3) return undefined;
+  const normalizeLoop = (loop: unknown, min: number, max: number): [number, number][] | undefined => {
+    if (!Array.isArray(loop) || loop.length < min || loop.length > max) return undefined;
+    const points = loop.map((point) => Array.isArray(point) && point.length === 2
+      && point.every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1)
+      ? [point[0], point[1]] as [number, number] : undefined);
+    return points.every((point): point is [number, number] => Boolean(point)) ? points as [number, number][] : undefined;
+  };
+  const result = raw.map((part) => {
+    if (!isRecord(part) || typeof part.confidence !== "number" || !Number.isFinite(part.confidence) || part.confidence < 0 || part.confidence > 1) return undefined;
+    const outer = normalizeLoop(part.outer, 3, 16);
+    const holesRaw = part.holes === undefined ? [] : part.holes;
+    if (!outer || !Array.isArray(holesRaw) || holesRaw.length > 2) return undefined;
+    const holes = holesRaw.map((hole) => normalizeLoop(hole, 3, 12));
+    if (holes.some((hole) => !hole)) return undefined;
+    return { outer, ...(holes.length ? { holes: holes as [number, number][][] } : {}), confidence: part.confidence };
+  });
+  return result.every((part) => Boolean(part)) ? result as NonNullable<LayoutDraftComponent["groundFootprint"]> : undefined;
 }
 
 function buildSemanticLayoutAssembly(semanticType: string | undefined): LayoutDraftComponent["assembly"] {
@@ -538,6 +570,110 @@ function normalizeLayoutReferenceCamera(raw: unknown, components: readonly Layou
     ? Math.min(1, Math.max(0, raw.confidence))
     : 0;
   const rawFit = isRecord(raw.fitDiagnostics) ? raw.fitDiagnostics : undefined;
+  const rawSpatialTrace = rawFit && isRecord(rawFit.spatialEvidenceTrace) ? rawFit.spatialEvidenceTrace : undefined;
+  const spatialIds = (value: unknown) => Array.isArray(value) && value.length <= 32
+    && value.every((id) => typeof id === "string" && id.length > 0 && id.length <= 48) ? value as string[] : undefined;
+  const rawRefinementSearch = rawSpatialTrace && isRecord(rawSpatialTrace.selectedRefinementSearch) ? rawSpatialTrace.selectedRefinementSearch : undefined;
+  const refinementSearchBasis = ["visible-footprint-fixed", "visible-center-contact-fixed", "visible-center-contact-bounded", "observed-bbox-center-bounded", "low-confidence-bbox-center-bounded"];
+  const selectedRefinementSearch = rawRefinementSearch
+    && ["evaluationBudget", "evaluationCount", "feasibleEvaluationCount", "acceptedMoves", "completedScaleLevels"].every((key) => Number.isInteger(rawRefinementSearch[key]) && Number(rawRefinementSearch[key]) >= 0 && Number(rawRefinementSearch[key]) <= 600)
+    && typeof rawRefinementSearch.budgetExhausted === "boolean"
+    && Array.isArray(rawRefinementSearch.positionEvidence) && rawRefinementSearch.positionEvidence.length <= 32
+    && rawRefinementSearch.positionEvidence.every((entry) => isRecord(entry) && typeof entry.id === "string" && entry.id.length > 0 && entry.id.length <= 48
+      && refinementSearchBasis.includes(String(entry.basis)) && typeof entry.fixed === "boolean"
+      && typeof entry.maxDeltaMeters === "number" && Number.isFinite(entry.maxDeltaMeters) && entry.maxDeltaMeters >= 0 && entry.maxDeltaMeters <= 100)
+    ? {
+      evaluationBudget: Number(rawRefinementSearch.evaluationBudget),
+      evaluationCount: Number(rawRefinementSearch.evaluationCount),
+      feasibleEvaluationCount: Number(rawRefinementSearch.feasibleEvaluationCount),
+      acceptedMoves: Number(rawRefinementSearch.acceptedMoves),
+      completedScaleLevels: Number(rawRefinementSearch.completedScaleLevels),
+      budgetExhausted: rawRefinementSearch.budgetExhausted,
+      positionEvidence: rawRefinementSearch.positionEvidence.map((entry) => ({
+        id: String(entry.id), basis: String(entry.basis) as "visible-footprint-fixed" | "visible-center-contact-fixed" | "visible-center-contact-bounded" | "observed-bbox-center-bounded" | "low-confidence-bbox-center-bounded",
+        fixed: entry.fixed as boolean, maxDeltaMeters: Number(entry.maxDeltaMeters),
+      })),
+    }
+    : undefined;
+  const spatialEvidenceTrace = rawSpatialTrace
+    && ["footprint", "joint", "none"].includes(String(rawSpatialTrace.selectedBranch))
+    && spatialIds(rawSpatialTrace.sourceFootprintIds)
+    && spatialIds(rawSpatialTrace.eligiblePairIds)
+    && spatialIds(rawSpatialTrace.initializedFootprintIds)
+    && spatialIds(rawSpatialTrace.selectedInitializedIds)
+    && spatialIds(rawSpatialTrace.selectedAfterCarryIds)
+    && spatialIds(rawSpatialTrace.returnedByFitIds)
+    && Number.isInteger(rawSpatialTrace.uniqueCameraCandidateCount) && Number(rawSpatialTrace.uniqueCameraCandidateCount) >= 0 && Number(rawSpatialTrace.uniqueCameraCandidateCount) <= 600
+    && Number.isInteger(rawSpatialTrace.initializedCameraCandidateCount) && Number(rawSpatialTrace.initializedCameraCandidateCount) >= 0 && Number(rawSpatialTrace.initializedCameraCandidateCount) <= 600
+    && Number.isInteger(rawSpatialTrace.safetyCheckedFootprintCandidateCount) && Number(rawSpatialTrace.safetyCheckedFootprintCandidateCount) >= 0 && Number(rawSpatialTrace.safetyCheckedFootprintCandidateCount) <= 600
+    && (rawSpatialTrace.preselectionSafeFootprintCandidateCount === undefined || (Number.isInteger(rawSpatialTrace.preselectionSafeFootprintCandidateCount) && Number(rawSpatialTrace.preselectionSafeFootprintCandidateCount) >= 0 && Number(rawSpatialTrace.preselectionSafeFootprintCandidateCount) <= 600))
+    && (rawSpatialTrace.postSelectionFootprintCandidateCount === undefined || (Number.isInteger(rawSpatialTrace.postSelectionFootprintCandidateCount) && Number(rawSpatialTrace.postSelectionFootprintCandidateCount) >= 0 && Number(rawSpatialTrace.postSelectionFootprintCandidateCount) <= 600))
+    && (rawSpatialTrace.targetSafeFootprintCandidateCount === undefined || (Number.isInteger(rawSpatialTrace.targetSafeFootprintCandidateCount) && Number(rawSpatialTrace.targetSafeFootprintCandidateCount) >= 0 && Number(rawSpatialTrace.targetSafeFootprintCandidateCount) <= 600))
+    && (rawSpatialTrace.safetyCheckStoppedEarly === undefined || typeof rawSpatialTrace.safetyCheckStoppedEarly === "boolean")
+    && Array.isArray(rawSpatialTrace.failedInitializationById) && rawSpatialTrace.failedInitializationById.length <= 32
+    && rawSpatialTrace.failedInitializationById.every((entry) => isRecord(entry) && typeof entry.id === "string" && entry.id.length > 0 && entry.id.length <= 48
+      && Number.isInteger(entry.cameraCount) && Number(entry.cameraCount) >= 0 && Number(entry.cameraCount) <= 600)
+    && Number.isInteger(rawSpatialTrace.footprintOverlapRejectedCandidateCount) && Number(rawSpatialTrace.footprintOverlapRejectedCandidateCount) >= 0 && Number(rawSpatialTrace.footprintOverlapRejectedCandidateCount) <= 600
+    && Array.isArray(rawSpatialTrace.majorOverlapRejects) && rawSpatialTrace.majorOverlapRejects.length <= 32
+    && rawSpatialTrace.majorOverlapRejects.every((entry) => isRecord(entry) && typeof entry.firstId === "string" && entry.firstId.length > 0 && entry.firstId.length <= 48
+      && typeof entry.secondId === "string" && entry.secondId.length > 0 && entry.secondId.length <= 48
+      && Number.isInteger(entry.candidateCount) && Number(entry.candidateCount) >= 0 && Number(entry.candidateCount) <= 600
+      && typeof entry.maxPenetrationMeters === "number" && Number.isFinite(entry.maxPenetrationMeters) && entry.maxPenetrationMeters >= 0 && entry.maxPenetrationMeters <= 100)
+    ? {
+      selectedBranch: rawSpatialTrace.selectedBranch as "footprint" | "joint" | "none",
+      sourceFootprintIds: spatialIds(rawSpatialTrace.sourceFootprintIds)!,
+      eligiblePairIds: spatialIds(rawSpatialTrace.eligiblePairIds)!,
+      uniqueCameraCandidateCount: Number(rawSpatialTrace.uniqueCameraCandidateCount),
+      initializedCameraCandidateCount: Number(rawSpatialTrace.initializedCameraCandidateCount),
+      initializedFootprintIds: spatialIds(rawSpatialTrace.initializedFootprintIds)!,
+      safetyCheckedFootprintCandidateCount: Number(rawSpatialTrace.safetyCheckedFootprintCandidateCount),
+      ...(rawSpatialTrace.preselectionSafeFootprintCandidateCount !== undefined ? { preselectionSafeFootprintCandidateCount: Number(rawSpatialTrace.preselectionSafeFootprintCandidateCount) } : {}),
+      ...(rawSpatialTrace.postSelectionFootprintCandidateCount !== undefined ? { postSelectionFootprintCandidateCount: Number(rawSpatialTrace.postSelectionFootprintCandidateCount) } : {}),
+      ...(rawSpatialTrace.targetSafeFootprintCandidateCount !== undefined ? { targetSafeFootprintCandidateCount: Number(rawSpatialTrace.targetSafeFootprintCandidateCount) } : {}),
+      ...(rawSpatialTrace.safetyCheckStoppedEarly !== undefined ? { safetyCheckStoppedEarly: rawSpatialTrace.safetyCheckStoppedEarly } : {}),
+      failedInitializationById: rawSpatialTrace.failedInitializationById.map((entry) => ({ id: String(entry.id), cameraCount: Number(entry.cameraCount) })),
+      footprintOverlapRejectedCandidateCount: Number(rawSpatialTrace.footprintOverlapRejectedCandidateCount),
+      majorOverlapRejects: rawSpatialTrace.majorOverlapRejects.map((entry) => ({ firstId: String(entry.firstId), secondId: String(entry.secondId), candidateCount: Number(entry.candidateCount), maxPenetrationMeters: Number(entry.maxPenetrationMeters) })),
+      ...(selectedRefinementSearch ? { selectedRefinementSearch } : rawSpatialTrace.selectedRefinementSearch === null ? { selectedRefinementSearch: null } : {}),
+      selectedInitializedIds: spatialIds(rawSpatialTrace.selectedInitializedIds)!,
+      selectedAfterCarryIds: spatialIds(rawSpatialTrace.selectedAfterCarryIds)!,
+      returnedByFitIds: spatialIds(rawSpatialTrace.returnedByFitIds)!,
+    }
+    : undefined;
+  const rawPostTransformSafety = rawFit && isRecord(rawFit.postTransformSafety) ? rawFit.postTransformSafety : undefined;
+  const postTransformSafety = rawPostTransformSafety
+    && spatialIds(rawPostTransformSafety.cameraInsideComponentIds)
+    && typeof rawPostTransformSafety.alignmentRejected === "boolean"
+    && Array.isArray(rawPostTransformSafety.newMajorOverlapPairs) && rawPostTransformSafety.newMajorOverlapPairs.length <= 32
+    && rawPostTransformSafety.newMajorOverlapPairs.every((entry) => isRecord(entry)
+      && typeof entry.firstId === "string" && entry.firstId.length > 0 && entry.firstId.length <= 48
+      && typeof entry.secondId === "string" && entry.secondId.length > 0 && entry.secondId.length <= 48
+      && ["hard", "review"].includes(String(entry.classification))
+      && typeof entry.reason === "string" && entry.reason.length <= 96
+      && typeof entry.penetrationMeters === "number" && Number.isFinite(entry.penetrationMeters) && entry.penetrationMeters >= 0 && entry.penetrationMeters <= 100)
+    ? {
+      newMajorOverlapPairs: rawPostTransformSafety.newMajorOverlapPairs.map((entry) => ({
+        firstId: String(entry.firstId), secondId: String(entry.secondId),
+        classification: entry.classification as "hard" | "review", reason: String(entry.reason), penetrationMeters: Number(entry.penetrationMeters),
+      })),
+      cameraInsideComponentIds: spatialIds(rawPostTransformSafety.cameraInsideComponentIds)!,
+      alignmentRejected: rawPostTransformSafety.alignmentRejected,
+    }
+    : undefined;
+  const rawPhysicalValidity = rawFit?.physicalValidity as Record<string, unknown> | undefined;
+  const normalizeCollisionCounts = (value: unknown) => {
+    if (!isRecord(value)) return undefined;
+    const keys = ["totalCandidates", "hard", "review", "allowed"] as const;
+    if (!keys.every((key) => Number.isInteger(Number(value[key])) && Number(value[key]) >= 0)) return undefined;
+    return {
+      totalCandidates: Number(value.totalCandidates),
+      hard: Number(value.hard),
+      review: Number(value.review),
+      allowed: Number(value.allowed),
+    };
+  };
+  const initialCollisionCounts = normalizeCollisionCounts(rawPhysicalValidity?.initialCollisionCounts);
+  const finalCollisionCounts = normalizeCollisionCounts(rawPhysicalValidity?.finalCollisionCounts);
   const rawPairDiagnostics = rawFit && Array.isArray(rawFit.pairDiagnostics) ? rawFit.pairDiagnostics : undefined;
   const pairDiagnostics = rawPairDiagnostics?.slice(0, 32).flatMap((entry) => {
     const isTuple2 = (value: unknown, min: number, max: number): value is [number, number] => Array.isArray(value) && value.length === 2
@@ -580,12 +716,14 @@ function normalizeLayoutReferenceCamera(raw: unknown, components: readonly Layou
     && (rawFit.baselineProjectionError === null || typeof rawFit.baselineProjectionError === "number" && Number.isFinite(rawFit.baselineProjectionError) && rawFit.baselineProjectionError >= 0 && rawFit.baselineProjectionError <= 10)
     && (rawFit.bestProjectionError === null || typeof rawFit.bestProjectionError === "number" && Number.isFinite(rawFit.bestProjectionError) && rawFit.bestProjectionError >= 0 && rawFit.bestProjectionError <= 10)
     && (rawFit.cameraOnlyBestProjectionError === undefined || rawFit.cameraOnlyBestProjectionError === null || typeof rawFit.cameraOnlyBestProjectionError === "number" && Number.isFinite(rawFit.cameraOnlyBestProjectionError) && rawFit.cameraOnlyBestProjectionError >= 0 && rawFit.cameraOnlyBestProjectionError <= 10)
+    && (rawFit.appliedProjectionError === undefined || rawFit.appliedProjectionError === null || typeof rawFit.appliedProjectionError === "number" && Number.isFinite(rawFit.appliedProjectionError) && rawFit.appliedProjectionError >= 0 && rawFit.appliedProjectionError <= 10)
     ? {
       qualityStatus: (rawFit.qualityStatus ?? (rawFit.applied ? "accepted" : "unavailable")) as "accepted" | "needsReview" | "unavailable",
       itemCount: Number(rawFit.itemCount),
       candidateCount: Number(rawFit.candidateCount),
       baselineProjectionError: rawFit.baselineProjectionError as number | null,
       bestProjectionError: rawFit.bestProjectionError as number | null,
+      ...(rawFit.appliedProjectionError !== undefined ? { appliedProjectionError: rawFit.appliedProjectionError as number | null } : {}),
       ...(rawFit.cameraOnlyBestProjectionError !== undefined ? { cameraOnlyBestProjectionError: rawFit.cameraOnlyBestProjectionError as number | null } : {}),
       ...(rawPairDiagnostics ? { pairDiagnostics: pairDiagnostics ?? [] } : {}),
       bestCandidate: bestCandidate ?? null,
@@ -594,6 +732,8 @@ function normalizeLayoutReferenceCamera(raw: unknown, components: readonly Layou
       ...(rawFit.movedGroundItems !== undefined ? { movedGroundItems: Number(rawFit.movedGroundItems) } : {}),
       ...(rawFit.movedComponents !== undefined ? { movedComponents: Number(rawFit.movedComponents) } : {}),
       ...(rawFit.positionAdjustmentMeters !== undefined ? { positionAdjustmentMeters: Number(rawFit.positionAdjustmentMeters) } : {}),
+      ...(spatialEvidenceTrace ? { spatialEvidenceTrace } : {}),
+      ...(postTransformSafety ? { postTransformSafety } : {}),
       ...(Array.isArray(rawFit.collisionPairs) ? {
         collisionPairs: rawFit.collisionPairs.slice(0, 32).flatMap((pair) => isRecord(pair)
           && typeof pair.firstId === "string" && pair.firstId.length <= 48
@@ -608,8 +748,16 @@ function normalizeLayoutReferenceCamera(raw: unknown, components: readonly Layou
         && Number.isInteger(rawFit.physicalValidity.hardCollisionCount) && Number(rawFit.physicalValidity.hardCollisionCount) >= 0
         ? { physicalValidity: {
           withinRoom: rawFit.physicalValidity.withinRoom,
+          ...(typeof rawFit.physicalValidity.roomBoundsEvaluated === "boolean" ? { roomBoundsEvaluated: rawFit.physicalValidity.roomBoundsEvaluated } : {}),
           cameraOutsideGeometry: rawFit.physicalValidity.cameraOutsideGeometry,
+          ...(typeof rawFit.physicalValidity.cameraGeometryEvaluated === "boolean" ? { cameraGeometryEvaluated: rawFit.physicalValidity.cameraGeometryEvaluated } : {}),
           hardCollisionCount: Number(rawFit.physicalValidity.hardCollisionCount),
+          ...(typeof rawFit.physicalValidity.initialPenetrationMeters === "number" && Number.isFinite(rawFit.physicalValidity.initialPenetrationMeters) && rawFit.physicalValidity.initialPenetrationMeters >= 0
+            ? { initialPenetrationMeters: rawFit.physicalValidity.initialPenetrationMeters } : {}),
+          ...(typeof rawFit.physicalValidity.finalPenetrationMeters === "number" && Number.isFinite(rawFit.physicalValidity.finalPenetrationMeters) && rawFit.physicalValidity.finalPenetrationMeters >= 0
+            ? { finalPenetrationMeters: rawFit.physicalValidity.finalPenetrationMeters } : {}),
+          ...(initialCollisionCounts ? { initialCollisionCounts } : {}),
+          ...(finalCollisionCounts ? { finalCollisionCounts } : {}),
           ...(Array.isArray(rawFit.physicalValidity.roomBoundaryViolations) ? {
             roomBoundaryViolations: rawFit.physicalValidity.roomBoundaryViolations.slice(0, 32).flatMap((entry) => isRecord(entry)
               && typeof entry.componentId === "string" && entry.componentId.length <= 48
@@ -752,14 +900,14 @@ function carveDoorOpenings(components: LayoutDraftComponent[]) {
       result.push(component);
       continue;
     }
-    const angle = component.rotationYDegrees * Math.PI / 180;
+    const angle = getLayoutComponentRotationYDegrees(component) * Math.PI / 180;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
     const wallRunsAlongX = component.size[0] >= component.size[2];
     const wallHalfLength = (wallRunsAlongX ? component.size[0] : component.size[2]) / 2;
     const door = doors.find((candidate) => {
-      const expectedDoorYaw = component.rotationYDegrees + (wallRunsAlongX ? 0 : 90);
-      if (normalizeHalfTurnDifference(candidate.rotationYDegrees, expectedDoorYaw) > 18) return false;
+      const expectedDoorYaw = getLayoutComponentRotationYDegrees(component) + (wallRunsAlongX ? 0 : 90);
+      if (normalizeHalfTurnDifference(getLayoutComponentRotationYDegrees(candidate), expectedDoorYaw) > 18) return false;
       const dx = candidate.position[0] - component.position[0];
       const dz = candidate.position[2] - component.position[2];
       const localX = cos * dx - sin * dz;
@@ -822,12 +970,71 @@ function appendLayoutDiagnostic(notes: string | undefined, diagnostic: string) {
   return prefix ? `${prefix}；${diagnostic}` : diagnostic;
 }
 
+function assemblySupportParts(component: LayoutDraftComponent) {
+  const assembly = getLayoutComponentAssembly(component);
+  const transform = getLayoutAssemblyUnitBoundsTransform(assembly);
+  if (!transform || !assembly?.length) return [];
+  const parts = assembly.flatMap((part) => {
+    const width = part.size[0] * transform.scale[0];
+    const depth = part.size[2] * transform.scale[2];
+    const height = part.size[1] * transform.scale[1];
+    const pitch = Math.abs(part.rotation?.[0] ?? 0);
+    const roll = Math.abs(part.rotation?.[2] ?? 0);
+    return pitch <= 2 && roll <= 2 && height <= Math.min(width, depth) * 0.5 && width * depth >= 0.25
+      ? [{ part, transform }]
+      : [];
+  });
+  return parts;
+}
+
+function isPointInsideAssemblySupportPart(
+  position: readonly [number, number, number],
+  component: LayoutDraftComponent,
+  supportPart: NonNullable<LayoutDraftComponent["assembly"]>[number],
+  transform: NonNullable<ReturnType<typeof getLayoutAssemblyUnitBoundsTransform>>,
+  padding = 0.04,
+) {
+  const componentYaw = getLayoutComponentRotationYDegrees(component) * Math.PI / 180;
+  const dx = position[0] - component.position[0];
+  const dz = position[2] - component.position[2];
+  const componentLocalX = Math.cos(componentYaw) * dx - Math.sin(componentYaw) * dz;
+  const componentLocalZ = Math.sin(componentYaw) * dx + Math.cos(componentYaw) * dz;
+  const fittedX = componentLocalX / component.size[0];
+  const fittedZ = componentLocalZ / component.size[2];
+  const observedPrisms = deriveObservedAssemblyPrisms(component.groundFootprint, getLayoutComponentAssembly(component));
+  if (observedPrisms?.length) {
+    const topY = transform.position[1] + (supportPart.position[1] + supportPart.size[1] / 2) * transform.scale[1];
+    const point: [number, number] = [fittedX + 0.5, fittedZ + 0.5];
+    const inside = (polygon: [number, number][]) => {
+      let result = false;
+      for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const [x, y] = polygon[i], [px, py] = polygon[j];
+        if ((y > point[1]) !== (py > point[1]) && point[0] < (px - x) * (point[1] - y) / (py - y) + x) result = !result;
+      }
+      return result;
+    };
+    return observedPrisms.some((section) => Math.abs(section.yMax - topY) <= 1e-5 && inside(section.polygon));
+  }
+  const partYaw = (supportPart.rotation?.[1] ?? 0) * Math.PI / 180;
+  const unfittedX = (fittedX - transform.position[0]) / transform.scale[0] - supportPart.position[0];
+  const unfittedZ = (fittedZ - transform.position[2]) / transform.scale[2] - supportPart.position[2];
+  const partLocalX = Math.cos(partYaw) * unfittedX - Math.sin(partYaw) * unfittedZ;
+  const partLocalZ = Math.sin(partYaw) * unfittedX + Math.cos(partYaw) * unfittedZ;
+  const paddingX = padding / (component.size[0] * transform.scale[0]);
+  const paddingZ = padding / (component.size[2] * transform.scale[2]);
+  return Math.abs(partLocalX) <= supportPart.size[0] / 2 + paddingX
+    && Math.abs(partLocalZ) <= supportPart.size[2] / 2 + paddingZ;
+}
+
 function isPointInsideComponentFootprint(
   position: readonly [number, number, number],
   component: LayoutDraftComponent,
   padding = 0.04,
 ) {
-  const radians = component.rotationYDegrees * Math.PI / 180;
+  const supportParts = assemblySupportParts(component);
+  if (supportParts.length) return supportParts.some(({ part, transform }) => isPointInsideAssemblySupportPart(position, component, part, transform, padding));
+  if (getLayoutComponentAssembly(component)?.length) return false;
+  const radians = getLayoutComponentRotationYDegrees(component) * Math.PI / 180;
   const dx = position[0] - component.position[0];
   const dz = position[2] - component.position[2];
   const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
@@ -836,28 +1043,28 @@ function isPointInsideComponentFootprint(
     && Math.abs(localZ) <= component.size[2] / 2 + padding;
 }
 
-function assemblySupportTopRatio(component: LayoutDraftComponent) {
+function assemblySupportTopRatio(component: LayoutDraftComponent, position?: readonly [number, number, number]) {
   // Resolve the top of a broad horizontal piece in an assembly (mattress, shelf,
   // tabletop) instead of treating the assembly's whole bounding box as a surface.
-  const horizontalSupportParts = component.assembly?.filter((part) => {
-    const horizontalArea = part.size[0] * part.size[2];
-    return part.size[1] <= Math.min(part.size[0], part.size[2]) * 0.5
-      && horizontalArea >= 0.25;
-  }) ?? [];
-  return horizontalSupportParts.length
-    ? Math.max(...horizontalSupportParts.map((part) => part.position[1] + part.size[1] / 2))
+  const candidates = assemblySupportParts(component).filter(({ part, transform }) =>
+    !position || isPointInsideAssemblySupportPart(position, component, part, transform, 0));
+  return candidates.length
+    ? Math.max(...candidates.map(({ part, transform }) => transform.position[1] + (part.position[1] + part.size[1] / 2) * transform.scale[1]))
     : undefined;
 }
 
-function getSupportTopY(component: LayoutDraftComponent, groundHeight: number) {
+function getSupportTopY(component: LayoutDraftComponent, groundHeight: number, position?: readonly [number, number, number]) {
   // ground 的语义以场景地面顶面为准；服务返回的 ground.position.y 不参与支撑计算。
   if (component.category === "ground") return groundHeight;
-  const assemblyTopRatio = assemblySupportTopRatio(component);
+  const assemblyTopRatio = assemblySupportTopRatio(component, position);
   if (assemblyTopRatio !== undefined) return component.position[1] + component.size[1] * assemblyTopRatio;
   return component.position[1] + component.size[1];
 }
 
+export const getLayoutSupportTopY = getSupportTopY;
+
 function canUseBoundingBoxTopAsSupport(component: LayoutDraftComponent) {
+  if (component.assembly?.length) return assemblySupportTopRatio(component) !== undefined;
   return ["ground", "table", "cabinet", "prop"].includes(component.category)
     || assemblySupportTopRatio(component) !== undefined;
 }
@@ -865,9 +1072,9 @@ function canUseBoundingBoxTopAsSupport(component: LayoutDraftComponent) {
 function isOpeningAttachedToWall(opening: LayoutDraftComponent, walls: readonly LayoutDraftComponent[]) {
   return walls.some((wall) => {
     const wallRunsAlongX = wall.size[0] >= wall.size[2];
-    const expectedOpeningYaw = wall.rotationYDegrees + (wallRunsAlongX ? 0 : 90);
-    if (normalizeHalfTurnDifference(opening.rotationYDegrees, expectedOpeningYaw) > 18) return false;
-    const radians = wall.rotationYDegrees * Math.PI / 180;
+    const expectedOpeningYaw = getLayoutComponentRotationYDegrees(wall) + (wallRunsAlongX ? 0 : 90);
+    if (normalizeHalfTurnDifference(getLayoutComponentRotationYDegrees(opening), expectedOpeningYaw) > 18) return false;
+    const radians = getLayoutComponentRotationYDegrees(wall) * Math.PI / 180;
     const dx = opening.position[0] - wall.position[0];
     const dz = opening.position[2] - wall.position[2];
     const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
@@ -970,13 +1177,24 @@ function resolveExplicitLayoutRelations(
     if (relation.type === "attached_to") {
       const opening = ["door", "window"].includes(from.category) ? from : ["door", "window"].includes(to.category) ? to : undefined;
       const wall = from.category === "wall" ? from : to.category === "wall" ? to : undefined;
+      const mountedProp = wall && (from.category === "prop" || to.category === "prop")
+        ? (from.category === "prop" ? from : to)
+        : undefined;
+      if (mountedProp) {
+        if (relation.confidence < 0.65 || mountedProp.confidence < 0.65 || wall!.confidence < 0.65) {
+          warnings.add("attachment_unresolved");
+        }
+        // The observation converter already places a wall-mounted prop from its
+        // image bbox. Keep the relation editable without applying opening snaps.
+        continue;
+      }
       if (!opening || !wall || relation.confidence < 0.8 || opening.confidence < 0.65 || wall.confidence < 0.65) {
         warnings.add("attachment_unresolved");
         continue;
       }
       const wallRunsAlongX = wall.size[0] >= wall.size[2];
-      const expectedYaw = wall.rotationYDegrees + (wallRunsAlongX ? 0 : 90);
-      const radians = wall.rotationYDegrees * Math.PI / 180;
+      const expectedYaw = getLayoutComponentRotationYDegrees(wall) + (wallRunsAlongX ? 0 : 90);
+      const radians = getLayoutComponentRotationYDegrees(wall) * Math.PI / 180;
       const dx = opening.position[0] - wall.position[0];
       const dz = opening.position[2] - wall.position[2];
       const localX = Math.cos(radians) * dx - Math.sin(radians) * dz;
@@ -993,13 +1211,12 @@ function resolveExplicitLayoutRelations(
       const snappedPosition: [number, number, number] = wallRunsAlongX
         ? [wall.position[0] + Math.cos(radians) * along, opening.position[1], wall.position[2] - Math.sin(radians) * along]
         : [wall.position[0] + Math.sin(radians) * along, opening.position[1], wall.position[2] + Math.cos(radians) * along];
-      const changed = Math.abs(normalizeHalfTurnDifference(opening.rotationYDegrees, expectedYaw)) > 0.1
+      const changed = Math.abs(normalizeHalfTurnDifference(getLayoutComponentRotationYDegrees(opening), expectedYaw)) > 0.1
         || Math.hypot(opening.position[0] - snappedPosition[0], opening.position[2] - snappedPosition[2]) > 0.02;
       if (changed) {
         patches.set(opening.id, {
-          ...opening,
+          ...withLayoutComponentRotationYDegrees(opening, expectedYaw),
           position: snappedPosition,
-          rotationYDegrees: expectedYaw,
           uncertain: true,
           notes: appendLayoutDiagnostic(opening.notes, "已按明确的 attached_to 关系吸附到墙面，位置/朝向已自动修正，请复核"),
         });
@@ -1152,7 +1369,7 @@ function resolveLayoutSupportGraph(
             ),
           };
         } else {
-          const expectedY = getSupportTopY(resolvedSupport, groundHeight);
+          const expectedY = getSupportTopY(resolvedSupport, groundHeight, component.position);
           const difference = Math.abs(component.position[1] - expectedY);
           next = {
             ...component,
@@ -1229,7 +1446,7 @@ function resolveLayoutSupportGraph(
           ),
         };
       }
-      const expectedY = getSupportTopY(support, groundHeight);
+      const expectedY = getSupportTopY(support, groundHeight, character.position);
       const difference = Math.abs(character.position[1] - expectedY);
       return {
         ...character,
@@ -1246,7 +1463,7 @@ function resolveLayoutSupportGraph(
     const nearbySupport = resolvedComponents
       .filter((component) => ["table", "cabinet", "prop"].includes(component.category))
       .filter((component) => isPointInsideComponentFootprint(character.position, component))
-      .map((component) => ({ component, topY: getSupportTopY(component, groundHeight) }))
+      .map((component) => ({ component, topY: getSupportTopY(component, groundHeight, character.position) }))
       .filter(({ topY }) => Math.abs(topY - character.position[1]) <= LAYOUT_LEGACY_SUPPORT_NEARBY_TOLERANCE)
       .sort((left, right) => Math.abs(left.topY - character.position[1]) - Math.abs(right.topY - character.position[1]))[0];
     if (!nearbySupport || Math.abs(nearbySupport.topY - character.position[1]) <= LAYOUT_SUPPORT_Y_TOLERANCE) {
@@ -1312,10 +1529,20 @@ export function validateLayoutDraftCandidate(
       issues.push(`${label}的朝向必须是有限数字`);
     }
     const confidence = raw.confidence;
-    const semanticType = boundedString(raw.semanticType, "", LAYOUT_SEMANTIC_TYPE_MAX_LENGTH).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined;
+    const semanticType = typeof raw.semanticType === "string"
+      ? raw.semanticType.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").trim().slice(0, LAYOUT_SEMANTIC_TYPE_MAX_LENGTH) || undefined
+      : undefined;
     const normalizedAssembly = normalizeLayoutAssembly(raw.assembly);
-    const semanticProfile = resolveLayoutSemanticProfile(semanticType, boundedString(raw.name, "", 80));
-    const assembly = normalizedAssembly ?? buildSemanticLayoutAssembly(semanticProfile?.canonicalType ?? semanticType);
+    const groundFootprint = normalizeGroundFootprint(raw.groundFootprint);
+    const semanticProfile = resolveLayoutSemanticProfile(semanticType, semanticType ? undefined : boundedString(raw.name, "", 80));
+    // Legacy draft producers used "prop" as a broad bucket while relying on
+    // semanticType for detailed assemblies. Observation conversion handles
+    // explicit category conflicts by supplying a bounded neutral assembly.
+    const semanticCategoryConflict = Boolean(semanticProfile && semanticProfile.category !== category && category !== "prop");
+    const assembly = normalizedAssembly
+      ?? (semanticCategoryConflict ? undefined : buildSemanticLayoutAssembly(semanticProfile?.canonicalType ?? semanticType));
+    const renderAssembly = assembly ?? getDefaultLayoutCategoryAssembly(String(category), boundedString(raw.name, "", 80), primitive === "cylinder" ? "cylinder" : "box");
+    const footprintNeedsReview = Boolean(groundFootprint?.length && !deriveObservedAssemblyPrisms(groundFootprint, renderAssembly));
     const supportComponentId = typeof raw.supportComponentId === "string"
       ? boundedString(raw.supportComponentId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
       : undefined;
@@ -1360,12 +1587,14 @@ export function validateLayoutDraftCandidate(
       ...(partOfComponentId ? { partOfComponentId } : {}),
       rotationYDegrees,
       confidence,
-      uncertain: raw.uncertain === true || confidence < 0.65,
+      uncertain: raw.uncertain === true || confidence < 0.65 || semanticCategoryConflict || footprintNeedsReview,
       modelDescriptor: boundedString(raw.modelDescriptor, "", 120) || undefined,
       ...(semanticType ? { semanticType } : {}),
       appearance: normalizeLayoutAppearance(raw.appearance, rotationYDegrees),
       ...(assembly ? { assembly } : {}),
-      notes: boundedString(raw.notes, "", 240) || undefined,
+      ...(groundFootprint ? { groundFootprint } : {}),
+      notes: [boundedString(raw.notes, "", 240), semanticCategoryConflict ? "基础几何类别与语义身份提示冲突；保留原语义供诊断，不按该语义生成assembly，待确认。" : "", footprintNeedsReview ? "平面轮廓无法与当前可渲染部件可靠相交；渲染与碰撞保留保守assembly，轮廓待复核。" : ""]
+        .filter(Boolean).join(" ").slice(0, 240) || undefined,
       visible: raw.visible !== false,
     };
   });
@@ -1448,6 +1677,16 @@ export function getLayoutComponentRenderPosition(
 /** 外观语义中的局部 +Z 正面优先于通用 yaw，供预览与正式对象共用。 */
 export function getLayoutComponentRotationYDegrees(component: Pick<LayoutDraftComponent, "rotationYDegrees" | "appearance">) {
   return component.appearance?.frontDirectionDegrees ?? component.rotationYDegrees;
+}
+
+export function withLayoutComponentRotationYDegrees<T extends Pick<LayoutDraftComponent, "rotationYDegrees" | "appearance">>(component: T, degrees: number): T {
+  return {
+    ...component,
+    rotationYDegrees: degrees,
+    ...(component.appearance?.frontDirectionDegrees !== undefined
+      ? { appearance: { ...component.appearance, frontDirectionDegrees: degrees } }
+      : {}),
+  };
 }
 
 export function calibrateLayoutDraft(
@@ -1557,6 +1796,7 @@ export function buildLayoutBatch(
 ): { batch: DirectorLayoutBatch; objects: DirectorObject[] } {
   const usedIds = new Set(existingObjectIds);
   const objects = draft.components.map((component) => {
+    const renderAssembly = getLayoutComponentAssembly(component);
     const id = uniqueId(`${sanitizeId(batchId)}_${sanitizeId(component.id)}`, usedIds);
     return {
       id,
@@ -1582,7 +1822,8 @@ export function buildLayoutBatch(
         uncertain: component.uncertain,
         ...(component.modelDescriptor ? { modelDescriptor: component.modelDescriptor } : {}),
         ...(component.appearance ? { appearance: { ...component.appearance } } : {}),
-        ...(component.assembly ? { assembly: component.assembly.map((part) => ({ ...part, position: [...part.position] as [number, number, number], size: [...part.size] as [number, number, number], ...(part.rotation ? { rotation: [...part.rotation] as [number, number, number] } : {}) })) } : {}),
+        ...(renderAssembly ? { assembly: renderAssembly.map((part) => ({ ...part, position: [...part.position] as [number, number, number], size: [...part.size] as [number, number, number], ...(part.rotation ? { rotation: [...part.rotation] as [number, number, number] } : {}) })) } : {}),
+        ...(component.groundFootprint ? { groundFootprint: component.groundFootprint.map((part) => ({ ...part, outer: part.outer.map((point) => [...point] as [number, number]), ...(part.holes ? { holes: part.holes.map((loop) => loop.map((point) => [...point] as [number, number])) } : {}) })) } : {}),
       },
     } satisfies DirectorObject;
   });

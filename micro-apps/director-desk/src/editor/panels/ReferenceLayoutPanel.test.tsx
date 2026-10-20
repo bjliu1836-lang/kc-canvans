@@ -111,6 +111,25 @@ it("edits a controlled layout fixture in preview and commits it as one generated
   window.removeEventListener("keydown", windowKeydown);
 });
 
+it("shows and updates the effective appearance facing in the selected rotation field", async () => {
+  const user = userEvent.setup();
+  const components = fixtureDraft.components.map((component) => component.id === "sofa_01"
+    ? { ...component, appearance: { frontDirectionDegrees: 90 } }
+    : component);
+  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ draft: { ...fixtureDraft, components } }) })));
+  render(<ReferenceLayoutPanel />);
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "effective-facing", images: [{ edgeId: "facing", sourceNodeId: "facing", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "room.png" }] },
+  })));
+  await user.click(await screen.findByRole("button", { name: "生成粗布景" }));
+  await user.click(screen.getByRole("button", { name: /沙发（估计）/ }));
+
+  const rotation = screen.getByLabelText("Y 轴旋转");
+  expect(rotation).toHaveValue(90);
+  fireEvent.change(rotation, { target: { value: "135" } });
+  expect(useLayoutDraftPreviewStore.getState().draft?.components.find((component) => component.id === "sofa_01")?.appearance?.frontDirectionDegrees).toBe(135);
+});
+
 it("shows safe, user-facing explanations for spatial validation warnings", async () => {
   const user = userEvent.setup();
   vi.stubGlobal("fetch", vi.fn(async () => ({

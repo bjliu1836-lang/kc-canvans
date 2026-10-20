@@ -32,7 +32,9 @@ import {
 import { downloadLayoutDiagnostics, isLayoutDiagnosticsEnabled, recordLayoutDraftApplied, recordLayoutReferencePreview } from "../io/layoutDiagnostics";
 import {
   calibrateLayoutDraft,
+  getLayoutComponentRotationYDegrees,
   getLayoutDraftReferenceCamera,
+  withLayoutComponentRotationYDegrees,
   LAYOUT_ANCHOR_PRESETS,
   LAYOUT_CATEGORY_COLORS,
   LAYOUT_CHARACTER_COLOR,
@@ -1007,9 +1009,9 @@ export function ReferenceLayoutPanel() {
                   {(["宽", "高", "深"] as const).map((axisLabel, axis) => (
                     <label key={`size-${axisLabel}`}>尺寸{axisLabel}<input aria-label={`尺寸${axisLabel}`} type="number" min="0.01" step="0.1" value={selectedComponent.size[axis]} onChange={(event) => updateComponent(selectedComponent.id, (component) => updateTuple(component, "size", axis as 0 | 1 | 2, event.target.value))} /></label>
                   ))}
-                  <label className="reference-layout-rotation-field">Y 轴旋转<input aria-label="Y 轴旋转" type="number" step="1" value={selectedComponent.rotationYDegrees} onChange={(event) => {
+                  <label className="reference-layout-rotation-field">Y 轴旋转<input aria-label="Y 轴旋转" type="number" step="1" value={getLayoutComponentRotationYDegrees(selectedComponent)} onChange={(event) => {
                     const value = finiteDraftNumber(event.target.value);
-                    if (value !== null) updateComponent(selectedComponent.id, (component) => ({ ...component, rotationYDegrees: value }));
+                    if (value !== null) updateComponent(selectedComponent.id, (component) => withLayoutComponentRotationYDegrees(component, value));
                   }} /></label>
                 </div>
                 <div className="reference-layout-anchor-row">

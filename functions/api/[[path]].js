@@ -3,6 +3,14 @@ const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7;
 import {
   DIRECTOR_LAYOUT_OBSERVATION_FORMAT,
   DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT,
+  DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT,
+  DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS,
+  buildDirectorLayoutSpatialReviewPrompt,
+  directorLayoutPromptHash,
+  directorLayoutSpatialReviewPatch,
+  parseDirectorLayoutSpatialReview,
+  extractDirectorLayoutFinishReason,
+  resolveDirectorLayoutObservationTokenBudget,
   parseDirectorLayoutObservation,
   summarizeDirectorLayoutProviderEnvelope,
   summarizeDirectorLayoutObservationOutput,
@@ -1006,7 +1014,9 @@ const handleDirectorLayoutGeneration = async (request, env) => {
   if (!(await requireAuth(request, env))) return json({ error: 'UNAUTHORIZED' }, 401);
   const body = await request.json().catch(() => ({}));
   const observationMode = body?.outputFormat === DIRECTOR_LAYOUT_OBSERVATION_FORMAT;
+  const spatialReview = body?.observationStage === 'spatial-review';
   if (body?.outputFormat !== undefined && !observationMode) return json({ error: 'DIRECTOR_LAYOUT_FORMAT_UNSUPPORTED' }, 400);
+  if (body?.observationStage !== undefined && (!observationMode || !spatialReview)) return json({ error: 'DIRECTOR_LAYOUT_STAGE_UNSUPPORTED' }, 400);
   const imageUrl = typeof body?.image?.url === 'string' ? body.image.url.trim() : '';
   if (!imageUrl || !(imageUrl.startsWith('data:image/') || imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
     return json({ error: 'DIRECTOR_LAYOUT_IMAGE_REQUIRED' }, 400);
@@ -1020,6 +1030,17 @@ const handleDirectorLayoutGeneration = async (request, env) => {
   const endpoint = env.DIRECTOR_LAYOUT_ENDPOINT || env.MIMO_TEXT_ENDPOINT || env.TEXT_ENDPOINT || '/chat/completions';
   const model = env.DIRECTOR_LAYOUT_MODEL_ID || env.MIMO_VISION_MODEL_ID || resolveMimoTextModel('2.5', env);
   if (observationMode) {
+    let systemPrompt = DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT;
+    let userPrompt = '请按约定只返回这张图的二维可见观察 JSON。';
+    if (spatialReview) {
+      try {
+        systemPrompt = DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT;
+        userPrompt = buildDirectorLayoutSpatialReviewPrompt(body.baseObservations, body.reviewContext);
+      } catch {
+        return json({ error: 'DIRECTOR_LAYOUT_SPATIAL_REVIEW_CONTEXT_INVALID' }, 400);
+      }
+    }
+    const promptHash = await directorLayoutPromptHash(`${systemPrompt}\n---\n${userPrompt}`);
     let result;
     try {
       result = await callModelApi({
@@ -1027,19 +1048,23 @@ const handleDirectorLayoutGeneration = async (request, env) => {
       payload: {
         model,
         messages: [
-          { role: 'system', content: DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT },
+          { role: 'system', content: systemPrompt },
           { role: 'user', content: [
             { type: 'image_url', image_url: { url: imageUrl } },
-            { type: 'text', text: '请按约定只返回这张图的二维可见观察 JSON。' },
+            { type: 'text', text: userPrompt },
           ] },
         ],
-        max_completion_tokens: Number(env.DIRECTOR_LAYOUT_OBSERVATION_MAX_COMPLETION_TOKENS || 2048),
+        max_completion_tokens: spatialReview
+          ? resolveDirectorLayoutObservationTokenBudget(env.DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS)
+          : resolveDirectorLayoutObservationTokenBudget(env.DIRECTOR_LAYOUT_OBSERVATION_MAX_COMPLETION_TOKENS),
         temperature: 0.1,
         top_p: 0.9,
         stream: false,
-        thinking: { type: 'disabled' },
+        ...(spatialReview
+          ? { thinking: { type: 'enabled' }, reasoning_effort: 'max' }
+          : { thinking: { type: 'disabled' } }),
       },
-      timeoutMs: 180000,
+      timeoutMs: spatialReview ? 600000 : 180000,
       });
     } catch (error) {
       const upstreamStatus = Number.isInteger(error?.statusCode) ? error.statusCode : null;
@@ -1057,8 +1082,21 @@ const handleDirectorLayoutGeneration = async (request, env) => {
     }, 502);
     const outputShape = summarizeDirectorLayoutObservationOutput(modelText);
     try {
-      const visualObservations = parseDirectorLayoutObservation(modelText);
-      return json({ observationFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT, visualObservations, providerOutputShape: outputShape, usage: result.usage || null });
+      const visualObservations = spatialReview
+        ? parseDirectorLayoutSpatialReview(modelText)
+        : parseDirectorLayoutObservation(modelText);
+      const responseObservations = spatialReview
+        ? directorLayoutSpatialReviewPatch(body.baseObservations, visualObservations)
+        : visualObservations;
+      return json({
+        observationFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT,
+        ...(spatialReview ? { spatialReviewPatch: responseObservations } : { visualObservations: responseObservations }),
+        providerOutputShape: outputShape,
+        providerFinishReason: extractDirectorLayoutFinishReason(result),
+        providerModel: typeof result?.model === 'string' ? result.model.slice(0, 100) : null,
+        promptHash,
+        usage: result.usage || null,
+      });
     } catch (error) {
       return json({
         error: error?.kind === 'model-json' ? 'DIRECTOR_LAYOUT_MODEL_JSON_INVALID' : 'DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID',
@@ -1066,6 +1104,9 @@ const handleDirectorLayoutGeneration = async (request, env) => {
         issues: error?.issues || ['图像观察结构无效'],
         issuePaths: error?.issuePaths || [],
         outputShape,
+        providerFinishReason: extractDirectorLayoutFinishReason(result),
+        providerModel: typeof result?.model === 'string' ? result.model.slice(0, 100) : null,
+        promptHash,
       }, 422);
     }
   }

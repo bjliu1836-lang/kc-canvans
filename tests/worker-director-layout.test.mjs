@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import { onRequest } from '../functions/api/[[path]].js';
-import { DIRECTOR_LAYOUT_OBSERVATION_FORMAT, parseDirectorLayoutObservation, summarizeDirectorLayoutObservationOutput } from '../functions/shared/director-layout-observations.js';
+import { DIRECTOR_LAYOUT_OBSERVATION_FORMAT, DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT, DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS, directorLayoutSpatialReviewPatch, mergeDirectorLayoutSpatialReview, parseDirectorLayoutObservation, parseDirectorLayoutSpatialReview, summarizeDirectorLayoutObservationOutput } from '../functions/shared/director-layout-observations.js';
 
 const origin = 'https://worker.test';
 const baseEnv = {
@@ -55,8 +56,9 @@ test('director-layout observation mode uses one model call and returns only boun
   const token = await login();
   const observation = {
     spaceType: 'open',
+    geometryEvidence: { axes: [{ axis: 'depth', segments: [{ start: [0.1, 0.4], end: [0.9, 0.8], confidence: 0.91 }] }] },
     surfaces: [{ id: 'wall', kind: 'wall', side: 'image_back', bbox: [0, 0.1, 1, 0.8], confidence: 0.9 }],
-    items: [{ id: 'desk', name: '桌子', semanticType: 'desk', bbox: [0.2, 0.4, 0.6, 0.7], confidence: 0.8, visibility: 'visible', appearance: { color: '#aabbcc', roughness: 0.3 }, contactWallSide: 'image_right', rearFeature: { name: '背板', bbox: [0.4, 0.4, 0.5, 0.5] }, bodyExtendsToward: 'image_left', coordinates3d: [9, 9, 9] }],
+    items: [{ id: 'desk', name: '桌子', semanticType: 'desk', bbox: [0.2, 0.4, 0.6, 0.7], confidence: 0.8, visibility: 'visible', appearance: { color: '#aabbcc', roughness: 0.3 }, contactWallSide: 'image_right', rearFeature: { name: '背板', bbox: [0.4, 0.4, 0.5, 0.5] }, bodyExtendsToward: 'image_left', placement: 'wall_attached', facingTowardId: 'wall', groundContacts: [{ point: [0.25, 0.7], kind: 'corner', visibility: 'visible', confidence: 0.9 }], groundFootprints: [{ outer: [[0.2, 0.7], [0.6, 0.72], [0.55, 0.9], [0.25, 0.88]], holes: [[[0.35, 0.75], [0.4, 0.75], [0.4, 0.8], [0.35, 0.8]]], visibility: 'visible', confidence: 0.82 }], visibleBbox: [0.2, 0.4, 0.6, 0.7], completeBbox: [0.18, 0.38, 0.62, 0.72], occludesIds: ['chair'], coordinates3d: [9, 9, 9] }],
     people: [{ id: 'actor', name: '人物', bbox: [0.4, 0.3, 0.6, 0.8], confidence: 0.7, visibility: 'visible', posture: 'kneel', facingDirection: 'image_up', kneelVariant: 'seiza', handGesture: 'prayer', worldPosition: [9, 9, 9] }],
     globalYaw: 180,
   };
@@ -66,7 +68,7 @@ test('director-layout observation mode uses one model call and returns only boun
   globalThis.fetch = async (_url, options) => {
     calls += 1;
     providerPayload = JSON.parse(String(options?.body));
-    return Response.json({ choices: [{ message: { content: JSON.stringify(observation) } }], usage: { total_tokens: 10 } });
+    return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(observation) } }], usage: { total_tokens: 10 } });
   };
   t.after(() => { globalThis.fetch = originalFetch; });
 
@@ -77,24 +79,42 @@ test('director-layout observation mode uses one model call and returns only boun
   assert.equal(response.status, 200);
   assert.equal(calls, 1);
   assert.equal(providerPayload.messages[0].role, 'system');
+  assert.equal(providerPayload.max_completion_tokens, 8192);
+  assert.equal(
+    createHash('sha256').update(providerPayload.messages[0].content, 'utf8').digest('hex'),
+    createHash('sha256').update(DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT, 'utf8').digest('hex'),
+    'Worker request must use the currently shared observation prompt unchanged',
+  );
   assert.match(providerPayload.messages[0].content, /只负责从参考图提取可见的二维视觉事实/);
+  assert.match(providerPayload.messages[0].content, /小装饰、弱显著道具可以少报或省略/);
   assert.match(providerPayload.messages[0].content, /每个人物都必须输出 posture/);
   assert.match(providerPayload.messages[0].content, /不确定时必须显式写 unknown/);
   assert.match(providerPayload.messages[0].content, /不能从跪姿或人物名称推断/);
   assert.match(providerPayload.messages[0].content, /facingDirection/);
   assert.match(providerPayload.messages[0].content, /toward_camera\/away_from_camera/);
   assert.match(providerPayload.messages[0].content, /supportId/);
+  assert.match(providerPayload.messages[0].content, /wall_attached/);
+  assert.match(providerPayload.messages[0].content, /groundContacts/);
+  assert.match(providerPayload.messages[0].content, /groundFootprints/);
+  assert.match(providerPayload.messages[0].content, /L形缺口连通外部/);
+  assert.match(providerPayload.messages[0].content, /完整输出 shape/);
+  assert.match(providerPayload.messages[0].content, /geometryEvidence/);
+  assert.match(providerPayload.messages[0].content, /窗帘、挂画、镜子等覆盖或装饰物仍是独立物品/);
+  assert.match(providerPayload.messages[0].content, /只输出最终JSON，不输出思维链/);
   const data = await response.json();
   assert.equal(data.observationFormat, DIRECTOR_LAYOUT_OBSERVATION_FORMAT);
+  assert.deepEqual(data.visualObservations.items[0].groundFootprints, observation.items[0].groundFootprints);
   assert.deepEqual(data.visualObservations, {
     spaceType: 'open',
+    geometryEvidence: { axes: [{ axis: 'depth', segments: [{ start: [0.1, 0.4], end: [0.9, 0.8], confidence: 0.91 }] }] },
     surfaces: [{ id: 'wall', kind: 'wall', side: 'image_back', bbox: [0, 0.1, 1, 0.8], confidence: 0.9 }],
-    items: [{ id: 'desk', name: '桌子', semanticType: 'desk', bbox: [0.2, 0.4, 0.6, 0.7], confidence: 0.8, visibility: 'visible', mainColor: '#AABBCC', contactWallSide: 'image_right', rearFeature: { name: '背板', bbox: [0.4, 0.4, 0.5, 0.5] }, bodyExtendsToward: 'image_left' }],
+    items: [{ id: 'desk', name: '桌子', semanticType: 'desk', bbox: [0.2, 0.4, 0.6, 0.7], confidence: 0.8, visibility: 'visible', mainColor: '#AABBCC', contactWallSide: 'image_right', rearFeature: { name: '背板', bbox: [0.4, 0.4, 0.5, 0.5] }, bodyExtendsToward: 'image_left', placement: 'wall_attached', facingTowardId: 'wall', groundContacts: [{ point: [0.25, 0.7], kind: 'corner', visibility: 'visible', confidence: 0.9 }], groundFootprints: observation.items[0].groundFootprints, visibleBbox: [0.2, 0.4, 0.6, 0.7], completeBbox: [0.18, 0.38, 0.62, 0.72], occludesIds: ['chair'] }],
     people: [{ id: 'actor', name: '人物', bbox: [0.4, 0.3, 0.6, 0.8], confidence: 0.7, visibility: 'visible', posture: 'kneel', facingDirection: 'image_up', kneelVariant: 'seiza', handGesture: 'prayer' }],
   });
   assert.equal(data.providerOutputShape.itemsItems[0].types.appearance, 'object');
   assert.equal(data.providerOutputShape.itemsItems[0].appearance.types.color, 'string');
   assert.deepEqual(data.usage, { total_tokens: 10 });
+  assert.equal(data.providerFinishReason, 'stop');
 });
 
 test('image observation parser rejects unbounded arrays and malformed boxes', () => {
@@ -102,6 +122,137 @@ test('image observation parser rejects unbounded arrays and malformed boxes', ()
   assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({
     surfaces: [], items: [{ id: 'bad', name: '物件', category: 'prop', bbox: [-1, 0, 0.2, 0.3], confidence: 0.8, visibility: 'visible' }],
   })), /对象无效/);
+});
+
+test('spatial review uses one bounded DeepSeek thinking call and only returns spatial patches for known identities', async (t) => {
+  const token = await login();
+  const baseObservations = {
+    surfaces: [{ id: 'floor', kind: 'floor', side: 'floor', bbox: [0, 0.65, 1, 1], confidence: 0.9, visibility: 'visible' }],
+    items: [{ id: 'sofa', name: '沙发', category: 'sofa', semanticType: 'sofa_main', bbox: [0.1, 0.2, 0.65, 0.8], confidence: 0.9, visibility: 'visible' }],
+  };
+  const reviewOutput = {
+    ...baseObservations,
+    items: [{ ...baseObservations.items[0], groundFootprints: [{ outer: [[0.1, 0.7], [0.65, 0.7], [0.65, 0.9], [0.1, 0.9]], visibility: 'visible', confidence: 0.8 }] }],
+  };
+  let providerPayload;
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    calls += 1;
+    providerPayload = JSON.parse(String(options?.body));
+    return Response.json({ model: 'deepseek-flash-v4.1-1017', choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(reviewOutput), reasoning_content: 'must not be logged or returned' } }], usage: { total_tokens: 1200, completion_tokens: 1000 } });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const response = await call('/api/director-layout', {
+    method: 'POST', token,
+    env: { ...layoutEnv, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS: '40000' },
+    body: {
+      outputFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT,
+      observationStage: 'spatial-review',
+      image: { url: 'data:image/png;base64,AA==' },
+      baseObservations,
+      reviewContext: { conflictPairIds: [], missingEvidence: ['non-convex-contact-boundary', 'parallel-lines'] },
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(calls, 1);
+  assert.equal(providerPayload.max_completion_tokens, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS);
+  assert.deepEqual(providerPayload.thinking, { type: 'enabled' });
+  assert.equal(providerPayload.reasoning_effort, 'max');
+  assert.equal(providerPayload.messages[0].content, DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT);
+  const data = await response.json();
+  assert.deepEqual(data.spatialReviewPatch.items, [{ id: 'sofa', groundFootprints: reviewOutput.items[0].groundFootprints }]);
+  assert.equal(data.providerContent, undefined);
+  assert.equal(data.providerModel, 'deepseek-flash-v4.1-1017');
+  const userText = providerPayload.messages[1].content.find((part) => part.type === 'text').text;
+  assert.equal(
+    data.promptHash,
+    createHash('sha256').update(`${providerPayload.messages[0].content}\n---\n${userText}`, 'utf8').digest('hex'),
+  );
+  assert.doesNotMatch(JSON.stringify(data), /reasoning_content|must not be logged/);
+});
+
+test('spatial review rejects changed identities and unknown objects', () => {
+  const base = { surfaces: [], items: [{ id: 'sofa', name: '沙发', category: 'sofa', bbox: [0.1, 0.2, 0.6, 0.8], confidence: 0.9, visibility: 'visible' }] };
+  for (const items of [
+    [{ ...base.items[0], name: '椅子' }],
+    [{ ...base.items[0], id: 'new-sofa' }],
+  ]) {
+    assert.throws(() => directorLayoutSpatialReviewPatch(base, { surfaces: [], items }), /DIRECTOR_LAYOUT_SPATIAL_REVIEW_(?:IDENTITY_CHANGED|UNKNOWN_ID)/);
+  }
+});
+
+test('spatial review merges valid support references when base observations omit people', () => {
+  const base = {
+    surfaces: [],
+    items: [
+      { id: 'sofa', name: '沙发', category: 'sofa', bbox: [0.1, 0.2, 0.8, 0.8], confidence: 0.9, visibility: 'visible' },
+      { id: 'pillow', name: '靠垫', category: 'prop', bbox: [0.2, 0.2, 0.4, 0.4], confidence: 0.8, visibility: 'visible' },
+    ],
+  };
+  const merged = mergeDirectorLayoutSpatialReview(base, { items: [{ id: 'pillow', supportId: 'sofa' }] });
+  assert.equal(merged.items.find((item) => item.id === 'pillow').supportId, 'sofa');
+});
+
+test('spatial review requires complete identity lists, supports explicit array clearing, and only normalizes epsilon noise', () => {
+  const base = { surfaces: [], items: [{ id: 'sofa', name: '沙发', category: 'sofa', bbox: [0.1, 0.2, 0.6, 0.8], confidence: 0.9, visibility: 'visible', groundFootprints: [{ outer: [[0.1, 0.7], [0.6, 0.7], [0.6, 0.9], [0.1, 0.9]], visibility: 'visible', confidence: 0.9 }] }] };
+  assert.match(DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, /必须原样保留全部已知 surfaces\/items\/people 对象集合/);
+  assert.match(DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, /用空数组清除 groundFootprints/);
+  assert.doesNotMatch(DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, /可只输出已知id的子集/);
+  assert.deepEqual(directorLayoutSpatialReviewPatch(base, { surfaces: [], items: [{ ...base.items[0], groundFootprints: [] }] }).items, [{ id: 'sofa', groundFootprints: [] }]);
+  assert.throws(() => directorLayoutSpatialReviewPatch(base, { surfaces: [], items: [] }), /IDENTITY_CHANGED/);
+  const epsilon = JSON.parse(JSON.stringify(base));
+  epsilon.items[0].groundFootprints[0].outer[0][0] = -0.0000005;
+  const parsed = parseDirectorLayoutSpatialReview(JSON.stringify(epsilon));
+  assert.equal(parsed.items[0].groundFootprints[0].outer[0][0], 0);
+  epsilon.items[0].groundFootprints[0].outer[0][0] = -0.01;
+  assert.throws(() => parseDirectorLayoutSpatialReview(JSON.stringify(epsilon)), /对象无效/);
+});
+
+test('ground-footprint topology accepts disjoint collinear contour edges and keeps union language consistent', () => {
+  const base = { id: 'sofa', name: '组合沙发', category: 'sofa', bbox: [0.1, 0.2, 0.9, 0.9], confidence: 0.9, visibility: 'visible' };
+  const collinearBoundary = [[0.1, 0.1], [0.3, 0.1], [0.5, 0.1], [0.7, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]];
+  const parsed = parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [{ ...base, groundFootprints: [{ outer: collinearBoundary, visibility: 'visible', confidence: 0.9 }] }] }));
+  assert.deepEqual(parsed.items[0].groundFootprints[0].outer, collinearBoundary);
+  const concaveOuter = [[0.05, 0.05], [0.85, 0.05], [0.85, 0.35], [0.35, 0.35], [0.35, 0.85], [0.05, 0.85]];
+  const crossingConcavity = [[0.1, 0.1], [0.75, 0.1], [0.1, 0.75]];
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [{ ...base, groundFootprints: [{ outer: concaveOuter, holes: [crossingConcavity], visibility: 'visible', confidence: 0.9 }] }] })), /对象无效/);
+  const outer = [[0.05, 0.05], [0.95, 0.05], [0.95, 0.95], [0.05, 0.95]];
+  const square = [[0.1, 0.1], [0.4, 0.1], [0.4, 0.4], [0.1, 0.4]];
+  const overlapping = [[0.65, 0.35], [0.35, 0.35], [0.35, 0.65], [0.65, 0.65]];
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [{ ...base, groundFootprints: [{ outer, holes: [square, overlapping], visibility: 'visible', confidence: 0.9 }] }] })), /对象无效/);
+  assert.match(DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT, /最多3个占地部件；部件可相接或重叠/);
+  assert.doesNotMatch(DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT, /互不重叠的占地部件/);
+});
+
+test('image observation placement and facing fields are optional and bounded', () => {
+  const base = { id: 'chair', name: '椅子', semanticType: 'chair', bbox: [0.2, 0.2, 0.4, 0.8], confidence: 0.9, visibility: 'visible' };
+  const legacy = parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [base] }));
+  assert.equal(legacy.items[0].placement, undefined);
+  const parsed = parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [{ ...base, placement: 'wall_attached', facingTowardId: 'table' }] }));
+  assert.equal(parsed.items[0].placement, 'wall_attached');
+  assert.equal(parsed.items[0].facingTowardId, 'table');
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [{ ...base, placement: 'ceiling' }] })), /对象无效/);
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [{ ...base, facingTowardId: 'x'.repeat(49) }] })), /对象无效/);
+});
+
+test('image observation keeps bounded spatial evidence optional and strips other model geometry', () => {
+  const base = { id: 'sofa', name: '组合沙发', semanticType: 'sofa', bbox: [0.1, 0.3, 0.8, 0.8], confidence: 0.9, visibility: 'partly_occluded' };
+  const evidence = {
+    geometryEvidence: { axes: [{ axis: 'depth', segments: [{ start: [0.1, 0.2], end: [0.9, 0.8], confidence: 0.9 }] }] },
+    surfaces: [], items: [{ ...base, groundContacts: [{ point: [0.2, 0.8], kind: 'corner', visibility: 'visible', confidence: 0.9 }, { point: [0.7, 0.78], kind: 'edge', visibility: 'inferred', confidence: 0.7 }], groundFootprints: [{ outer: [[0.2, 0.7], [0.7, 0.7], [0.7, 0.9], [0.2, 0.9]], holes: [[[0.4, 0.75], [0.5, 0.75], [0.5, 0.85], [0.4, 0.85]]], visibility: 'visible', confidence: 0.88 }], visibleBbox: [0.1, 0.3, 0.7, 0.8], completeBbox: [0.1, 0.3, 0.8, 0.8], occludesIds: ['table'], coordinates3d: [8, 8, 8] }],
+  };
+  const parsed = parseDirectorLayoutObservation(JSON.stringify(evidence));
+  assert.deepEqual(parsed.geometryEvidence, evidence.geometryEvidence);
+  assert.deepEqual(parsed.items[0].groundContacts, evidence.items[0].groundContacts);
+  assert.deepEqual(parsed.items[0].groundFootprints, evidence.items[0].groundFootprints);
+  assert.deepEqual(parsed.items[0].visibleBbox, evidence.items[0].visibleBbox);
+  assert.deepEqual(parsed.items[0].completeBbox, evidence.items[0].completeBbox);
+  assert.deepEqual(parsed.items[0].occludesIds, ['table']);
+  assert.equal('coordinates3d' in parsed.items[0], false);
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ ...evidence, geometryEvidence: { axes: [{ axis: 'depth', segments: Array(7).fill({ start: [0, 0], end: [1, 1], confidence: 0.9 }) }] } })), /对象无效/);
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [{ ...base, groundContacts: Array(7).fill({ point: [0.2, 0.8], kind: 'corner', visibility: 'visible', confidence: 0.9 }) }] })), /对象无效/);
+  assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: [{ ...base, groundFootprints: [{ outer: [[0.2, 0.2], [0.4, 0.4]], visibility: 'visible', confidence: 0.9 }] }] })), /对象无效/);
 });
 
 test('image observation parser requires explicit posture and preserves unknown without guessing', () => {

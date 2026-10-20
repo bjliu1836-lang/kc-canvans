@@ -150,6 +150,11 @@ export interface DirectorObject {
       /** Bounded per-part opacity for semantic preset details such as a sheer curtain. */
       opacity?: number;
     }>;
+    groundFootprint?: Array<{
+      outer: [number, number][];
+      holes?: [number, number][][];
+      confidence: number;
+    }>;
     /** category === "character" 时携带的占位元数据（姿态与估算身高）。 */
     characterMeta?: {
       posture: "stand" | "sit" | "crouch" | "kneel" | "lie" | "unknown";
@@ -197,6 +202,7 @@ export interface DirectorLayoutReferenceCamera {
     candidateCount: number;
     baselineProjectionError: number | null;
     bestProjectionError: number | null;
+    appliedProjectionError?: number | null;
     cameraOnlyBestProjectionError?: number | null;
     pairDiagnostics?: Array<{
       id: string;
@@ -214,11 +220,46 @@ export interface DirectorLayoutReferenceCamera {
     movedGroundItems?: number;
     movedComponents?: number;
     positionAdjustmentMeters?: number;
+    spatialEvidenceTrace?: {
+      selectedBranch: "footprint" | "joint" | "none";
+      sourceFootprintIds: string[];
+      eligiblePairIds: string[];
+      uniqueCameraCandidateCount: number;
+      initializedCameraCandidateCount: number;
+      preselectionSafeFootprintCandidateCount?: number;
+      postSelectionFootprintCandidateCount?: number;
+      targetSafeFootprintCandidateCount?: number;
+      safetyCheckStoppedEarly?: boolean;
+      initializedFootprintIds: string[];
+      safetyCheckedFootprintCandidateCount: number;
+      failedInitializationById: Array<{ id: string; cameraCount: number }>;
+      footprintOverlapRejectedCandidateCount: number;
+      majorOverlapRejects: Array<{ firstId: string; secondId: string; candidateCount: number; maxPenetrationMeters: number }>;
+      selectedRefinementSearch?: {
+        evaluationBudget: number; evaluationCount: number; feasibleEvaluationCount: number; acceptedMoves: number;
+        completedScaleLevels: number; budgetExhausted: boolean;
+        positionEvidence: Array<{ id: string; basis: "visible-footprint-fixed" | "visible-center-contact-fixed" | "visible-center-contact-bounded" | "observed-bbox-center-bounded" | "low-confidence-bbox-center-bounded"; fixed: boolean; maxDeltaMeters: number }>;
+      } | null;
+      selectedInitializedIds: string[];
+      selectedAfterCarryIds: string[];
+      returnedByFitIds: string[];
+    };
+    postTransformSafety?: {
+      newMajorOverlapPairs: Array<{ firstId: string; secondId: string; classification: "hard" | "review" | "allowed"; reason: string; penetrationMeters: number }>;
+      cameraInsideComponentIds: string[];
+      alignmentRejected: boolean;
+    };
     collisionPairs?: Array<{ firstId: string; secondId: string; classification: "hard" | "review" | "allowed"; reason: string }>;
     physicalValidity?: {
       withinRoom: boolean;
+      roomBoundsEvaluated?: boolean;
       cameraOutsideGeometry: boolean;
+      cameraGeometryEvaluated?: boolean;
       hardCollisionCount: number;
+      initialPenetrationMeters?: number;
+      finalPenetrationMeters?: number;
+      initialCollisionCounts?: { totalCandidates: number; hard: number; review: number; allowed: number };
+      finalCollisionCounts?: { totalCandidates: number; hard: number; review: number; allowed: number };
       roomBoundaryViolations?: Array<{ componentId: string; edge: "left" | "right" | "front" | "back"; overflowMeters: number }>;
     };
     rejectionReason: "insufficient-evidence" | "no-safe-candidate" | "insufficient-improvement" | "error-too-high" | "unsafe-collision" | null;

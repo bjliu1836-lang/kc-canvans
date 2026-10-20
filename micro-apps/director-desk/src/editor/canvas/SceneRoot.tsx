@@ -1,7 +1,7 @@
 import { Edges, Html, Line, TransformControls, type TransformControlsProps } from "@react-three/drei";
 import { useLoader, type ThreeEvent } from "@react-three/fiber";
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react";
-import { Box3, Color, Matrix4, Quaternion, Vector3, type Group, type Object3D } from "three";
+import { Box3, Color, ExtrudeGeometry, Matrix4, Quaternion, Shape, Vector3, type Group, type Object3D } from "three";
 import type { TransformControls as TransformControlsImpl } from "three-stdlib";
 import type { Line2 } from "three-stdlib";
 import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
@@ -68,7 +68,7 @@ import { parseImportedCharacterActionId } from "../schema/importedCharacterActio
 import { GROUND_PLANE_SIZE, createGroundMaterialTexture, getGroundMaterialPreset } from "./groundMaterialPresets";
 import { getRuntimePlaybackProgress, subscribeRuntimePlayback } from "../runtime/playbackRuntime";
 import { disposeIsolatedModelMaterials, isolateAndTintModelMaterials } from "../runtime/modelMaterialTint";
-import { fitLayoutGeometryToUnitBounds } from "./layoutGeometryBounds";
+import { deriveObservedAssemblyPrisms, fitLayoutGeometryToUnitBounds, getDefaultLayoutCategoryAssembly } from "./layoutGeometryBounds";
 import {
   createCameraTrackingSmoothingState,
   getRuntimeCameraPlaybackSnapshot,
@@ -591,14 +591,41 @@ type LayoutComponentGeometryProps = {
   emissive?: string;
   descriptor?: string;
   assembly?: NonNullable<DirectorObject["layoutSource"]>["assembly"];
+  groundFootprint?: NonNullable<DirectorObject["layoutSource"]>["groundFootprint"];
 };
 
 function LayoutComponentGeometry(props: LayoutComponentGeometryProps) {
   const boundsRoot = useRef<Group>(null);
   useLayoutEffect(() => {
+    boundsRoot.current?.position?.set(0, 0, 0);
+    boundsRoot.current?.scale?.set(1, 1, 1);
+    const assembly = props.assembly ?? getDefaultLayoutCategoryAssembly(props.category, props.descriptor, props.primitive);
+    if (props.groundFootprint?.length && deriveObservedAssemblyPrisms(props.groundFootprint, assembly)?.length) return;
     if (boundsRoot.current?.isObject3D) fitLayoutGeometryToUnitBounds(boundsRoot.current);
-  }, [props.category, props.primitive, props.descriptor, props.assembly]);
+  }, [props.category, props.primitive, props.descriptor, props.assembly, props.groundFootprint]);
   return <group ref={boundsRoot}><LayoutComponentGeometryContent {...props} /></group>;
+}
+
+function ObservedPrismMesh({ part, color, roughness, metalness, opacity, depthWrite, emissive }: {
+  part: { polygon: [number, number][]; yMin: number; yMax: number };
+  color: string;
+  roughness?: number;
+  metalness?: number;
+  opacity?: number;
+  depthWrite?: boolean;
+  emissive?: string;
+}) {
+  const geometry = useMemo(() => {
+    const shape = new Shape();
+    shape.moveTo(part.polygon[0][0] - 0.5, part.polygon[0][1] - 0.5);
+    for (const point of part.polygon.slice(1)) shape.lineTo(point[0] - 0.5, point[1] - 0.5);
+    shape.closePath();
+    return new ExtrudeGeometry(shape, { depth: part.yMax - part.yMin, bevelEnabled: false, steps: 1 });
+  }, [part]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  return <mesh geometry={geometry} position={[0, part.yMax, 0]} rotation={[Math.PI / 2, 0, 0]}>
+    <meshStandardMaterial color={color} metalness={metalness ?? 0.02} roughness={roughness ?? 0.68} opacity={opacity} depthWrite={depthWrite} emissive={emissive} transparent={opacity !== undefined && opacity < 1} />
+  </mesh>;
 }
 
 function LayoutComponentGeometryContent({
@@ -614,11 +641,16 @@ function LayoutComponentGeometryContent({
   emissive,
   descriptor,
   assembly,
+  groundFootprint,
 }: LayoutComponentGeometryProps) {
   const material = <meshStandardMaterial color={color} metalness={metalness ?? 0.02} roughness={roughness ?? 0.68} opacity={opacity} depthWrite={depthWrite} emissive={emissive} transparent={opacity !== undefined && opacity < 1} />;
   const box = <boxGeometry args={[1, 1, 1]} />;
   const legMaterial = <meshStandardMaterial color={color} metalness={metalness ?? 0.02} roughness={roughness ?? 0.68} />;
-  if (assembly?.length) return <group>{assembly.map((part, index) => (
+  const categoryAssembly = useMemo(() => getDefaultLayoutCategoryAssembly(category, descriptor, primitive), [category, descriptor, primitive]);
+  const renderAssembly = assembly ?? categoryAssembly;
+  const observedPrisms = deriveObservedAssemblyPrisms(groundFootprint, renderAssembly);
+  if (observedPrisms?.length) return <group>{observedPrisms.map((part, index) => <ObservedPrismMesh key={`observed-prism-${index}`} part={part} color={color} roughness={roughness} metalness={metalness} opacity={opacity} depthWrite={depthWrite} emissive={emissive} />)}</group>;
+  if (renderAssembly?.length) return <group>{renderAssembly.map((part, index) => (
     <mesh key={`${part.primitive}-${index}`} name={index === 0 ? meshName : undefined} position={part.position} scale={part.size} rotation={part.rotation?.map((value) => value * Math.PI / 180) as [number, number, number] | undefined}>
       {part.primitive === "cylinder" ? <cylinderGeometry args={[0.5, 0.5, 1, 18]} /> : part.primitive === "sphere" ? <sphereGeometry args={[0.5, 14, 10]} /> : part.primitive === "cone" ? <coneGeometry args={[0.5, 1, 16]} /> : part.primitive === "torus" ? <torusGeometry args={[0.5, 0.08, 10, 20]} /> : box}
       {part.opacity === undefined ? material : <meshStandardMaterial color={color} metalness={metalness ?? 0.02} roughness={roughness ?? 0.68} opacity={part.opacity} transparent={part.opacity < 1} depthWrite={part.opacity >= 1} />}
@@ -898,6 +930,7 @@ function ObjectSceneNode({
             metalness={item.layoutSource.appearance?.metalness}
             descriptor={`${item.name} ${item.layoutSource.modelDescriptor ?? ""}`}
             assembly={item.layoutSource.assembly}
+            groundFootprint={item.layoutSource.groundFootprint}
           />
         ) : <GeometryPrimitiveModel color={item.color} geometryType={item.geometryType} />
       ) : null}
@@ -1885,6 +1918,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
                   emissive="#000000"
                   descriptor={`${component.name} ${component.modelDescriptor ?? ""} ${component.notes ?? ""}`}
                   assembly={component.assembly}
+                  groundFootprint={component.groundFootprint}
                   outline={isHovered || isSelected || component.uncertain
                     ? {
                       color: isHovered || isSelected ? previewStyle.outlineColor : "#D9A441",

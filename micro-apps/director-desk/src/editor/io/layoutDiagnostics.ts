@@ -39,6 +39,7 @@ export interface LayoutDiagnosticRecord {
       uncertain: boolean;
       supportComponentId?: string;
       assembly?: LayoutDraft["components"][number]["assembly"];
+      groundFootprint?: LayoutDraft["components"][number]["groundFootprint"];
       appearance?: { color?: string; roughness?: number; metalness?: number; frontDirectionDegrees?: number };
     }>;
     observations?: Array<{ componentId?: string; state: string; confidence: number }>;
@@ -91,8 +92,8 @@ function writeRecords(records: LayoutDiagnosticRecord[]) {
   }
 }
 
-const CANDIDATE_KEYS = ["spaceType", "observations", "relations", "components", "characters", "referenceCamera", "observationFormat", "visualObservations"] as const;
-const COMPONENT_KEYS = ["id", "category", "primitive", "semanticType", "position", "size", "rotationYDegrees", "confidence", "visible", "assembly", "appearance"] as const;
+const CANDIDATE_KEYS = ["spaceType", "observations", "relations", "components", "characters", "referenceCamera", "observationFormat", "visualObservations", "spatialReview"] as const;
+const COMPONENT_KEYS = ["id", "category", "primitive", "semanticType", "position", "size", "rotationYDegrees", "confidence", "visible", "assembly", "groundFootprint", "appearance"] as const;
 const CHARACTER_KEYS = ["id", "position", "height", "rotationYDegrees", "facingDirection", "supportComponentId", "confidence", "visible", "posture", "bodyType", "handGesture", "kneelVariant"] as const;
 const RELATION_KEYS = ["type", "fromId", "toId", "confidence"] as const;
 const OBSERVATION_KEYS = ["componentId", "state", "confidence"] as const;
@@ -100,7 +101,7 @@ const CAMERA_KEYS = ["position", "target", "fov", "imageAspectRatio", "confidenc
 const ASSEMBLY_KEYS = ["id", "primitive", "position", "size", "color", "roughness", "metalness", "opacity"] as const;
 const APPEARANCE_KEYS = ["color", "roughness", "metalness", "frontDirectionDegrees"] as const;
 const IMAGE_SURFACE_KEYS = ["id", "kind", "side", "bbox", "confidence", "visibility", "mainColor", "color", "appearance"] as const;
-const IMAGE_ITEM_KEYS = ["id", "name", "semanticType", "category", "bbox", "confidence", "visibility", "mainColor", "color", "appearance", "againstSurfaceId", "contactWallSide", "rearFeature", "bodyExtendsToward", "supportId", "partOfId"] as const;
+const IMAGE_ITEM_KEYS = ["id", "name", "semanticType", "category", "bbox", "confidence", "visibility", "mainColor", "color", "appearance", "againstSurfaceId", "contactWallSide", "rearFeature", "bodyExtendsToward", "supportId", "partOfId", "placement", "facingTowardId", "groundContacts", "groundFootprints", "visibleBbox", "completeBbox", "occludesIds"] as const;
 const IMAGE_PERSON_KEYS = ["id", "name", "bbox", "confidence", "visibility", "posture", "facingDirection", "kneelVariant", "handGesture", "supportId"] as const;
 
 function pick(source: unknown, keys: readonly string[]) {
@@ -110,7 +111,8 @@ function pick(source: unknown, keys: readonly string[]) {
 }
 
 function boundDiagnosticValue(value: unknown, depth = 0): unknown {
-  if (depth > 5) return undefined;
+  // Allow schema-bounded spatial polygons and holes while still capping nested values.
+  if (depth > 10) return undefined;
   if (typeof value === "string") return value.slice(0, 120);
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
   if (typeof value === "boolean" || value === null) return value;
@@ -128,7 +130,16 @@ function sanitizeCandidate(value: unknown): Record<string, unknown> | undefined 
   const candidate = pick(value, CANDIDATE_KEYS);
   if (!candidate) return undefined;
   if (typeof candidate.observationFormat === "string") candidate.observationFormat = candidate.observationFormat.slice(0, 48);
-  const visualObservations = pick(candidate.visualObservations, ["spaceType", "surfaces", "items", "people"]);
+  const visualObservations = pick(candidate.visualObservations, ["spaceType", "surfaces", "items", "people", "geometryEvidence"]);
+  if (visualObservations?.geometryEvidence && typeof visualObservations.geometryEvidence === "object") {
+    const evidence = pick(visualObservations.geometryEvidence, ["axes"]);
+    if (evidence) evidence.axes = Array.isArray(evidence.axes) ? evidence.axes.slice(0, 3).map((axis) => {
+      const boundedAxis = pick(axis, ["axis", "segments"]) ?? {};
+      boundedAxis.segments = Array.isArray(boundedAxis.segments) ? boundedAxis.segments.slice(0, 8).map((segment) => pick(segment, ["start", "end", "confidence"])) : [];
+      return boundedAxis;
+    }) : [];
+    visualObservations.geometryEvidence = evidence ?? {};
+  }
   if (visualObservations) {
     if (Array.isArray(visualObservations.surfaces)) {
       visualObservations.surfaces = visualObservations.surfaces.slice(0, 8).map((item) => {
@@ -142,6 +153,13 @@ function sanitizeCandidate(value: unknown): Record<string, unknown> | undefined 
         const imageItem = pick(item, IMAGE_ITEM_KEYS) ?? {};
         imageItem.appearance = pick(imageItem.appearance, ["color"]);
         imageItem.rearFeature = pick(imageItem.rearFeature, ["name", "bbox"]);
+        imageItem.groundContacts = Array.isArray(imageItem.groundContacts) ? imageItem.groundContacts.slice(0, 6).map((contact) => pick(contact, ["point", "kind", "visibility", "confidence"])) : undefined;
+        imageItem.groundFootprints = Array.isArray(imageItem.groundFootprints) ? imageItem.groundFootprints.slice(0, 3).map((footprint) => ({
+          ...pick(footprint, ["visibility", "confidence"]),
+          outer: Array.isArray(footprint?.outer) ? footprint.outer.slice(0, 16) : [],
+          ...(Array.isArray(footprint?.holes) ? { holes: footprint.holes.slice(0, 2).map((hole: unknown) => Array.isArray(hole) ? hole.slice(0, 12) : []) } : {}),
+        })) : undefined;
+        imageItem.occludesIds = Array.isArray(imageItem.occludesIds) ? imageItem.occludesIds.slice(0, 12) : undefined;
         return imageItem;
       });
     } else delete visualObservations.items;
@@ -150,11 +168,32 @@ function sanitizeCandidate(value: unknown): Record<string, unknown> | undefined 
     } else delete visualObservations.people;
     candidate.visualObservations = visualObservations;
   } else delete candidate.visualObservations;
+  if (candidate.spatialReview && typeof candidate.spatialReview === "object" && !Array.isArray(candidate.spatialReview)) {
+    const review = pick(candidate.spatialReview, ["attempted", "accepted", "providerModel", "promptHash", "providerFinishReason", "usage", "error"]);
+    if (typeof review?.providerModel === "string") review.providerModel = review.providerModel.slice(0, 100);
+    if (typeof review?.promptHash === "string" && !/^[a-f0-9]{64}$/i.test(review.promptHash)) delete review.promptHash;
+    if (typeof review?.providerFinishReason === "string") review.providerFinishReason = review.providerFinishReason.slice(0, 40);
+    if (typeof review?.error === "string") review.error = review.error.slice(0, 48);
+    if (review?.usage && typeof review.usage === "object") {
+      const usage = pick(review.usage, ["prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details", "completion_tokens_details"]);
+      for (const [key, value] of Object.entries(usage ?? {})) {
+        if (typeof value === "number" && Number.isFinite(value) && value >= 0) usage![key] = Math.floor(value);
+        else if (typeof value !== "number") delete usage![key];
+      }
+      review.usage = usage;
+    }
+    candidate.spatialReview = review;
+  } else delete candidate.spatialReview;
   if (Array.isArray(candidate.components)) {
     candidate.components = candidate.components.slice(0, 30).map((item) => {
       const component = pick(item, COMPONENT_KEYS);
       if (!component) return {};
       if (Array.isArray(component.assembly)) component.assembly = component.assembly.slice(0, 24).map((part) => pick(part, ASSEMBLY_KEYS) ?? {});
+      if (Array.isArray(component.groundFootprint)) component.groundFootprint = component.groundFootprint.slice(0, 3).map((part) => ({
+        confidence: part.confidence,
+        outer: Array.isArray(part.outer) ? part.outer.slice(0, 16) : [],
+        ...(Array.isArray(part.holes) ? { holes: part.holes.slice(0, 2).map((hole: unknown) => Array.isArray(hole) ? hole.slice(0, 12) : []) } : {}),
+      }));
       component.appearance = pick(component.appearance, APPEARANCE_KEYS);
       return component;
     });
@@ -219,6 +258,7 @@ export function recordNormalizedLayoutDraft(draft: LayoutDraft, generationId: st
         uncertain: component.uncertain,
         ...(component.supportComponentId ? { supportComponentId: component.supportComponentId } : {}),
         ...(component.assembly ? { assembly: component.assembly.map((part) => ({ ...part })) } : {}),
+        ...(component.groundFootprint ? { groundFootprint: component.groundFootprint.map((part) => ({ ...part })) } : {}),
         ...(component.appearance ? { appearance: {
           ...(component.appearance.color ? { color: component.appearance.color } : {}),
           ...(component.appearance.roughness !== undefined ? { roughness: component.appearance.roughness } : {}),

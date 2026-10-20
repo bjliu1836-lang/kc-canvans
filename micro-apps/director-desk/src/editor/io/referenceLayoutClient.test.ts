@@ -48,7 +48,7 @@ describe("requestReferenceLayout failure details", () => {
       visualObservations: {
         spaceType: "enclosed",
         surfaces: [{ id: "wall", kind: "wall", side: "image_back", bbox: [0, 0.1, 1, 0.8], confidence: 0.8 }],
-        items: [],
+        items: [{ id: "chair", name: "椅子", semanticType: "chair", category: "chair", bbox: [0.1, 0.3, 0.3, 0.8], confidence: 0.9, visibility: "visible", supportId: "desk", partOfId: "set", placement: "supported", facingTowardId: "target" }],
         diagnosticGenerationId: "provider-forged-id",
         cameraPosition: [0, 0, 0],
       },
@@ -67,10 +67,66 @@ describe("requestReferenceLayout failure details", () => {
     expect(JSON.stringify(record)).not.toContain("provider-forged-id");
     expect((record?.candidate as Record<string, unknown>)?.observationFormat).toBe("image-observations-v1");
     expect(JSON.stringify(record?.candidate)).toContain('"id":"wall"');
+    const candidateObservations = (record?.candidate as Record<string, unknown>)?.visualObservations as { items?: unknown[] } | undefined;
+    expect(candidateObservations?.items).toMatchObject([{
+      id: "chair", supportId: "desk", partOfId: "set", placement: "supported", facingTowardId: "target",
+    }]);
     expect(record?.normalized.components.some((component) => component.id === "wall")).toBe(true);
     expect(JSON.stringify(record?.candidate)).not.toContain("cameraPosition");
     const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
     expect(requestBody.outputFormat).toBe("image-observations-v1");
+  });
+
+  it("requests at most one spatial review when major-item evidence coverage is low and merges spatial fields only", async () => {
+    const observation = {
+      spaceType: "enclosed",
+      surfaces: [{ id: "floor", kind: "floor", side: "floor", bbox: [0, 0.65, 1, 1], confidence: 0.9, visibility: "visible" }],
+      items: [
+        { id: "sofa", name: "沙发", category: "sofa", semanticType: "sofa_main", bbox: [0.1, 0.2, 0.65, 0.8], confidence: 0.9, visibility: "visible" },
+        { id: "table", name: "茶几", category: "table", semanticType: "coffee_table", bbox: [0.35, 0.55, 0.65, 0.8], confidence: 0.9, visibility: "visible" },
+      ],
+    };
+    const footprint = { outer: [[0.1, 0.7], [0.65, 0.7], [0.65, 0.9], [0.1, 0.9]], visibility: "visible", confidence: 0.8 };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ observationFormat: "image-observations-v1", visualObservations: observation }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        observationFormat: "image-observations-v1",
+        spatialReviewPatch: { items: [{ id: "sofa", groundFootprints: [footprint] }] },
+        providerModel: "deepseek-flash-v4.1-1017",
+        promptHash: "a".repeat(64),
+        providerFinishReason: "stop",
+        usage: { total_tokens: 1200 },
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const draft = await requestReferenceLayout(image);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const reviewBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as Record<string, unknown>;
+    expect(reviewBody.observationStage).toBe("spatial-review");
+    expect((reviewBody.baseObservations as typeof observation).items[0]?.id).toBe("sofa");
+    const records = readLayoutDiagnosticRecords();
+    const record = records[records.length - 1];
+    const candidate = record?.candidate as { visualObservations?: typeof observation; spatialReview?: Record<string, unknown> } | undefined;
+    expect(candidate?.spatialReview).toMatchObject({ attempted: true, accepted: true, providerModel: "deepseek-flash-v4.1-1017", promptHash: "a".repeat(64) });
+    expect(candidate?.visualObservations?.items[0]).toMatchObject({ id: "sofa", name: "沙发", category: "sofa", groundFootprints: [footprint] });
+    expect(draft.diagnosticGenerationId).toBe(record?.generationId);
+  });
+
+  it("keeps the coarse draft when the single spatial review fails", async () => {
+    const observation = {
+      surfaces: [{ id: "floor", kind: "floor", side: "floor", bbox: [0, 0.65, 1, 1], confidence: 0.9, visibility: "visible" }],
+      items: [{ id: "sofa", name: "沙发", category: "sofa", semanticType: "sofa_main", bbox: [0.1, 0.2, 0.65, 0.8], confidence: 0.9, visibility: "visible" }],
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ observationFormat: "image-observations-v1", visualObservations: observation }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "DIRECTOR_LAYOUT_UPSTREAM_FAILURE" }), { status: 502 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const draft = await requestReferenceLayout(image);
+    expect(draft.components.length).toBeGreaterThan(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const records = readLayoutDiagnosticRecords();
+    const record = records[records.length - 1];
+    expect((record?.candidate as { spatialReview?: unknown } | undefined)?.spatialReview).toMatchObject({ attempted: true, accepted: false });
   });
 
   it("rejects an invalid observation response instead of falling back to a legacy draft", async () => {
