@@ -8,20 +8,24 @@
     "clean": "node -e \"const fs=require('fs'),path=require('path'); const clean=p=>{if(!fs.existsSync(p))return; for(const e of fs.readdirSync(p,{withFileTypes:true})){const f=path.join(p,e.name); if(e.isDirectory()){clean(f); fs.rmdirSync(f);} else fs.unlinkSync(f);}}; clean('dist');\"",
     "build:director-desk": "npm --prefix micro-apps/director-desk ci && npm --prefix micro-apps/director-desk run build",
     "build": "npm run build:director-desk && npm run clean && vite build",
+    "test:image-to-3d": "node --test tests/worker-image-to-3d.test.mjs tests/worker-image-to-3d-miniflare.test.mjs",
     "preview": "vite preview",
     "deploy:cloudflare": "npm run build && npx wrangler deploy --keep-vars",
     "server": "node server/server.mjs",
     "start": "node server/server.mjs"
   },
   "dependencies": {
-    "lucide-react": "^0.562.0",
     "@google/genai": "^1.37.0",
-    "react-dom": "^19.2.3",
-    "react": "^19.2.3"
+    "@gradio/client": "2.7.1",
+    "lucide-react": "^0.562.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "miniflare": "4.20260312.0",
+    "playwright-core": "1.55.1",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }

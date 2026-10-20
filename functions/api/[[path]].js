@@ -15,6 +15,7 @@ import {
   summarizeDirectorLayoutProviderEnvelope,
   summarizeDirectorLayoutObservationOutput,
 } from '../shared/director-layout-observations.js';
+import { handleImageTo3dRequest } from '../../worker/imageTo3dJob.js';
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
   status,
@@ -1494,6 +1495,7 @@ export async function onRequest(context) {
     if (pathname === '/api/generate/multi-angle') return await handleMultiAngleGeneration(request, env);
     if (pathname === '/api/generate/text') return await handleTextGeneration(request, env);
     if (pathname === '/api/director-layout') return await handleDirectorLayoutGeneration(request, env);
+    if (pathname.startsWith('/api/image-to-3d/')) return await handleImageTo3dRequest({ request, env }, requireAuth);
     if (pathname === '/api/generate/audio') return await handleAudioGeneration(request, env);
     if (pathname === '/api/generate/video') return await handleVideoCreate(request, env);
     if (pathname === '/api/generate/video/poll') return await handleVideoPoll(request, env);

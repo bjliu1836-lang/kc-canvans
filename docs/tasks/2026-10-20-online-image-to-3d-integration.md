@@ -1,0 +1,66 @@
+# 线上单物体图片生成 GLB 接入
+
+状态：本地 mock 与干净依赖闭环完成；已按复核补齐 provider 状态错误分类。当前进入受控提交、secret配置、一次真实生成与部署验收阶段；截至本记录尚未配置secret、没有新增真实 HF GPU 调用，也没有部署。
+
+## 范围与边界
+
+- 本 MVP 仅处理单张图中的一个主体：上传、创建线上任务、查询状态、持久化 GLB、预览并确认导入导演台。
+- “整房识别→多个可编辑对象/空间关系”继续走现有观察与程序布局路径；本任务不承诺把整房输入变为精确房间重建。
+- Hugging Face 凭据只在服务端 secret；不进入浏览器、bundle、日志、过程文件或项目源码。
+- 保留现有 `/api/director-layout` 输入输出合同和手动模型导入；不把 GLB 塞进 observations schema。
+- 不采购或升级 GPU 计划；若检查到将自动收费或必须购买资源，先停止并回报。
+
+## 当前架构审计
+
+- [x] 基线与工作区：`HEAD=555075203c79ee1a08ad9f40f223be74452ae8e3`，`master` 跟踪 `origin/main`。工作区存在大量先前 dirty/untracked，须按文件与 hunk 保护；本任务至此未改产品源码。
+- [x] 本机 HF 试验：现有 `run_authenticated_trellis_centered_once.py` 通过隔离 `gradio_client` 和 `huggingface_hub.get_token()`，用本机 HF 凭据调用 `trellis-community/TRELLIS`。修正后的输入是人工绘制的单椅 alpha mask，单图 `multiimages=[]`；约 50 秒成功生成 1.735 MB GLB。修正结果仍需人工复核：偏宽、带地面碎片。匿名尝试曾因 ZeroGPU 余量为 0 失败。已有结果是本机实验，不代表线上集成或整房还原。
+- [x] 产品接口：`/api/director-layout` 目前接受单张图并返回 `visualObservations`，再转换成 `LayoutDraft`；没有 HF/TRELLIS 生成任务路由、GLB 结果合同或持久任务记录。该合同保持独立。
+- [x] 导入路径：导演台已有 `.glb` 本地文件导入、浏览器本地资产保存、Three.js 渲染与刷新恢复；它接收已有文件，不会调用生成服务。
+- [x] Cloudflare 配置：`wrangler.toml` 仅配置静态 assets；R2 binding 当前是注释。没有发现 Queue、D1、KV 或 Durable Object binding。现有媒体上传在无 `MEDIA_BUCKET` 时退到 Cache API `cacheOnly`，不适合持久保存生成任务和 GLB。
+- [x] 凭据存在性：本机官方 HF token cache 只读检查为存在（仅输出布尔值）；Cloudflare `wrangler secret list` 只读取名字，列出 4 个现有 Director Layout secret，无 HF/TRELLIS secret。未读取或输出任何 secret 值。
+- [x] Cloudflare CLI 状态：`wrangler whoami` 成功，已认证的账号身份未记录；KV 与 D1 列表为空。只读 R2 bucket list 请求失败，具体权限/服务原因未确认。
+- [x] Cloudflare 资源创建：按主代理批准创建专用 KV namespace `kc-image-to-3d-assets`，ID `a9b26b87d0494485a5ecde5a8f030662`；`wrangler.toml` 配置 binding `IMAGE_TO_3D_ASSETS`。加入 SQLite Durable Object binding `IMAGE_TO_3D_JOBS` / class `ImageTo3DJob` / migration `image-to-3d-v1`，不启用 R2 或付费资源。
+- [x] API 鉴权现状：生成/布局类 Worker handler 会校验 app bearer token，但部署 secret 清单没有 `LOGIN_PASSWORD`/`AUTH_SECRET`；源码在未设置时回退到固定默认值，token 的 `sub` 也是固定 `kc-user`。这是共享口令型门槛，不是强的操作者身份/按用户所有权隔离。新任务至少必须沿用 `requireAuth`，再使用随机 job capability 或其他服务端校验；同时加全局并发/次数上限。不要只靠 Origin/CORS。
+- [x] `@gradio/client` 在 Cloudflare Worker runtime 的最小兼容 probe：repo 外临时安装 2.7.1，以 `esbuild platform=browser` 打包进 Wrangler 所用 Miniflare/workerd，在内存 Worker binding 注入 token，官方 `Client.connect('trellis-community/TRELLIS', {token}) + view_api()` 返回 HTTP 200，并发现 `/generate_and_extract_glb`。只验证 connect/view_api 和 Space 元数据，不发 GPU job；不能据此推断当前 ZeroGPU quota 或生成权限。
+- [x] Token 生命周期只读元数据：本机凭据为带 `expires_at` 的短期 OAuth access token，当前审计有效期至 `2026-11-19 04:28:38 UTC`；代码不做OAuth刷新。上线运维需到期前通过官方本机 `get_token()` 更新 Worker `HF_TOKEN` secret；可选 `HF_TOKEN_EXPIRES_AT` 用于预检，过期映射为 `PROVIDER_AUTH_UPDATE_REQUIRED`。未读取/记录token、refresh token值。
+- [x] Durable Object alarm 与 Gradio job 恢复策略：官方 SDK 的 connect/view_api 已通过。SDK `SubmitIterable` 暴露 `wait_for_id()`/`event_id()`，但没有对既有event恢复迭代的接口；实现提交前落库`submit_started`、提交回执event ID立即落库，回执未确认或进程重启后无恢复接口时状态改为`unknown`，绝不二次submit。10分钟硬截止；unknown占并发20分钟后释放服务入口（其日额度仍消耗），UI须说明远端任务可能继续执行。Alarm重入只对尚未开始submit的任务启动provider。
+
+## 执行清单
+
+1. [x] 记录已有生成回执、现有产品接口、导入能力、持久化和凭据缺口；保留既有实验文件不覆盖。
+2. [x] 架构复核/资源：通过官方 SDK connect/view_api 握手；创建DO SQLite/alarm及KV绑定。KV仅放<=20MiB GLB二进制，任务状态在DO SQL；单图输入持久化前将按512KiB SQLite BLOB行拆块写入DO，限制总文件大小并在成功/失败/unknown后清理。报警恢复无SDK既有event恢复接口时保守置为unknown，不重发。
+3. [x] 独立任务API：`POST/GET/POST cancel/GET asset` 位于 `/api/image-to-3d/jobs`；沿用bearer并额外验证运营者访问码，job/asset随机capability只持久化hash；幂等ID，单活跃任务、每日2次、20分钟unknown lease；SQLite DO chunks持久化输入/状态，KV仅放<=20MiB GLB。
+4. [x] 服务端adapter与状态机：使用官方 `@gradio/client@2.7.1`，先 `/start_session` 和 `/preprocess_image`，再提交 `/generate_and_extract_glb`；固定live API 10个可见字段，hidden `is_multiimage` State保持默认false。persist submit_started/event ID，alarm超时10分钟；不确定提交不自动重发。最终文件限定Space源origin，下载时 `redirect: manual` 并拒绝3xx/跨源response，检查字节上限及GLB magic。
+5. [x] 在产品可见入口 `模型库→我的模型→图片生成 3D 资产` 复用现有 `readLocalModelFile`/director store导入；同一服务端持久GLB URL用于预览和导入，刷新后保留session任务和已导入本地资产。生成UI不复用整房布局schema。
+6. [x] 后端定向单测及Workerd/Miniflare SQL DO+KV路由测试；真provider仍待复核，未发起新GPU任务。
+7. [x] 隔离Vite生产构建成功，不覆盖 `public/`；mock浏览器流程已跑上传→任务运行中刷新→同ID恢复→完成/GLB预览→导入→刷新后资产可见。回执与截图在下方过程记录路径。
+8. [x] 将核心代码、状态分类和依赖闭包交主代理复核；候选提交需仅含本任务源/测试/文档与基于HEAD重建的root lock。旧public、artifact及其它dirty明确排除。
+9. [ ] 在主代理批准的已授权窗口内按stdin安全流程配置HF_TOKEN与IMAGE_TO_3D_ACCESS_KEY；只读确认凭据元数据/免费配额，不购买或启用付费；随后仅提交一次单物体任务。
+10. [ ] 真实线上任务完成后记录task/job回执、CF版本与bundle指纹，验证同一GLB预览/应用/刷新后的mesh bounds与变换，并对结果做needsReview质量判断。
+11. [ ] 仅提交本任务核定闭包、推送`origin HEAD:main`并部署；检查线上版本激活与任务入口后，更新最终运行回执。
+
+## 过程记录
+
+- 2026-10-20：只读审计命令：`git status --short --branch`、`git rev-parse HEAD origin/main`、`rg --files`、`rg -n`；HEAD 和 origin/main 均为 `555075203c79ee1a08ad9f40f223be74452ae8e3`。
+- 2026-10-20：只读检查 HF 本机 token 存在性（仅输出 `true/false`），未显示值；只读 `wrangler secret list --name kc-canvans`（仅显示 secret 名称）无 HF/TRELLIS 相关 secret。
+- 2026-10-20：只读 `wrangler r2 bucket list` 失败；现阶段 R2 可用性未知。未创建资源、未写 secret、未运行真实 provider。
+- 2026-10-20：`wrangler whoami` 成功（不记账号身份）；KV/D1 read-only list 无资源返回；不能据此确认创建资源权限。R2 list 失败，资源是否已有仍未确定。
+- 2026-10-20：repo 外临时安装 `@gradio/client@2.7.1`，esbuild 打包后在 Miniflare/workerd 内执行官方 `Client.connect + view_api`，HF_TOKEN只作为内存 binding，不打印/落盘。返回 `HTTP 200`，包含 `/generate_and_extract_glb`，11个API输入参数、3个输出；没有调用 `submit`，GPU调用次数为0。该探针只验证SDK/Space handshake，不代表ZeroGPU任务可用或配额足够。
+- 2026-10-20：按批准创建 Cloudflare KV namespace `kc-image-to-3d-assets`，Wrangler 返回 ID `a9b26b87d0494485a5ecde5a8f030662`。配置绑定为 `IMAGE_TO_3D_ASSETS`；DO binding/migration 名为 `IMAGE_TO_3D_JOBS` / `ImageTo3DJob` / `image-to-3d-v1`。未创建R2或收费资源。
+- 2026-10-20：建议绑定命名及数据分工已发送主代理复核：`IMAGE_TO_3D_JOBS`→`ImageTo3DJob` SQLite DO，`IMAGE_TO_3D_ASSETS`→`kc-image-to-3d-assets` KV；尚未创建任何外部资源。
+- 2026-10-20：鉴权代码检查：`functions/api/[[path]].js:67-93,877-883,1012-1015`；当前 bearer auth 可复用为第一道门，但部署 secret 名称中没有 `LOGIN_PASSWORD`/`AUTH_SECRET`，且当前固定 subject 不提供不同操作者身份。需在新昂贵生成路由加限流/并发限制，并经主代理审查登录 secret 配置动作。
+- 2026-10-20：官方接入文档只读检查：Gradio JS Client 支持 `Client.connect(..., { token })`、异步 `submit`、status/data 事件及 Blob 上传；HF Spaces 文档支持检查公开 API/OpenAPI。官方参考链接：[Gradio JS Client](https://gradio.app/docs/js-client)、[HF Spaces API endpoints](https://huggingface.co/docs/hub/en/spaces-api-endpoints)。Worker 兼容性、真实 Space 授权与配额尚未验证。
+- 2026-10-20：官方SDK类型/源码只读核对：`SubmitIterable`有`wait_for_id()`和`event_id()`，源码中的ID需待`/run` POST应答后才可知；SDK没有恢复已有event流的公开方法。因此新实现必须先持久化submit_started，拿到ID后立刻持久化；alarm重启或提交结果不确定时置unknown而绝不重发。
+- 2026-10-20：冻结成功receipt的`view_api()`列出10个用户可见输入字段（image、multiimages、seed、两阶段guidance/steps、multiimage_algo、mesh_simplify、texture_size）；TRELLIS源码另有隐藏`is_multiimage` State，默认false。产品保持单图并使用Space官方`/preprocess_image`后再传入`generate_and_extract_glb`（其Python函数注明`preprocess_image=False`，不能跳过UI上传预处理）；初始真实单椅成功实验使用已人工透明mask并中心化的518x518图作为已预处理输入，本项目不实现另一套背景抠除算法。
+- 2026-10-20：实现文件已接线：`worker/imageTo3dProvider.js`、`worker/imageTo3dJob.js`、`worker/index.js`、`functions/api/[[path]].js`、`wrangler.toml`、前端 `imageTo3dClient.ts`/`AssetImportPanel.tsx`/`GeneratedAssetPreview.tsx`/`ViewportToolbar.tsx`、测试与mock fixture。产品settings未包含mock provider开关；只有隔离测试bundle通过esbuild alias替换provider。
+- 2026-10-20：真实浏览器调试先复现两处UI边界并窄修：①为恢复响应丢失而先保存session后，第一次status GET可能先于POST在DO内落库并返回404，面板以前停止轮询；现在仅对`JOB_NOT_FOUND`做有界8次×500ms GET重试，不重发任务POST。②确认导入路径漏引入既有`readLocalModelFile`，已补 import。
+- 2026-10-20：mock浏览器回执 `artifacts/online-image-to-3d-integration-2026-10-20/browser-mock-receipt.json`；截图 `browser-generation-preview.png`（password访问码已遮蔽，预览为mock三角GLB）和 `browser-imported-after-reload.png`。运行中刷新前后jobId一致，创建POST一次，asset GET 200，确认导入后refresh能在“我的模型”列表看到`trellis-*`并在场景属性面板见对象。providerCalls=0；mock只证明任务/资产/导入链路，不代表HF输出质量。
+- 2026-10-20：验证命令与结果：`node --test tests/worker-image-to-3d.test.mjs tests/worker-image-to-3d-miniflare.test.mjs`（此前修复后12/12；新增redirect拒绝单测后待最后一轮运行）、在`micro-apps/director-desk`执行`npx vitest run src/editor/canvas/ViewportToolbar.test.tsx`（36/36），`npx tsc --noEmit --pretty false`（exit 0），`npm run build -- --outDir D:/无限画布kc/tapnow-base/artifacts/online-image-to-3d-integration-2026-10-20/director-desk-build`（成功，未写public）。
+- 待补项已收窄：主代理审查核心差异；配置服务端`HF_TOKEN`/operator secret；查询账单/额度只读状态；一次真实调用与GLB质量人工评估；隔离闭环通过后主代理审查再决定提交/部署和线上复核。整房多对象拆分和多视图融合不在MVP。
+
+## 复核补记
+
+- 2026-10-20：按主代理复核，TRELLIS status event 分类现覆盖 `broken=true`、`broken_connection`、`connection_error` 与 `session_not_found`，这些提交后不确定状态保持 unknown；额度不足、401/令牌拒绝、容量限制各返回安全错误码，普通函数错误仍为确定失败。原始 provider `message` 不写入状态或响应。新增 status-event 回归后 Worker/Miniflare测试13/13通过，覆盖连接中断、额度不足、401、普通函数异常与消息脱敏。
+- 2026-10-20：候选 root lock 从 `HEAD:package-lock.json` 派生，只增明确的 `@gradio/client@2.7.1`、`miniflare@4.20260312.0`、`playwright-core@1.55.1`。重算统计新增55个package记录、0删除、原有package版本0变化；与工作区当前 `package-lock.json` SHA256一致（`1BFA8A2A3C1B510673AC52C360583F294B26ED3D2786B5437A7B5DE10E209E35`）。`@gradio/client`锁依赖闭包仅含自身及`fetch-event-stream`，没有命中当前npm audit漏洞项；此结论只针对该新增生产依赖闭包，不代表全仓audit无漏洞。全量root audit报告17项（1低、2中、13高、1严重），micro-app audit 9项（4中、5高）；未运行audit fix。新devDependency Miniflare仅用于Workerd测试，不被Worker入口导入。
+- 2026-10-20：全新HEAD+本轮补丁隔离副本 `artifacts/online-image-to-3d-integration-2026-10-20/clean-ci-head-plus-image-to-3d` 起始无 `node_modules`/junction。root `npm ci` 成功（174 packages），microapp `npm ci` 成功（232 packages，微应用依赖未改，使用HEAD lock）；完整 `npm run build` 成功（微应用2275 modules，root1746 modules），Wrangler `deploy --dry-run` 成功（241.80KiB / gzip 61.96KiB，检查配置后`--dry-run: exiting now`）。输出位于该artifact隔离副本/目录，不写用户public和当前checkout依赖目录。重新在该副本跑Worker/Miniflare 13/13、ViewportToolbar 36/36通过。
+- 2026-10-20：候选纳入清单共17个文件：`functions/api/[[path]].js`、`worker/index.js`、`worker/imageTo3dJob.js`、`worker/imageTo3dProvider.js`、`wrangler.toml`、root `package.json`/`package-lock.json`、Director Desk `imageTo3dClient.ts`/`AssetImportPanel.tsx`/`GeneratedAssetPreview.tsx`/`ViewportToolbar.tsx`/`styles/index.css`/`ViewportToolbar.test.tsx`、两个Worker测试与`tests/fixtures/image-to-3d-mock-provider.js`、本任务文档。生成后的`public/`、其它package-lock、mock截图/回执和其余历史dirty不纳入。API/Create、toolbar/styles与package文件按本轮diff hunk审查，不扩大提交范围。

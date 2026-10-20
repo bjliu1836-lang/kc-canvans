@@ -527,6 +527,20 @@ it("shows a centered empty state with a local import action inside the my-models
   expect(within(emptyState).getByRole("button", { name: "本地导入" })).toBeInTheDocument();
 });
 
+it("opens single-object image generation from the product model-library entry", async () => {
+  const user = userEvent.setup();
+  render(<ViewportToolbar />);
+
+  await user.click(screen.getByRole("button", { name: "模型库" }));
+  await user.click(screen.getByRole("tab", { name: "我的模型" }));
+  await user.click(screen.getByRole("button", { name: "图片生成 3D 资产" }));
+
+  expect(screen.getByRole("dialog", { name: "图片生成3D资产" })).toBeInTheDocument();
+  expect(screen.getByLabelText("3D生成服务访问码")).toHaveAttribute("type", "password");
+  expect(screen.getByLabelText("单物体图片")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "返回模型库" })).toBeInTheDocument();
+});
+
 it("imports a local model into the my-models tab without adding it to the scene immediately", async () => {
   const user = userEvent.setup();
   mockReadLocalModelFile.mockResolvedValue({

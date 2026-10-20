@@ -8,6 +8,18 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/api/*"]
 
+[[kv_namespaces]]
+binding = "IMAGE_TO_3D_ASSETS"
+id = "a9b26b87d0494485a5ecde5a8f030662"
+
+[[durable_objects.bindings]]
+name = "IMAGE_TO_3D_JOBS"
+class_name = "ImageTo3DJob"
+
+[[migrations]]
+tag = "image-to-3d-v1"
+new_sqlite_classes = ["ImageTo3DJob"]
+
 [vars]
 SEEDREAM_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 SEEDREAM_MODEL_ID = "doubao-seedream-5-0-260128"
@@ -18,6 +30,7 @@ QWEN_EDIT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 QWEN_EDIT_ENDPOINT = "/services/aigc/multimodal-generation/generation"
 QWEN_EDIT_MODEL = "qwen-image-edit-plus-2025-12-15"
 QWEN_EDIT_WATERMARK = "true"
+HF_TOKEN_EXPIRES_AT = "2026-11-19T04:28:38Z"
 
 # Seedance video — Volcengine Ark / doubao-seedance (PRIMARY, non-secret config).
 # API key is set separately as a secret:

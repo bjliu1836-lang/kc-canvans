@@ -4345,6 +4345,82 @@ textarea:focus-visible {
   overflow-y: auto;
 }
 
+.model-library-my-models-actions {
+  display: flex;
+  justify-content: flex-end;
+  height: 38px;
+  padding: 4px 20px;
+}
+
+.model-library-panel:has(.model-library-my-models-actions) .model-library-grid,
+.model-library-panel:has(.model-library-my-models-actions) .model-library-empty-state {
+  height: calc(100% - 120px);
+}
+
+.model-library-image-to-3d-content {
+  height: calc(100% - 41px);
+  padding: 8px 12px 14px;
+  overflow-y: auto;
+}
+
+.model-library-image-to-3d-content .image-to-3d-generation-panel {
+  width: 100%;
+}
+
+.model-library-image-to-3d-content .asset-import-item {
+  gap: 7px;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+}
+
+.model-library-image-to-3d-content .asset-import-item input:not([type="file"]) {
+  width: 100%;
+  min-height: 32px;
+  margin-top: 4px;
+  padding: 6px 9px;
+  border: 1px solid rgb(var(--border-rgb) / 0.45);
+  border-radius: 8px;
+  color: rgb(var(--text-rgb));
+  background: rgb(var(--field-rgb) / 0.92);
+}
+
+.model-library-image-to-3d-content .asset-import-item input[type="file"] {
+  display: block;
+  max-width: 100%;
+  margin-top: 5px;
+  color: rgb(var(--text-dim-rgb));
+  font-size: 11px;
+}
+
+.model-library-image-to-3d-content .asset-import-item button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgb(var(--border-rgb) / 0.3);
+  border-radius: 8px;
+  color: rgb(var(--text-rgb));
+  background: rgb(var(--surface-rgb) / 0.8);
+  cursor: pointer;
+}
+
+.model-library-image-to-3d-content .asset-import-item button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.model-library-back-button {
+  border: 0;
+  padding: 4px 8px;
+  color: rgb(var(--text-dim-rgb));
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.model-library-back-button:hover {
+  color: rgb(var(--accent-rgb));
+}
+
 .model-library-grid::-webkit-scrollbar {
   width: 6px;
 }

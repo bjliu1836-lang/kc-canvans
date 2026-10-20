@@ -1,4 +1,5 @@
 import { onRequest as handleApiRequest } from '../functions/api/[[path]].js';
+export { ImageTo3DJob } from './imageTo3dJob.js';
 
 export default {
   async fetch(request, env, context) {

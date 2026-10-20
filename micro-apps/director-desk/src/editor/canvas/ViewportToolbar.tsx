@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { requestViewportCapture } from "../io/captureBridge";
 import { readLocalModelFile } from "../loaders/localModelImport";
+import { AssetImportPanel } from "../panels/AssetImportPanel";
 import {
   inspectCharacterModelFile,
   type CharacterAssetInspection,
@@ -137,6 +138,7 @@ export function ViewportToolbar({
   const [geometryMenuOpen, setGeometryMenuOpen] = useState(false);
   const [crowdPanelOpen, setCrowdPanelOpen] = useState(false);
   const [modelLibraryOpen, setModelLibraryOpen] = useState(false);
+  const [imageTo3dPanelOpen, setImageTo3dPanelOpen] = useState(false);
   const [aspectRatioPanelOpen, setAspectRatioPanelOpen] = useState(false);
   const [pendingCharacterImport, setPendingCharacterImport] = useState<{
     file: File;
@@ -256,6 +258,7 @@ export function ViewportToolbar({
       setGeometryMenuOpen(false);
       setCrowdPanelOpen(false);
       setModelLibraryOpen(false);
+      setImageTo3dPanelOpen(false);
       setAspectRatioPanelOpen(false);
     }
 
@@ -570,6 +573,7 @@ export function ViewportToolbar({
 
   function toggleModelLibrary() {
     setModelLibraryOpen((isOpen) => !isOpen);
+    setImageTo3dPanelOpen(false);
     setCharacterMenuOpen(false);
     setGeometryMenuOpen(false);
     setCrowdPanelOpen(false);
@@ -902,20 +906,37 @@ export function ViewportToolbar({
           ref={modelLibraryPanelRef}
           className="model-library-panel"
           role="dialog"
-          aria-label="模型库"
+          aria-label={imageTo3dPanelOpen ? "图片生成3D资产" : "模型库"}
           style={modelLibraryPanelStyle}
         >
           <div className="model-library-header">
-            <h2 className="model-library-title">模型库</h2>
+            <h2 className="model-library-title">{imageTo3dPanelOpen ? "图片生成 3D 资产" : "模型库"}</h2>
+            {imageTo3dPanelOpen ? (
+              <button
+                className="model-library-back-button"
+                type="button"
+                onClick={() => setImageTo3dPanelOpen(false)}
+              >
+                返回模型库
+              </button>
+            ) : null}
             <button
               aria-label="关闭模型库"
               className="top-bar-action-button model-library-close-button"
               type="button"
-              onClick={() => setModelLibraryOpen(false)}
+              onClick={() => {
+                setModelLibraryOpen(false);
+                setImageTo3dPanelOpen(false);
+              }}
             >
               <X aria-hidden="true" size={16} strokeWidth={1.8} />
             </button>
           </div>
+          {imageTo3dPanelOpen ? (
+            <div className="model-library-image-to-3d-content">
+              <AssetImportPanel />
+            </div>
+          ) : <>
           <div className="model-library-tabs" role="tablist" aria-label="模型分类">
             {MODEL_LIBRARY_CATEGORIES.map((category) => {
               const active = category.id === activeModelLibraryCategoryId;
@@ -934,6 +955,17 @@ export function ViewportToolbar({
               );
             })}
           </div>
+          {activeModelLibraryCategoryId === "my-models" ? (
+            <div className="model-library-my-models-actions">
+              <button
+                className="model-library-empty-action"
+                type="button"
+                onClick={() => setImageTo3dPanelOpen(true)}
+              >
+                图片生成 3D 资产
+              </button>
+            </div>
+          ) : null}
           {activeModelLibraryCategoryId === "my-models" && activeModelLibraryItems.length === 0 ? (
             <div className="model-library-empty-state object-search-empty-state" role="status" aria-label="暂无任何模型">
               <span className="object-search-empty-icon" data-testid="my-models-empty-icon">
@@ -1032,6 +1064,7 @@ export function ViewportToolbar({
               ) : null}
             </div>
           )}
+          </>}
         </div>
       ) : null}
       {aspectRatioPanelOpen ? (
