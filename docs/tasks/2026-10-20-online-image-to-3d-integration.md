@@ -1,6 +1,6 @@
 # 线上单物体图片生成 GLB 接入
 
-状态：静态连接修复已推送并部署：commit `e815c416c027f352dab4e584c88bb41a9c0d31ae`，Worker Version ID `3dee18a8-e325-4a6c-a227-904879fff2bf`。第一条真实任务曾创建并终态 `failed/PROVIDER_FAILED`，尚无成功GLB。真实518图CPU-only路径已在workerd运行至GPU提交门前并主动停止。另发现并修复了创建POST pending期间过早开始status轮询的前端竞态；该小修已通过4.5秒延迟回归，待单独提交/部署。只有最终版本部署并核实后才执行一次真实GPU提交/预览导入验收。旧任务的公开status不返回provider event ID，不能仅凭其泛化错误字段直证是否到达上游；本地同代码路径复现证明connect失败发生在提交前。
+状态：单物体线上生成已完成真实验收。修正 `Client.connect` receiver并部署版本 `400fb516ade7ffa5a8cde05316564d1fa4227e63`（Worker Version ID `aaae070a-641d-4754-b58b-5ed06e0be2e8`）后，对冻结的居中518单椅图仅发起一次新任务，状态从 `queued`→`processing/waiting-in-queue`→`processing/saving-result`→`completed`。GLB已持久化、预览、确认导入并在刷新后恢复；三阶段实际mesh bounds与matrixWorld一致。产物仍明显偏宽、近沙发形，底边有碎片且材质偏暗，质量保持 `needsReview`；这不代表整房识别或空间重建已解决。当前正在修正每日额度统计语义并准备窄提交/部署；此前失败任务与本次成功任务分开计数：共2次任务创建，实际TRELLIS提交1次。
 
 ## 范围与边界
 
@@ -23,13 +23,13 @@
 - [x] API 鉴权现状：生成/布局类 Worker handler 会校验 app bearer token，但部署 secret 清单没有 `LOGIN_PASSWORD`/`AUTH_SECRET`；源码在未设置时回退到固定默认值，token 的 `sub` 也是固定 `kc-user`。这是共享口令型门槛，不是强的操作者身份/按用户所有权隔离。新任务至少必须沿用 `requireAuth`，再使用随机 job capability 或其他服务端校验；同时加全局并发/次数上限。不要只靠 Origin/CORS。
 - [x] `@gradio/client` 在 Cloudflare Worker runtime 的最小兼容 probe：repo 外临时安装 2.7.1，以 `esbuild platform=browser` 打包进 Wrangler 所用 Miniflare/workerd，在内存 Worker binding 注入 token，官方 `Client.connect('trellis-community/TRELLIS', {token}) + view_api()` 返回 HTTP 200，并发现 `/generate_and_extract_glb`。只验证 connect/view_api 和 Space 元数据，不发 GPU job；不能据此推断当前 ZeroGPU quota 或生成权限。
 - [x] Token 生命周期只读元数据：本机凭据为带 `expires_at` 的短期 OAuth access token，当前审计有效期至 `2026-11-19 04:28:38 UTC`；代码不做OAuth刷新。上线运维需到期前通过官方本机 `get_token()` 更新 Worker `HF_TOKEN` secret；可选 `HF_TOKEN_EXPIRES_AT` 用于预检，过期映射为 `PROVIDER_AUTH_UPDATE_REQUIRED`。未读取/记录token、refresh token值。
-- [x] Durable Object alarm 与 Gradio job 恢复策略：官方 SDK 的 connect/view_api 已通过。SDK `SubmitIterable` 暴露 `wait_for_id()`/`event_id()`，但没有对既有event恢复迭代的接口；实现提交前落库`submit_started`、提交回执event ID立即落库，回执未确认或进程重启后无恢复接口时状态改为`unknown`，绝不二次submit。10分钟硬截止；unknown占并发20分钟后释放服务入口（其日额度仍消耗），UI须说明远端任务可能继续执行。Alarm重入只对尚未开始submit的任务启动provider。
+- [x] Durable Object alarm 与 Gradio job 恢复策略：官方 SDK 的 connect/view_api 已通过。SDK `SubmitIterable` 暴露 `wait_for_id()`/`event_id()`，但没有对既有event恢复迭代的接口；实现提交前落库`submit_started`、提交回执event ID立即落库，回执未确认或进程重启后无恢复接口时状态改为`unknown`，绝不二次submit。10分钟硬截止；unknown占并发20分钟后释放服务入口。每日上限按滚动24小时内 `submit_started=1` 的任务计数，只有进入provider生成提交的任务消耗额度，前置连接/预处理失败不扣。
 
 ## 执行清单
 
 1. [x] 记录已有生成回执、现有产品接口、导入能力、持久化和凭据缺口；保留既有实验文件不覆盖。
 2. [x] 架构复核/资源：通过官方 SDK connect/view_api 握手；创建DO SQLite/alarm及KV绑定。KV仅放<=20MiB GLB二进制，任务状态在DO SQL；单图输入持久化前将按512KiB SQLite BLOB行拆块写入DO，限制总文件大小并在成功/失败/unknown后清理。报警恢复无SDK既有event恢复接口时保守置为unknown，不重发。
-3. [x] 独立任务API：`POST/GET/POST cancel/GET asset` 位于 `/api/image-to-3d/jobs`；沿用bearer并额外验证运营者访问码，job/asset随机capability只持久化hash；幂等ID，单活跃任务、每日2次、20分钟unknown lease；SQLite DO chunks持久化输入/状态，KV仅放<=20MiB GLB。
+3. [x] 独立任务API：`POST/GET/POST cancel/GET asset` 位于 `/api/image-to-3d/jobs`；沿用bearer并额外验证运营者访问码，job/asset随机capability只持久化hash；幂等ID，单活跃任务、滚动24小时最多2次provider提交、20分钟unknown lease；SQLite DO chunks持久化输入/状态，KV仅放<=20MiB GLB。
 4. [x] 服务端adapter与状态机：使用官方 `@gradio/client@2.7.1`，先 `/start_session` 和 `/preprocess_image`，再提交 `/generate_and_extract_glb`；固定live API 10个可见字段，hidden `is_multiimage` State保持默认false。persist submit_started/event ID，alarm超时10分钟；不确定提交不自动重发。最终文件限定Space源origin，下载时 `redirect: manual` 并拒绝3xx/跨源response，检查字节上限及GLB magic。
 5. [x] 在产品可见入口 `模型库→我的模型→图片生成 3D 资产` 复用现有 `readLocalModelFile`/director store导入；同一服务端持久GLB URL用于预览和导入，刷新后保留session任务和已导入本地资产。生成UI不复用整房布局schema。
 6. [x] 后端定向单测及Workerd/Miniflare SQL DO+KV路由测试；真provider仍待复核，未发起新GPU任务。
@@ -37,9 +37,10 @@
 8. [x] 将核心代码、状态分类和依赖闭包交主代理复核；候选提交需仅含本任务源/测试/文档与基于HEAD重建的root lock。旧public、artifact及其它dirty明确排除。
 9. [x] `HF_TOKEN` 与 `IMAGE_TO_3D_ACCESS_KEY` 已以批准的secret流程配置；访问码保存在本机私有文件。HF账户读取结果为 `isPro=false`、`canPay=false`；未启用付费额度。
 10. [x] 使用固定真实椅子GLB做本地 mock 浏览器验证：预览/应用/刷新后三阶段的实际 mesh world bounds 与 `matrixWorld` 一致；边界与回执见下方。
-11. [~] 接入已部署到线上版本 `e815c416c027f352dab4e584c88bb41a9c0d31ae` / Worker Version ID `3dee18a8-e325-4a6c-a227-904879fff2bf`。旧真实任务返回 `failed/PROVIDER_FAILED`，没有GLB回执；根因静态方法this丢失已修复部署。不要重试旧任务；创建请求总数目前1，实际TRELLIS生成提交数0。下一次新任务只在全部前端修复部署后创建，实际GPU submit最多一次。
+11. [x] 部署修复版本 `400fb516ade7ffa5a8cde05316564d1fa4227e63` / Worker Version ID `aaae070a-641d-4754-b58b-5ed06e0be2e8`；公开JS为 `/director-desk/assets/index-Dd-CKTN4.js`。旧任务首次创建后在 `connecting` 前置连接路径失败；修复后另创建的唯一验收任务成功完成。生产接口不公开provider event ID，回执字段 `providerEventIdPubliclyExposed=false`仅表示不公开此字段，不代表上游未生成event ID。
 12. [x] 静态连接错误修复与状态可诊断性：Worker默认使用绑定后的`Client.connect`；状态表记录`starting-session`，终态失败保留最后有效phase并返回安全阶段错误码；UI优先显示终态与具体阶段。固定518图CPU-only workerd探针已到`onSubmitStarting`后主动拒绝生成，GPU submit为0。Worker/Miniflare测试15/15通过，状态映射、viewport导入和Director Desk TypeScript检查通过；干净release worktree的微应用/root生产构建及Wrangler dry-run成功，后续部署仍需包含新发现的轮询竞态修复。
-13. [~] 修复create POST较慢时前端status轮询先于任务落库、404有界重试耗尽后不再轮询的问题：POST pending期间不启动该job GET，finally后对预存的同一capability恢复轮询；4.5秒延迟mock验证pending时GET=0、create POST=1，响应后GET读到completed。代码尚未提交/部署，不能执行真实GPU验收。
+13. [x] 修复create POST较慢时前端status轮询先于任务落库、404有界重试耗尽后不再轮询的问题：POST pending期间不启动该job GET，finally后对预存的同一capability恢复轮询；4.5秒延迟mock验证pending时GET=0、create POST=1，响应后GET读到completed。修复已包含在真实验收部署版本。
+14. [x] 每日额度按实际provider提交计数：创建时只统计24h内 `submit_started=1`，`onSubmitStarting`再次同步检查并预占；连接失败不扣，provider明确失败和unknown提交均扣。新增DO/SQLite端到端测试覆盖前置失败、确定提交失败、unknown及额度拒绝。
 
 ## 过程记录
 
@@ -75,3 +76,6 @@
 - 2026-10-20本轮窄改：`worker/imageTo3dProvider.js`绑定静态连接并在错误上附安全阶段分类；`worker/imageTo3dJob.js`持久化`starting-session`并在失败时保留最后phase；前端终态优先、阶段优先映射；Worker adapter receiver回归与DO终态phase回归。`node --test tests/worker-image-to-3d.test.mjs tests/worker-image-to-3d-miniflare.test.mjs` 15/15；`npx vitest run src/editor/panels/AssetImportPanel.test.tsx` 5/5（替换已被6cad138职责迁移淘汰的“本地导入”断言，保留在ViewportToolbar入口的本地导入验证）；ViewportToolbar对应单测1/1；`npx tsc -b --pretty false`通过。待干净副本完整构建/Worker dry-run、补丁提交部署后再进行一次真实GPU调用。
 - 2026-10-20：已仅提交上述8个核定文件，commit `e815c416c027f352dab4e584c88bb41a9c0d31ae` 并推送 `origin/main`；未包含lock/public/无关dirty。清洁release worktree从该SHA检出，复用既有依赖目录的junction但绕过会运行`npm ci`的root build wrapper，直接`micro npm run build → root clean → root vite build → wrangler deploy --dry-run`成功；上传资产构建显示微应用2275 modules、root1746 modules，Worker dry-run 242.67 KiB/gzip 62.11 KiB。随后已部署该SHA，上传仅director-desk入口与新JS。该版本尚未启动新真实GPU任务。
 - 2026-10-20：发布后复核发现慢create POST时`setStoredSession`会立即启动status GET，8×500ms `JOB_NOT_FOUND`重试可能在POST超过4秒时耗尽，POST 202后同ID未改变导致effect不重启。窄修新增`creatingJobId`门闩：POST发起前仍先持久化capability，但pending期间暂停GET；请求finally清除门闩，现有effect恢复轮询。`AssetImportPanel.test.tsx`延迟create 4.5秒回归6/6通过，确认pending期间GET为0，之后GET读到completed且创建请求始终一次。该修复尚未提交/构建/部署，不应在此状态触发生产任务。
+- 2026-10-20线上唯一真实生成验收：使用输入 `input-armchair-model-ready-518-centered.png`（134,035 bytes，SHA256 `75d2dcc3bc728f611601f543f0e600dc6f5d84a57ae419426fdfe37350bf1f84`）。job `1269350e-485d-4ee7-b6a8-ca7db1915d87` 的唯一POST于 `12:51:38.730Z` 返回202；只读状态GET记录queued、waiting-in-queue、saving-result、completed，最终完成于 `12:52:12.160Z`。真实生产GLB `1,781,772` bytes，SHA256 `d6c07586ac4d8cadcd97d2a590466138389059f5881ab6827eb67506c1b3db61`，见 `artifacts/online-image-to-3d-integration-2026-10-20/production-generation-400fb51-recovered.json`；任务状态及1次POST回执见 `production-generation-400fb51-receipt.json`。`publicJob()`不暴露provider event id；不从该字段缺失推断上游状态。
+- 2026-10-20线上真实浏览器：`production-generation-400fb51-browser-receipt.json` 记录同一GLB的preview→confirm import→reload实际R3F mesh结果，`obj_3` 三阶段bounds均为min `[-1,0,-0.5781985102]`、max `[1,1.0359029978,0.5781985102]`，mesh `matrixWorld`逐项相同；local position `[0,0.5145803540,-0.1119575596]`、uniform scale `2.0071838118`。预览相机是专用预览视角，应用/刷新使用导演台主视口camera，canvas尺寸与FOV不同；因此对照的是mesh世界geometry/matrix，不声称两路camera构图相同。截图：`production-generation-400fb51-preview.png`（实际GLB和确认按钮同屏）、`production-generation-400fb51-applied.png`、`production-generation-400fb51-after-reload.png`。默认角色通过现有可见性控件隐藏，仅用于应用/刷新证据，不改模型。无pageerror，恢复流程`POST`计数为0；刷新后scene asset仍有1个实际mesh。质量人工检查为needsReview：主体比单椅预期偏宽近似小沙发，底边残留碎片，材质偏暗。
+- 2026-10-20额度语义窄修：先前create阶段按所有任务记录计日额度，会把connecting失败也计数。当前修改将创建检查与`onSubmitStarting`门槛统一为滚动24h内`submit_started=1`记录，提交前失败不占额度；确定失败与unknown的已提交任务仍计数。`tests/worker-image-to-3d-miniflare.test.mjs`新序列实际运行SQLite DO：connect失败→已提交quota失败→已提交unknown→超过2次拒绝。定向Worker测试16/16通过；AssetImportPanel测试6/6通过；`npx tsc -b --pretty false`通过。额度修改尚待清洁发布构建、提交与部署后复核。

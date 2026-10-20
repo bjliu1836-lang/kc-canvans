@@ -112,13 +112,13 @@ export class ImageTo3DJob {
     const bytes = new Uint8Array(await request.arrayBuffer());
     if (!validateImageBytes(bytes, mimeType)) return json({ error: 'INVALID_IMAGE' }, bytes.length > MAX_INPUT_BYTES ? 413 : 400);
     const now = Date.now();
+    const count = rows(db, 'SELECT COUNT(*) AS count FROM image3d_jobs WHERE created_at >= ? AND submit_started=1', now - 24 * 60 * 60 * 1000)[0]?.count ?? 0;
+    if (count >= JOBS_PER_DAY) return json({ error: 'DAILY_LIMIT_REACHED' }, 429);
     const active = rows(db, `SELECT id, state, updated_at FROM image3d_jobs
       WHERE state IN ('queued','running','submitting','processing')
          OR (state='unknown' AND updated_at > ?)
       LIMIT 1`, now - UNKNOWN_LEASE_MS)[0];
     if (active) return json({ error: 'JOB_ALREADY_ACTIVE', retryAt: active.updated_at + UNKNOWN_LEASE_MS }, 429);
-    const count = rows(db, 'SELECT COUNT(*) AS count FROM image3d_jobs WHERE created_at >= ?', now - 24 * 60 * 60 * 1000)[0]?.count ?? 0;
-    if (count >= JOBS_PER_DAY) return json({ error: 'DAILY_LIMIT_REACHED' }, 429);
 
     const chunkCount = Math.ceil(bytes.length / CHUNK_BYTES);
     bind(db, `INSERT INTO image3d_jobs
@@ -272,6 +272,14 @@ export class ImageTo3DJob {
           onSubmitStarting: () => {
             const current = rows(db, 'SELECT state, deadline_at FROM image3d_jobs WHERE id=?', job.id)[0];
             if (timedOut || current?.state !== 'running' || Date.now() >= current.deadline_at) return false;
+            const submittedToday = rows(db, 'SELECT COUNT(*) AS count FROM image3d_jobs WHERE created_at >= ? AND submit_started=1',
+              Date.now() - 24 * 60 * 60 * 1000)[0]?.count ?? 0;
+            if (submittedToday >= JOBS_PER_DAY) {
+              bind(db, "UPDATE image3d_jobs SET state='failed', phase='failed', error_code='DAILY_LIMIT_REACHED', updated_at=? WHERE id=? AND state='running' AND submit_started=0",
+                Date.now(), job.id);
+              bind(db, 'DELETE FROM image3d_input_chunks WHERE job_id=?', job.id);
+              return false;
+            }
             bind(db, "UPDATE image3d_jobs SET state='submitting', phase='submitting', submit_started=1, updated_at=? WHERE id=?",
               Date.now(), job.id);
             return true;

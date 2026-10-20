@@ -41,7 +41,7 @@ async function readJson<T>(response: Response): Promise<T> {
     if (response.status === 404 && code === "JOB_NOT_FOUND") throw new Error("JOB_NOT_FOUND");
     if (code === "IMAGE_TO_3D_ACCESS_DENIED") throw new Error("服务访问码不正确");
     if (code === "IMAGE_TO_3D_ACCESS_NOT_CONFIGURED" || code === "IMAGE_TO_3D_NOT_CONFIGURED") throw new Error("3D生成服务尚未配置完成");
-    if (code === "DAILY_LIMIT_REACHED") throw new Error("今天的生成次数已用完");
+    if (code === "DAILY_LIMIT_REACHED") throw new Error("过去24小时的生成次数已用完");
     if (code === "JOB_ALREADY_ACTIVE") throw new Error("已有生成任务正在处理，或上一任务状态待确认");
     if (code === "IMAGE_TOO_LARGE") throw new Error("图片大小超过10 MB限制");
     if (code === "INVALID_IMAGE" || code === "IMAGE_REQUIRED") throw new Error("请选择有效的 PNG、JPG 或 WEBP 图片");

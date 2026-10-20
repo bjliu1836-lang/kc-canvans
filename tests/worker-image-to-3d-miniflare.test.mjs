@@ -42,7 +42,7 @@ async function makeWorker() {
   });
 }
 
-async function createAuthorizedJob(mf, fileName = 'chair.png') {
+async function createAuthorizedJob(mf, fileName = 'chair.png', expectedStatus = 202) {
   const login = await mf.dispatchFetch('https://local.test/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -71,7 +71,7 @@ async function createAuthorizedJob(mf, fileName = 'chair.png') {
     body: formBytes,
   });
   const job = await response.json();
-  assert.equal(response.status, 202, JSON.stringify(job));
+  assert.equal(response.status, expectedStatus, JSON.stringify(job));
   return { token, id, jobCapability, assetCapability, job };
 }
 
@@ -157,4 +157,24 @@ test('DO keeps the last provider phase on a definitive connect failure', async (
   const failed = await waitForJob(mf, created, 'failed');
   assert.equal(failed.phase, 'connecting');
   assert.equal(failed.error, 'PROVIDER_CONNECT_FAILED');
+});
+
+test('daily generation limit counts provider submissions, not jobs that fail before submit', async (t) => {
+  const mf = await makeWorker();
+  t.after(() => mf.dispose());
+
+  const beforeSubmitFailure = await createAuthorizedJob(mf, 'connect-error.png');
+  const connectionFailed = await waitForJob(mf, beforeSubmitFailure, 'failed');
+  assert.equal(connectionFailed.error, 'PROVIDER_CONNECT_FAILED');
+
+  const submittedFailure = await createAuthorizedJob(mf, 'known-error.png');
+  const rejected = await waitForJob(mf, submittedFailure, 'failed');
+  assert.equal(rejected.error, 'PROVIDER_QUOTA_EXHAUSTED');
+
+  const uncertainSubmission = await createAuthorizedJob(mf, 'uncertain-error.png');
+  const unknown = await waitForJob(mf, uncertainSubmission, 'unknown');
+  assert.equal(unknown.error, 'SUBMISSION_STATUS_UNKNOWN');
+
+  const overLimit = await createAuthorizedJob(mf, 'chair.png', 429);
+  assert.equal(overLimit.job.error, 'DAILY_LIMIT_REACHED');
 });

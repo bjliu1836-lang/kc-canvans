@@ -40,6 +40,7 @@ function jobMessage(job: ImageTo3dJobStatus | null) {
   if (job.state === "unknown") return "提交状态不确定，系统不会自动重试；远端任务可能仍在运行，20分钟保护期后可再试";
   if (job.state === "cancelled") return "任务已取消（仅排队任务可取消）";
   if (job.state === "failed") {
+    if (job.error === "DAILY_LIMIT_REACHED") return "过去24小时的生成次数已用完";
     if (job.error === "PROVIDER_CONNECT_FAILED") return "连接3D生成服务失败，请检查服务状态后重试";
     if (job.error === "PROVIDER_SESSION_FAILED") return "生成服务初始化会话失败，请稍后重试";
     if (job.error === "PROVIDER_PREPROCESS_FAILED") return "官方图片预处理失败，请更换图片后重试";
