@@ -477,7 +477,7 @@ export function getViewportCameraHitArea(): CameraHitArea {
   };
 }
 
-function NormalizedImportedObject({ color, object, fitToLayoutUnitBox = false }: { color?: string; object: Object3D; fitToLayoutUnitBox?: boolean }) {
+export function NormalizedImportedObject({ color, object, fitToLayoutUnitBox = false }: { color?: string; object: Object3D; fitToLayoutUnitBox?: boolean }) {
   const { clone, normalization } = useMemo(() => {
     const clonedObject = cloneSkeleton(object) as Object3D;
     clonedObject.updateMatrixWorld(true);

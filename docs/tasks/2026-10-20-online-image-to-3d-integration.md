@@ -1,6 +1,6 @@
 # 线上单物体图片生成 GLB 接入
 
-状态：本地 mock 与干净依赖闭环完成；已按复核补齐 provider 状态错误分类。当前进入受控提交、secret配置、一次真实生成与部署验收阶段；截至本记录尚未配置secret、没有新增真实 HF GPU 调用，也没有部署。
+状态：本地 mock、干净依赖闭环及预览/应用归一化一致性复核完成；核心接入已提交 `6cad138`。当前待提交窄一致性补丁，然后配置服务访问码、部署及执行唯一一次真实生成验收。`HF_TOKEN` 已按批准配置为 Cloudflare secret；operator access key 尚未配置；尚无本轮新增 HF GPU 调用，也未部署。
 
 ## 范围与边界
 
@@ -35,9 +35,9 @@
 6. [x] 后端定向单测及Workerd/Miniflare SQL DO+KV路由测试；真provider仍待复核，未发起新GPU任务。
 7. [x] 隔离Vite生产构建成功，不覆盖 `public/`；mock浏览器流程已跑上传→任务运行中刷新→同ID恢复→完成/GLB预览→导入→刷新后资产可见。回执与截图在下方过程记录路径。
 8. [x] 将核心代码、状态分类和依赖闭包交主代理复核；候选提交需仅含本任务源/测试/文档与基于HEAD重建的root lock。旧public、artifact及其它dirty明确排除。
-9. [ ] 在主代理批准的已授权窗口内按stdin安全流程配置HF_TOKEN与IMAGE_TO_3D_ACCESS_KEY；只读确认凭据元数据/免费配额，不购买或启用付费；随后仅提交一次单物体任务。
-10. [ ] 真实线上任务完成后记录task/job回执、CF版本与bundle指纹，验证同一GLB预览/应用/刷新后的mesh bounds与变换，并对结果做needsReview质量判断。
-11. [ ] 仅提交本任务核定闭包、推送`origin HEAD:main`并部署；检查线上版本激活与任务入口后，更新最终运行回执。
+9. [~] `HF_TOKEN` 已配置；待以stdin设置 `IMAGE_TO_3D_ACCESS_KEY`（访问码仅保存到gitignored本机私有文件），并复查HF凭据有效期/免费配额；不购买或启用付费。真实任务仍待部署后发起一次。
+10. [x] 使用固定真实椅子GLB做本地 mock 浏览器验证：预览/应用/刷新后三阶段的实际 mesh world bounds 与 `matrixWorld` 一致；边界与回执见下方。
+11. [ ] 提交本任务核定闭包、推送`origin HEAD:main`并部署；检查线上版本激活与任务入口后，执行唯一一次真实GPU任务并更新运行回执。
 
 ## 过程记录
 
@@ -64,3 +64,6 @@
 - 2026-10-20：候选 root lock 从 `HEAD:package-lock.json` 派生，只增明确的 `@gradio/client@2.7.1`、`miniflare@4.20260312.0`、`playwright-core@1.55.1`。重算统计新增55个package记录、0删除、原有package版本0变化；与工作区当前 `package-lock.json` SHA256一致（`1BFA8A2A3C1B510673AC52C360583F294B26ED3D2786B5437A7B5DE10E209E35`）。`@gradio/client`锁依赖闭包仅含自身及`fetch-event-stream`，没有命中当前npm audit漏洞项；此结论只针对该新增生产依赖闭包，不代表全仓audit无漏洞。全量root audit报告17项（1低、2中、13高、1严重），micro-app audit 9项（4中、5高）；未运行audit fix。新devDependency Miniflare仅用于Workerd测试，不被Worker入口导入。
 - 2026-10-20：全新HEAD+本轮补丁隔离副本 `artifacts/online-image-to-3d-integration-2026-10-20/clean-ci-head-plus-image-to-3d` 起始无 `node_modules`/junction。root `npm ci` 成功（174 packages），microapp `npm ci` 成功（232 packages，微应用依赖未改，使用HEAD lock）；完整 `npm run build` 成功（微应用2275 modules，root1746 modules），Wrangler `deploy --dry-run` 成功（241.80KiB / gzip 61.96KiB，检查配置后`--dry-run: exiting now`）。输出位于该artifact隔离副本/目录，不写用户public和当前checkout依赖目录。重新在该副本跑Worker/Miniflare 13/13、ViewportToolbar 36/36通过。
 - 2026-10-20：候选纳入清单共17个文件：`functions/api/[[path]].js`、`worker/index.js`、`worker/imageTo3dJob.js`、`worker/imageTo3dProvider.js`、`wrangler.toml`、root `package.json`/`package-lock.json`、Director Desk `imageTo3dClient.ts`/`AssetImportPanel.tsx`/`GeneratedAssetPreview.tsx`/`ViewportToolbar.tsx`/`styles/index.css`/`ViewportToolbar.test.tsx`、两个Worker测试与`tests/fixtures/image-to-3d-mock-provider.js`、本任务文档。生成后的`public/`、其它package-lock、mock截图/回执和其余历史dirty不纳入。API/Create、toolbar/styles与package文件按本轮diff hunk审查，不扩大提交范围。
+- 2026-10-20：主代理复核发现初版生成预览仅 `gltf.scene.clone + Bounds`，没有走 SceneRoot 对普通导入 GLB 使用的 `NormalizedImportedObject`；自动取景会掩盖预览/应用物理尺寸差异。窄修复在 `SceneRoot.tsx` 导出该共享组件，`GeneratedAssetPreview.tsx` 将同一 `gltf.scene` 交给组件，默认沿用普通导入规范（最长边2、XZ居中、minY落地、SkeletonUtils clone及材质隔离）；不修改生成mesh，不改 layout-only unit-box 资产路径。
+- 2026-10-20：真实固定 GLB 回放文件 `artifacts/image-to-3d-trellis-2026-10-20/trellis-community-authenticated-centered-chair.glb`（1,735,512 bytes；SHA256见本目录原始导入receipt）通过本地Vite+Miniflare mock 流程；providerCalls=0、创建POST=1。R3F Fiber store场景中同一 mesh `geometry_0`：预览、确认导入、刷新后bounds均为 min `[-1,0,-0.5264948788]` / max `[1,0.6849825927,0.5264948788]`；mesh `matrixWorld` 三阶段逐项一致，scale约`2.002904`、position约`[0.001300,0.341381,-0.003085]`，应用根`obj_3` rotation为零、scale为1。边界误差阈值`1e-5`。预览与场景canvas/camera不同（预览470×240、FOV38；场景1440×930、FOV50），因此只断言实际mesh世界几何矩阵/边界一致，不宣称相机取景相同。
+- 2026-10-20：parity浏览器receipt `artifacts/online-image-to-3d-integration-2026-10-20/browser-mock-receipt.json`；截图 `browser-generation-preview.png` 与关闭模型库后的 `browser-imported-after-reload.png`。通过真实任务UI mock请求→GLB预览→确认导入→刷新，R3F真实mesh验证通过；不是新的HF识别/生成质量证据。本轮新增临时browser脚本仅为本地artifact，不纳入产品提交。`SceneRoot.test.tsx` 46/46通过，`npx tsc -b --pretty false`通过；仍需对clean HEAD+本轮窄patch做发布构建和部署复核。

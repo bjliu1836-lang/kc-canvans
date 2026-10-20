@@ -1,15 +1,15 @@
-import { Suspense, useMemo } from "react";
+import { Suspense } from "react";
 import { Canvas } from "@react-three/fiber";
 import { Bounds, OrbitControls } from "@react-three/drei";
 import { useLoader } from "@react-three/fiber";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { NormalizedImportedObject } from "../canvas/SceneRoot";
 
 function LoadedAsset({ url }: { url: string }) {
   const gltf = useLoader(GLTFLoader, url);
-  const scene = useMemo(() => gltf.scene.clone(true), [gltf.scene]);
   return (
     <Bounds fit clip observe margin={1.25}>
-      <primitive object={scene} />
+      <NormalizedImportedObject object={gltf.scene} />
     </Bounds>
   );
 }
