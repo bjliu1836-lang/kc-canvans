@@ -81,12 +81,14 @@ export function AssetImportPanel() {
   const [accessKeyDraft, setAccessKeyDraft] = useState(accessKey);
   const [storedSession, setStoredSession] = useState<StoredImageTo3dSession | null>(() => readStoredSession());
   const [job, setJob] = useState<ImageTo3dJobStatus | null>(null);
+  const [creatingJobId, setCreatingJobId] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!storedSession) return;
+    if (creatingJobId === storedSession.credentials.id) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let notFoundRetries = 0;
@@ -112,7 +114,7 @@ export function AssetImportPanel() {
       live = false;
       if (timer) clearTimeout(timer);
     };
-  }, [storedSession?.credentials.id]);
+  }, [storedSession?.credentials.id, creatingJobId]);
 
   function saveAccessKey() {
     const value = accessKeyDraft.trim();
@@ -128,6 +130,7 @@ export function AssetImportPanel() {
     const session = { credentials: createImageTo3dJobCredentials(), inputName: imageFile.name } satisfies StoredImageTo3dSession;
     // Persist capabilities before the request so a response lost after task creation can be polled without resubmitting.
     sessionStorage.setItem(IMAGE_TO_3D_JOB_STORAGE, JSON.stringify(session));
+    setCreatingJobId(session.credentials.id);
     setStoredSession(session);
     try {
       const created = await createImageTo3dJob(imageFile, accessKey, session.credentials);
@@ -135,6 +138,7 @@ export function AssetImportPanel() {
     } catch (error) {
       setJobError(error instanceof Error ? error.message : "图片转3D请求失败");
     } finally {
+      setCreatingJobId(null);
       setBusy(false);
     }
   }

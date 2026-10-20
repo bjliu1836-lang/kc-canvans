@@ -1,6 +1,6 @@
 # 线上单物体图片生成 GLB 接入
 
-状态：线上接入已部署（预览共享规范化修复 `cbf9883`）。第一条真实任务曾创建并终态 `failed/PROVIDER_FAILED`，尚无成功GLB。复现并修复了Gradio静态 `Client.connect` 默认裸调用丢失 `this` 的问题；真实518图CPU-only路径已在workerd运行至GPU提交门前并主动停止。当前待完成clean-head补丁验证、重新部署，以及一次真实GPU提交/预览导入验收。原失败任务的公开status不返回provider event ID，不能仅凭其泛化错误字段直证是否到达上游；本地同代码路径复现证明connect失败发生在提交前。
+状态：静态连接修复已推送并部署：commit `e815c416c027f352dab4e584c88bb41a9c0d31ae`，Worker Version ID `3dee18a8-e325-4a6c-a227-904879fff2bf`。第一条真实任务曾创建并终态 `failed/PROVIDER_FAILED`，尚无成功GLB。真实518图CPU-only路径已在workerd运行至GPU提交门前并主动停止。另发现并修复了创建POST pending期间过早开始status轮询的前端竞态；该小修已通过4.5秒延迟回归，待单独提交/部署。只有最终版本部署并核实后才执行一次真实GPU提交/预览导入验收。旧任务的公开status不返回provider event ID，不能仅凭其泛化错误字段直证是否到达上游；本地同代码路径复现证明connect失败发生在提交前。
 
 ## 范围与边界
 
@@ -37,8 +37,9 @@
 8. [x] 将核心代码、状态分类和依赖闭包交主代理复核；候选提交需仅含本任务源/测试/文档与基于HEAD重建的root lock。旧public、artifact及其它dirty明确排除。
 9. [x] `HF_TOKEN` 与 `IMAGE_TO_3D_ACCESS_KEY` 已以批准的secret流程配置；访问码保存在本机私有文件。HF账户读取结果为 `isPro=false`、`canPay=false`；未启用付费额度。
 10. [x] 使用固定真实椅子GLB做本地 mock 浏览器验证：预览/应用/刷新后三阶段的实际 mesh world bounds 与 `matrixWorld` 一致；边界与回执见下方。
-11. [~] 接入已部署到线上版本 `eb00f8d7-513b-4b4e-a125-b0bbd702d25c`。唯一一次旧真实任务返回 `failed/PROVIDER_FAILED`，没有GLB回执；已定位部署代码中的静态方法this丢失，正在补丁修复。不得重复旧任务；补丁发布后将作为一次新的线上任务创建，且最多一次GPU提交。
-12. [x] 静态连接错误修复与状态可诊断性：Worker默认使用绑定后的`Client.connect`；状态表记录`starting-session`，终态失败保留最后有效phase并返回安全阶段错误码；UI优先显示终态与具体阶段。固定518图CPU-only workerd探针已到`onSubmitStarting`后主动拒绝生成，GPU submit为0。Worker/Miniflare测试15/15通过，状态映射5/5通过，Director Desk TypeScript构建通过；仍需干净发布构建。
+11. [~] 接入已部署到线上版本 `e815c416c027f352dab4e584c88bb41a9c0d31ae` / Worker Version ID `3dee18a8-e325-4a6c-a227-904879fff2bf`。旧真实任务返回 `failed/PROVIDER_FAILED`，没有GLB回执；根因静态方法this丢失已修复部署。不要重试旧任务；创建请求总数目前1，实际TRELLIS生成提交数0。下一次新任务只在全部前端修复部署后创建，实际GPU submit最多一次。
+12. [x] 静态连接错误修复与状态可诊断性：Worker默认使用绑定后的`Client.connect`；状态表记录`starting-session`，终态失败保留最后有效phase并返回安全阶段错误码；UI优先显示终态与具体阶段。固定518图CPU-only workerd探针已到`onSubmitStarting`后主动拒绝生成，GPU submit为0。Worker/Miniflare测试15/15通过，状态映射、viewport导入和Director Desk TypeScript检查通过；干净release worktree的微应用/root生产构建及Wrangler dry-run成功，后续部署仍需包含新发现的轮询竞态修复。
+13. [~] 修复create POST较慢时前端status轮询先于任务落库、404有界重试耗尽后不再轮询的问题：POST pending期间不启动该job GET，finally后对预存的同一capability恢复轮询；4.5秒延迟mock验证pending时GET=0、create POST=1，响应后GET读到completed。代码尚未提交/部署，不能执行真实GPU验收。
 
 ## 过程记录
 
@@ -72,3 +73,5 @@
 - 2026-10-20根因复现：`@gradio/client@2.7.1`官方`Client.connect()`静态方法内部执行`new this(...)`。生产adapter默认参数原为裸`connect = Client.connect`并直接`connect(...)`；workerd/Miniflare以同HF token和SDK复现安全短错`TypeError: this is not a constructor`，堆栈落在connect静态调用，阶段为`connecting`。同一Client.connect在Node运行时连接成功并发现官方预处理/生成端点；明确说明此前只有connect/view_api握手并未覆盖adapter中裸静态调用。
 - 2026-10-20CPU-only正式adapter探针：`artifacts/online-image-to-3d-integration-2026-10-20/workerd-cpu-diagnostic-receipt.json`，输入为`input-armchair-model-ready-518-centered.png`（134035 bytes）。修复`Client.connect.bind(Client)`后，同版本SDK/workerd执行connect→start_session→原图上传→`/preprocess_image`→同源预处理文件下载，抵达GPU调用前的`onSubmitStarting`并由诊断回调主动返回false；结果为`phase=submitting`、`gpuGateReached=true`、`gpuSubmitAllowed=false`。该复现只覆盖CPU路径，不是新的GPU任务。
 - 2026-10-20本轮窄改：`worker/imageTo3dProvider.js`绑定静态连接并在错误上附安全阶段分类；`worker/imageTo3dJob.js`持久化`starting-session`并在失败时保留最后phase；前端终态优先、阶段优先映射；Worker adapter receiver回归与DO终态phase回归。`node --test tests/worker-image-to-3d.test.mjs tests/worker-image-to-3d-miniflare.test.mjs` 15/15；`npx vitest run src/editor/panels/AssetImportPanel.test.tsx` 5/5（替换已被6cad138职责迁移淘汰的“本地导入”断言，保留在ViewportToolbar入口的本地导入验证）；ViewportToolbar对应单测1/1；`npx tsc -b --pretty false`通过。待干净副本完整构建/Worker dry-run、补丁提交部署后再进行一次真实GPU调用。
+- 2026-10-20：已仅提交上述8个核定文件，commit `e815c416c027f352dab4e584c88bb41a9c0d31ae` 并推送 `origin/main`；未包含lock/public/无关dirty。清洁release worktree从该SHA检出，复用既有依赖目录的junction但绕过会运行`npm ci`的root build wrapper，直接`micro npm run build → root clean → root vite build → wrangler deploy --dry-run`成功；上传资产构建显示微应用2275 modules、root1746 modules，Worker dry-run 242.67 KiB/gzip 62.11 KiB。随后已部署该SHA，上传仅director-desk入口与新JS。该版本尚未启动新真实GPU任务。
+- 2026-10-20：发布后复核发现慢create POST时`setStoredSession`会立即启动status GET，8×500ms `JOB_NOT_FOUND`重试可能在POST超过4秒时耗尽，POST 202后同ID未改变导致effect不重启。窄修新增`creatingJobId`门闩：POST发起前仍先持久化capability，但pending期间暂停GET；请求finally清除门闩，现有effect恢复轮询。`AssetImportPanel.test.tsx`延迟create 4.5秒回归6/6通过，确认pending期间GET为0，之后GET读到completed且创建请求始终一次。该修复尚未提交/构建/部署，不应在此状态触发生产任务。
