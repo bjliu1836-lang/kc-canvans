@@ -130,3 +130,25 @@ it("keeps temporary take playback controls separate from keep, discard, and resh
   expect(onRestartPlayback).toHaveBeenCalledOnce();
   expect(onTogglePlayback).toHaveBeenCalledOnce();
 });
+
+it("blocks keeping a take when its source camera was deleted while preserving discard and reshoot", () => {
+  render(
+    <TakeReviewHud
+      duration={1.2}
+      holdsLastFrame={false}
+      keepDisabledReason="原机位“机位01”已删除，不能保留这次拍摄。"
+      onDiscard={() => undefined}
+      onKeep={() => undefined}
+      onRestartPlayback={() => undefined}
+      onReshoot={() => undefined}
+      onTogglePlayback={() => undefined}
+      playbackSeconds={0.4}
+      playing={false}
+    />
+  );
+
+  expect(screen.getByRole("alert")).toHaveTextContent("原机位“机位01”已删除");
+  expect(screen.getByRole("button", { name: "保留这次运镜" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "放弃这次拍摄" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "重新拍摄" })).toBeEnabled();
+});

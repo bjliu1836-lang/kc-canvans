@@ -83,6 +83,7 @@ export function PilotHud({
 export function TakeReviewHud({
   duration,
   holdsLastFrame,
+  keepDisabledReason,
   onDiscard,
   onKeep,
   onRestartPlayback,
@@ -93,6 +94,7 @@ export function TakeReviewHud({
 }: {
   duration: number;
   holdsLastFrame: boolean;
+  keepDisabledReason?: string | null;
   onDiscard: () => void;
   onKeep: () => void;
   onRestartPlayback: () => void;
@@ -107,13 +109,14 @@ export function TakeReviewHud({
       <div className="pilot-take-review__notes">
         <p>这次运镜尚未覆盖已保存路线。</p>
         {holdsLastFrame ? <p>保留后，相机将在剩余表演中保持最后机位。</p> : null}
+        {keepDisabledReason ? <p role="alert">{keepDisabledReason}</p> : null}
       </div>
       <div className="pilot-hud-actions">
         <button type="button" className="pilot-hud-secondary" onClick={onRestartPlayback} aria-label="从头回放这次拍摄"><RotateCcw aria-hidden="true" size={15} />从头回放</button>
         <button type="button" className="pilot-hud-secondary" onClick={onTogglePlayback} aria-label={playing ? "暂停这次拍摄回放" : "继续这次拍摄回放"}>{playing ? <Pause aria-hidden="true" size={15} /> : <Play aria-hidden="true" size={15} />}{playing ? "暂停" : "继续"}</button>
         <button type="button" className="pilot-hud-secondary" onClick={onDiscard} aria-label="放弃这次拍摄"><LogOut aria-hidden="true" size={15} />放弃</button>
         <button type="button" className="pilot-hud-secondary" onClick={onReshoot} aria-label="重新拍摄"><RotateCcw aria-hidden="true" size={15} />重新拍摄</button>
-        <button type="button" className="pilot-hud-primary" onClick={onKeep} aria-label="保留这次运镜"><Save aria-hidden="true" size={15} />保留这次运镜</button>
+        <button type="button" className="pilot-hud-primary" disabled={Boolean(keepDisabledReason)} onClick={onKeep} aria-label="保留这次运镜" title={keepDisabledReason ?? undefined}><Save aria-hidden="true" size={15} />保留这次运镜</button>
       </div>
     </div>
   );

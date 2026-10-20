@@ -500,6 +500,10 @@ function parseObservation(input: unknown): ImageObservation {
   };
 }
 
+export function normalizeImageObservation(input: unknown): ImageObservation {
+  return parseObservation(input);
+}
+
 function parseVisibility(value: unknown): ImageVisibility {
   return ["visible", "partly_occluded", "occluded", "uncertain"].includes(String(value))
     ? value as ImageVisibility

@@ -5916,6 +5916,17 @@ textarea:focus-visible {
   gap: 5px;
 }
 
+.motion-temporary-take-status {
+  margin: 8px 14px 0;
+  padding: 8px 10px;
+  border: 1px solid rgb(var(--motion-rgb) / 0.26);
+  border-radius: 8px;
+  color: rgb(var(--motion-rgb));
+  background: rgb(var(--motion-rgb) / 0.08);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .motion-studio-export {
   display: inline-flex;
   align-items: center;

@@ -1,5 +1,5 @@
 import { validateLayoutDraftCandidate, type LayoutDraft, type LayoutDraftSource } from "../schema/layoutDraft";
-import { imageObservationToLayoutDraft, ImageObservationValidationError } from "../schema/imageObservationLayout";
+import { imageObservationToLayoutDraft, ImageObservationValidationError, normalizeImageObservation } from "../schema/imageObservationLayout";
 import type { ImageObservation } from "../schema/imageObservationLayout";
 import { createLayoutGenerationId, recordLayoutGenerationFailed, recordLayoutGenerationStarted, recordNormalizedLayoutDraft } from "./layoutDiagnostics";
 
@@ -36,8 +36,20 @@ function mergeSpatialReview(base: ImageObservation, value: unknown): ImageObserv
   };
 }
 
-function shouldRequestSpatialReview(observation: ImageObservation, draft: LayoutDraft): boolean {
+export function shouldRequestSpatialReview(observation: ImageObservation, draft: LayoutDraft): boolean {
   if (observation.items.length === 0) return false;
+  const missingComplexFurnitureFootprint = observation.items.some((item) =>
+    (() => {
+      const identity = `${item.semanticType ?? ""} ${item.name}`;
+      const sofaIdentity = item.category === "sofa"
+        || (item.category === undefined && /(?:sofa|couch|沙发)/i.test(identity));
+      const complexFurniture = /(?:sectional|corner|modular|l[- ]?shaped|转角|组合)/i.test(identity);
+      // Image observations are parsed and geometry-validated before this predicate runs.
+      const hasUsableFootprint = hasTrustedFootprint(item);
+      return sofaIdentity && complexFurniture && !hasUsableFootprint;
+    })(),
+  );
+  if (missingComplexFurnitureFootprint) return true;
   const major = observation.items.filter((item) =>
     item.confidence >= 0.55
     && ["ground", "table", "chair", "sofa", "cabinet", "pillar"].includes(item.category ?? ""));
@@ -58,6 +70,12 @@ function shouldRequestSpatialReview(observation: ImageObservation, draft: Layout
   return hasConflict || coverageInsufficient || diagnostics?.qualityStatus === "needsReview";
 }
 
+function hasTrustedFootprint(item: ImageObservation["items"][number]) {
+  return item.groundFootprints?.some((footprint) =>
+    footprint.confidence >= 0.55 && footprint.outer.length >= 3,
+  ) ?? false;
+}
+
 function spatialReviewContext(observation: ImageObservation, draft: LayoutDraft) {
   const ids = new Set(observation.items.map((item) => item.id));
   const trace = draft.referenceCamera?.fitDiagnostics?.spatialEvidenceTrace;
@@ -73,7 +91,7 @@ function spatialReviewContext(observation: ImageObservation, draft: LayoutDraft)
     }
   }
   const missingEvidence: string[] = [];
-  if (observation.items.some((item) => !item.groundFootprints?.length)) missingEvidence.push("non-convex-contact-boundary");
+  if (observation.items.some((item) => !hasTrustedFootprint(item))) missingEvidence.push("non-convex-contact-boundary");
   if (pairs.length || observation.items.some((item) => !item.occludesIds?.length)) missingEvidence.push("visible-gap");
   if (pairs.length || observation.items.some((item) => !item.supportId)) missingEvidence.push("support-contact");
   if (!observation.geometryEvidence?.axes?.length) missingEvidence.push("parallel-lines");
@@ -189,7 +207,7 @@ export async function requestReferenceLayout(
       recordNormalizedLayoutDraft(draft, generationId, data.draft);
       return draft;
     }
-    const observation = data.visualObservations as ImageObservation;
+    const observation = normalizeImageObservation(data.visualObservations);
     let finalObservation = observation;
     let draft = imageObservationToLayoutDraft(observation, image, { imageAspectRatio: image.aspectRatio });
     let spatialReviewMetadata: Record<string, unknown> | undefined;

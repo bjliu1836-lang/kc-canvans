@@ -84,6 +84,9 @@ export interface RecordedCameraSample {
 }
 
 export interface CameraRecordingTake {
+  cameraId: string;
+  cameraName: string;
+  cameraBase: DirectorCameraShot;
   duration: number;
   initialSnapshot: CameraShotSnapshot;
   keyframes: DirectorCameraMotionKeyframe[];
@@ -167,7 +170,7 @@ export function createCameraRecordingTake({
     time: Math.min(1, sample.elapsedMs / (duration * 1000)),
   }));
   if (keyframes.length === 1) keyframes.push({ ...keyframes[0], id: `${takePrefix}_2`, time: 1 });
-  return { duration, initialSnapshot, keyframes, sourceDuration: effectiveSourceDuration };
+  return { cameraId: activeCamera.id, cameraName: activeCamera.name, cameraBase: activeCamera, duration, initialSnapshot, keyframes, sourceDuration: effectiveSourceDuration };
 }
 
 export function mapTakeKeyframesForSavedPath(take: CameraRecordingTake) {
@@ -1142,6 +1145,7 @@ export function DirectorCanvas() {
   const activeCamera = useDirectorStore((state) =>
     state.project.cameras.find((item) => item.id === state.project.activeCameraId) ?? state.project.cameras[0]
   );
+  const cameras = useDirectorStore((state) => state.project.cameras);
   const cameraMotionProgress = useDirectorStore((state) => state.cameraMotionProgress);
   const cameraMotionPlaying = useDirectorStore((state) => state.cameraMotionPlaying);
   const cameraMotionPlaybackRevision = useDirectorStore((state) => state.cameraMotionPlaybackRevision);
@@ -1190,6 +1194,7 @@ export function DirectorCanvas() {
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [reviewTake, setReviewTake] = useState<CameraRecordingTake | null>(null);
   const recordingStartedAtRef = useRef(0);
+  const recordingCameraRef = useRef<DirectorCameraShot | null>(null);
   const recordingSamplesRef = useRef<RecordedCameraSample[]>([]);
   const recordingInitialSnapshotRef = useRef<CameraShotSnapshot>(DEFAULT_DIRECTOR_VIEW_SNAPSHOT);
   const recordingTimelineDurationRef = useRef<number | null>(null);
@@ -1638,6 +1643,7 @@ export function DirectorCanvas() {
 
   function beginCameraRecording() {
     if (!activeCamera || cameraPilotEditKeyframeId) return;
+    recordingCameraRef.current = activeCamera;
     const initialSnapshot = viewportCameraSnapshotRef.current;
     recordingStartedAtRef.current = performance.now();
     recordingInitialSnapshotRef.current = {
@@ -1655,7 +1661,8 @@ export function DirectorCanvas() {
   }
 
   function finishCameraRecording() {
-    if (!activeCamera || !cameraRecording) return;
+    const recordingCamera = recordingCameraRef.current;
+    if (!recordingCamera || !cameraRecording) return;
     const finishedAt = performance.now();
     const elapsedMs = Math.max(0, finishedAt - recordingStartedAtRef.current);
     const samples = [...recordingSamplesRef.current];
@@ -1669,15 +1676,16 @@ export function DirectorCanvas() {
     }
 
     const take = createCameraRecordingTake({
-      activeCamera,
+      activeCamera: recordingCamera,
       elapsedMs,
       initialSnapshot: recordingInitialSnapshotRef.current,
       samples,
       sourceDuration: recordingTimelineDurationRef.current,
-      takePrefix: `${activeCamera.id}_take_${Date.now()}`,
+      takePrefix: `${recordingCamera.id}_take_${Date.now()}`,
     });
 
     setCameraRecording(false);
+    recordingCameraRef.current = null;
     setRecordingSeconds(elapsedMs / 1000);
     setCameraMotionPlaying(false);
     setCameraMotionProgress(0);
@@ -1715,9 +1723,9 @@ export function DirectorCanvas() {
   }
 
   function keepRecordedTake() {
-    if (!activeCamera || !reviewTake) return;
+    if (!reviewTake || !cameras.some((camera) => camera.id === reviewTake.cameraId)) return;
     replaceCameraMotionKeyframes(
-      activeCamera.id,
+      reviewTake.cameraId,
       mapTakeKeyframesForSavedPath(reviewTake),
       reviewTake.sourceDuration
     );
@@ -1932,7 +1940,7 @@ export function DirectorCanvas() {
             recording={cameraRecording}
             onToggleActionPlayback={toggleSceneActionPlayback}
           />
-          {reviewTake && activeCamera ? <TemporaryTakePlaybackSync activeCamera={activeCamera} take={reviewTake} /> : null}
+          {reviewTake ? <TemporaryTakePlaybackSync activeCamera={reviewTake.cameraBase} take={reviewTake} /> : null}
           <Suspense fallback={null}>
             <SceneRoot />
           </Suspense>
@@ -1953,6 +1961,7 @@ export function DirectorCanvas() {
           <TakeReviewHud
             duration={reviewTake.duration}
             holdsLastFrame={reviewTake.duration + 0.01 < reviewTake.sourceDuration}
+            keepDisabledReason={cameras.some((camera) => camera.id === reviewTake.cameraId) ? null : `原机位“${reviewTake.cameraName}”已删除，不能保留这次拍摄。`}
             onDiscard={discardRecordedTake}
             onKeep={keepRecordedTake}
             onRestartPlayback={restartTakeReviewPlayback}
@@ -1993,6 +2002,12 @@ export function DirectorCanvas() {
         getViewportCameraSnapshot={getViewportCameraSnapshot}
         onLoadCameraSnapshot={(snapshot) => updateDirectorViewSnapshot(snapshot, true)}
         onStartPilot={startPilotSession}
+        temporaryTakeStatus={reviewTake ? {
+          cameraName: cameras.find((camera) => camera.id === reviewTake.cameraId)?.name ?? reviewTake.cameraName,
+          cameraExists: cameras.some((camera) => camera.id === reviewTake.cameraId),
+          pointCount: reviewTake.keyframes.length,
+          duration: reviewTake.duration,
+        } : null}
       />
       {motionStudioOpen && (activeCameraMotionPath?.keyframes.length ?? 0) >= 2 && !isCameraPiloting && !reviewTake && !referenceVideoRendering ? (
         <MotionMonitor

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readLayoutDiagnosticRecords } from "./layoutDiagnostics";
-import { requestReferenceLayout } from "./referenceLayoutClient";
+import { requestReferenceLayout, shouldRequestSpatialReview } from "./referenceLayoutClient";
 
 const image = {
   sourceId: "local_test",
@@ -82,7 +82,7 @@ describe("requestReferenceLayout failure details", () => {
       spaceType: "enclosed",
       surfaces: [{ id: "floor", kind: "floor", side: "floor", bbox: [0, 0.65, 1, 1], confidence: 0.9, visibility: "visible" }],
       items: [
-        { id: "sofa", name: "沙发", category: "sofa", semanticType: "sofa_main", bbox: [0.1, 0.2, 0.65, 0.8], confidence: 0.9, visibility: "visible" },
+        { id: "sofa", name: "转角组合沙发", category: "sofa", semanticType: "sofa_main", bbox: [0.1, 0.2, 0.65, 0.8], confidence: 0.9, visibility: "visible", groundFootprints: [{ outer: [[0.1, 0.7], [0.65, 0.7], [0.65, 0.9]], visibility: "visible", confidence: 0.4 }] },
         { id: "table", name: "茶几", category: "table", semanticType: "coffee_table", bbox: [0.35, 0.55, 0.65, 0.8], confidence: 0.9, visibility: "visible" },
       ],
     };
@@ -103,12 +103,13 @@ describe("requestReferenceLayout failure details", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const reviewBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as Record<string, unknown>;
     expect(reviewBody.observationStage).toBe("spatial-review");
+    expect((reviewBody.reviewContext as { missingEvidence?: string[] }).missingEvidence).toContain("non-convex-contact-boundary");
     expect((reviewBody.baseObservations as typeof observation).items[0]?.id).toBe("sofa");
     const records = readLayoutDiagnosticRecords();
     const record = records[records.length - 1];
     const candidate = record?.candidate as { visualObservations?: typeof observation; spatialReview?: Record<string, unknown> } | undefined;
     expect(candidate?.spatialReview).toMatchObject({ attempted: true, accepted: true, providerModel: "deepseek-flash-v4.1-1017", promptHash: "a".repeat(64) });
-    expect(candidate?.visualObservations?.items[0]).toMatchObject({ id: "sofa", name: "沙发", category: "sofa", groundFootprints: [footprint] });
+    expect(candidate?.visualObservations?.items[0]).toMatchObject({ id: "sofa", name: "转角组合沙发", category: "sofa", groundFootprints: [footprint] });
     expect(draft.diagnosticGenerationId).toBe(record?.generationId);
   });
 
@@ -211,5 +212,62 @@ describe("requestReferenceLayout failure details", () => {
       "图片模型未能返回可用的布景结构，请重试或更换参考图"
     );
     expect((error as Error).message).not.toContain("secret-value");
+  });
+});
+
+describe("complex furniture spatial review", () => {
+  const acceptedDraft = {
+    referenceCamera: { fitDiagnostics: { qualityStatus: "accepted" } },
+  } as any;
+  const wellCoveredItems = [
+    { id: "table", category: "table", semanticType: "table", name: "餐桌", bbox: [0, 0, 0.2, 0.2], confidence: 0.9, visibility: "visible", supportId: "floor" },
+    { id: "chair", category: "chair", semanticType: "chair", name: "餐椅", bbox: [0, 0, 0.2, 0.2], confidence: 0.9, visibility: "visible", supportId: "floor" },
+    { id: "cabinet", category: "cabinet", semanticType: "cabinet", name: "柜子", bbox: [0, 0, 0.2, 0.2], confidence: 0.9, visibility: "visible", contactWallSide: "image_back" },
+    { id: "chair2", category: "chair", semanticType: "chair", name: "第二把椅子", bbox: [0, 0, 0.2, 0.2], confidence: 0.9, visibility: "visible", supportId: "floor" },
+  ];
+
+  it("requests one spatial review for a sectional without footprint evidence despite sufficient overall coverage", () => {
+    const observation = {
+      items: [
+        { id: "sofa", category: "sofa", semanticType: "sectional_sofa", name: "大型组合沙发", bbox: [0, 0, 0.5, 0.5], confidence: 0.98, visibility: "visible" },
+        ...wellCoveredItems,
+      ],
+    } as any;
+    expect(shouldRequestSpatialReview(observation, acceptedDraft)).toBe(true);
+  });
+
+  it("does not request a shape review when the sectional already has a reliable footprint", () => {
+    const observation = {
+      items: [
+        { id: "sofa", category: "sofa", semanticType: "sectional_sofa", name: "组合沙发", bbox: [0, 0, 0.5, 0.5], confidence: 0.98, visibility: "visible", groundFootprints: [{ confidence: 0.8, outer: [[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5]] }] },
+        ...wellCoveredItems,
+      ],
+    } as any;
+    expect(shouldRequestSpatialReview(observation, acceptedDraft)).toBe(false);
+  });
+
+  it("does not classify a corner table as complex sofa geometry", () => {
+    const observation = { items: wellCoveredItems } as any;
+    expect(shouldRequestSpatialReview(observation, acceptedDraft)).toBe(false);
+  });
+
+  it("recognizes a Chinese combined sofa name when the older response omits category", () => {
+    const observation = {
+      items: [
+        { id: "sofa", name: "转角组合沙发", semanticType: "unknown", bbox: [0, 0, 0.5, 0.5], confidence: 0.98, visibility: "visible" },
+        ...wellCoveredItems,
+      ],
+    } as any;
+    expect(shouldRequestSpatialReview(observation, acceptedDraft)).toBe(true);
+  });
+
+  it("does not override an explicit non-sofa category from the name", () => {
+    const observation = {
+      items: [
+        { id: "prop", category: "prop", name: "sectional sofa label on a package", semanticType: "unknown", bbox: [0, 0, 0.5, 0.5], confidence: 0.98, visibility: "visible" },
+        ...wellCoveredItems,
+      ],
+    } as any;
+    expect(shouldRequestSpatialReview(observation, acceptedDraft)).toBe(false);
   });
 });

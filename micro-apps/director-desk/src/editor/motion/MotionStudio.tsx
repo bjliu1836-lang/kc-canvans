@@ -122,11 +122,13 @@ export function MotionStudio({
   onLoadCameraSnapshot,
   onStartPilot,
   resolveObjectFocus,
+  temporaryTakeStatus,
 }: {
   getViewportCameraSnapshot: () => CameraShotSnapshot;
   onLoadCameraSnapshot?: (snapshot: CameraShotSnapshot) => void;
   onStartPilot?: (editKeyframeId?: string | null) => void;
   resolveObjectFocus?: (object: DirectorObject, bodyPart: DirectorCameraTargetBodyPart) => [number, number, number] | null;
+  temporaryTakeStatus?: { cameraName: string; cameraExists: boolean; pointCount: number; duration: number } | null;
 }) {
   const open = useDirectorStore((state) => state.motionStudioOpen);
   const viewMode = useDirectorStore((state) => state.viewMode);
@@ -180,6 +182,9 @@ export function MotionStudio({
   const [showMoreTemplates, setShowMoreTemplates] = useState(false);
   const [activeTemplateId, setActiveTemplateId] = useState<CameraPathTemplateId | null>(null);
   const [pendingTemplateId, setPendingTemplateId] = useState<CameraPathTemplateId | null>(null);
+  const exportPanelRef = useRef<HTMLElement>(null);
+  const previewPanelRef = useRef<HTMLElement>(null);
+  const motionBodyRef = useRef<HTMLDivElement>(null);
   const activeTemplateRef = useRef<{
     cameraId: string;
     snapshot: CameraShotSnapshot;
@@ -189,6 +194,13 @@ export function MotionStudio({
   } | null>(null);
   const templateRouteFingerprintRef = useRef<string | null>(null);
   const didDefaultTemplateTargetRef = useRef(false);
+
+  useEffect(() => {
+    const isReviewingTake = Boolean(temporaryTakeStatus);
+    if (exportPanelRef.current) exportPanelRef.current.inert = isReviewingTake;
+    if (previewPanelRef.current) previewPanelRef.current.inert = isReviewingTake;
+    if (motionBodyRef.current) motionBodyRef.current.inert = isReviewingTake;
+  }, [exportOpen, temporaryTakeStatus]);
 
   useEffect(() => {
     didDefaultTemplateTargetRef.current = false;
@@ -660,7 +672,7 @@ export function MotionStudio({
           </div>
         </div>
         <div className="motion-studio-header-actions">
-          <button type="button" className="motion-studio-export" aria-label="导出运镜" aria-expanded={exportOpen} onClick={() => setExportOpen((current) => !current)}>
+          <button type="button" className="motion-studio-export" aria-label="导出运镜" aria-expanded={exportOpen} disabled={Boolean(temporaryTakeStatus)} onClick={() => setExportOpen((current) => !current)}>
             <Download aria-hidden="true" size={14} />导出
           </button>
           <button type="button" className="motion-studio-close" aria-label="关闭运镜工作台" onClick={() => setMotionStudioOpen(false)}>
@@ -669,8 +681,14 @@ export function MotionStudio({
         </div>
       </header>
 
+      {temporaryTakeStatus ? (
+        <div className="motion-temporary-take-status" role="status">
+          临时回看 · {temporaryTakeStatus.cameraName} · {temporaryTakeStatus.pointCount} 个点 · {temporaryTakeStatus.duration.toFixed(1)} 秒。已保存路线暂不编辑；{temporaryTakeStatus.cameraExists ? "请用画面中的“放弃 / 重新拍摄 / 保留这次运镜”完成本次拍摄。" : "原机位已删除，本次拍摄不能保留；请放弃或重新拍摄。"}
+        </div>
+      ) : null}
+
       {exportOpen ? (
-        <section className="motion-export-panel" aria-label="导出运镜设置">
+        <section ref={exportPanelRef} className="motion-export-panel" aria-label="导出运镜设置">
           <div><strong>导出 MP4 参考视频</strong><small>导出干净的第一视角运镜，不包含轨迹线和操作界面</small></div>
           <p className="motion-export-background" role="status">
             {panoramaAsset ? `将使用全景背景：${panoramaAsset.name || panoramaAsset.fileName}` : `将使用纯色背景：${sceneSettings.backgroundColor}`}
@@ -686,7 +704,7 @@ export function MotionStudio({
         </section>
       ) : null}
 
-      <section className="motion-preview-panel" aria-label="运镜预览方式">
+      <section ref={previewPanelRef} className="motion-preview-panel" aria-label="运镜预览方式">
         <div className="motion-block-heading">
           <strong>先看镜头画面</strong>
           <small>人物有路线时，固定机位也能直接预览和导出</small>
@@ -717,14 +735,14 @@ export function MotionStudio({
             {cameraMotionPlaying && viewMode === "camera" ? <Pause aria-hidden="true" size={14} /> : <Play aria-hidden="true" size={14} />}
           </button>
         </div>
-        {!canPreviewFinishedShot ? (
+        {!temporaryTakeStatus && !canPreviewFinishedShot ? (
           <p className="motion-preview-requirement" role="status">
             先为人物添加路线，或添加至少 2 个镜头轨迹点。
           </p>
-        ) : !canPreviewCameraMotion ? <p className="motion-preview-requirement" role="status">固定机位已就绪：可直接看镜头画面和导出 MP4；添加 2 个镜头点后可检查路线。</p> : null}
+        ) : !temporaryTakeStatus && !canPreviewCameraMotion ? <p className="motion-preview-requirement" role="status">固定机位已就绪：可直接看镜头画面和导出 MP4；添加 2 个镜头点后可检查路线。</p> : null}
       </section>
 
-      <div className="motion-studio-body">
+      <div ref={motionBodyRef} className="motion-studio-body">
         <section className="motion-template-panel" aria-label="镜头预设">
           <div className="motion-block-heading">
             <strong>选一种拍法</strong>
@@ -858,12 +876,11 @@ export function MotionStudio({
           <div className="motion-route-title">
             <div><Video aria-hidden="true" size={15} /><strong>镜头路线</strong><span>{motionPath.keyframes.length} 个点</span></div>
           </div>
-
           {motionPath.keyframes.length === 0 ? (
             <div className="motion-route-empty" role="status">
               <Route aria-hidden="true" size={20} />
-              <span>还没有轨迹点</span>
-              <small>点“开始掌镜”，走到合适的位置按 Enter。</small>
+              <span>{temporaryTakeStatus ? "已保存路线仍为空" : "还没有轨迹点"}</span>
+              <small>{temporaryTakeStatus ? "本次临时拍摄尚未保留。" : "点“开始掌镜”，走到合适的位置按 Enter。"}</small>
             </div>
           ) : (
             <div className="motion-waypoint-strip" role="list" aria-label="可编辑轨迹点">
