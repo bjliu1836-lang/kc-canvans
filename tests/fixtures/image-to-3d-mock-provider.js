@@ -36,10 +36,16 @@ export const MOCK_GLB = makeMockGlb();
 export function safeProviderError(error) {
   return ['PROVIDER_RESULT_TOO_LARGE', 'PROVIDER_RESULT_INVALID', 'PROVIDER_QUOTA_EXHAUSTED'].includes(error?.message)
     ? error.message
+    : error?.providerPhase === 'connecting' ? 'PROVIDER_CONNECT_FAILED'
     : 'PROVIDER_FAILED';
 }
 
 export async function generateGlb({ fileName, onConnected, onPhase, onSubmitStarting, onSubmitted, onProgress }) {
+  if (fileName === 'connect-error.png') {
+    const error = new TypeError('mock connection failure');
+    error.providerPhase = 'connecting';
+    throw error;
+  }
   const client = { close() {} };
   onConnected?.(client);
   onPhase?.('preprocessing');

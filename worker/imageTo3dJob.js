@@ -203,7 +203,7 @@ export class ImageTo3DJob {
       job = rows(db, "SELECT * FROM image3d_jobs WHERE state IN ('running','submitting','processing') ORDER BY created_at LIMIT 1")[0];
       if (job) {
         const state = job.submit_started ? 'unknown' : 'failed';
-        const phase = job.submit_started ? 'submission-uncertain' : 'failed';
+        const phase = job.submit_started ? 'submission-uncertain' : (job.phase || 'connecting');
         const error = job.submit_started ? 'SUBMISSION_STATUS_UNKNOWN' : 'PREPROCESS_INTERRUPTED';
         bind(db, 'UPDATE image3d_jobs SET state=?, phase=?, error_code=?, updated_at=? WHERE id=?', state, phase, error, Date.now(), job.id);
         bind(db, 'DELETE FROM image3d_input_chunks WHERE job_id=?', job.id);
@@ -316,7 +316,7 @@ export class ImageTo3DJob {
         const uncertain = Boolean(current?.submit_started && !providerResultReceived && error?.submissionUncertain && !error?.definitive);
         const state = uncertain ? 'unknown' : 'failed';
         bind(db, 'UPDATE image3d_jobs SET state=?, phase=?, error_code=?, updated_at=? WHERE id=?',
-          state, uncertain ? 'submission-uncertain' : 'failed', uncertain ? 'SUBMISSION_STATUS_UNKNOWN' : errorCode, Date.now(), job.id);
+          state, uncertain ? 'submission-uncertain' : (current?.phase || 'failed'), uncertain ? 'SUBMISSION_STATUS_UNKNOWN' : errorCode, Date.now(), job.id);
         bind(db, 'DELETE FROM image3d_input_chunks WHERE job_id=?', job.id);
       }
     } finally {
@@ -327,7 +327,7 @@ export class ImageTo3DJob {
   }
 
   fail(id, code) {
-    bind(this.ctx.storage.sql, "UPDATE image3d_jobs SET state='failed', phase='failed', error_code=?, updated_at=? WHERE id=?", code, Date.now(), id);
+    bind(this.ctx.storage.sql, "UPDATE image3d_jobs SET state='failed', error_code=?, updated_at=? WHERE id=?", code, Date.now(), id);
     bind(this.ctx.storage.sql, 'DELETE FROM image3d_input_chunks WHERE job_id=?', id);
   }
 }

@@ -8,14 +8,21 @@ export function safeProviderError(error) {
   if (status === 401 || status === 403) return 'PROVIDER_AUTH_FAILED';
   if (status === 429) return 'PROVIDER_CAPACITY_LIMIT';
   if (status === 402) return 'PROVIDER_QUOTA_EXHAUSTED';
+  if ([400, 404, 413, 422].includes(status)) return 'PROVIDER_REQUEST_REJECTED';
   if (error?.name === 'AbortError') return 'PROVIDER_TIMEOUT';
   const safeCodes = new Set([
-    'PROVIDER_SESSION_FAILED', 'PROVIDER_PREPROCESS_FAILED', 'PROVIDER_SUBMISSION_UNCONFIRMED', 'PROVIDER_QUOTA_EXHAUSTED',
+    'PROVIDER_CONNECT_FAILED', 'PROVIDER_SESSION_FAILED', 'PROVIDER_PREPROCESS_FAILED', 'PROVIDER_SUBMISSION_FAILED',
+    'PROVIDER_SUBMISSION_UNCONFIRMED', 'PROVIDER_QUOTA_EXHAUSTED', 'PROVIDER_REQUEST_REJECTED',
     'PROVIDER_AUTH_FAILED', 'PROVIDER_AUTH_UPDATE_REQUIRED', 'PROVIDER_CAPACITY_LIMIT',
     'PROVIDER_JOB_FAILED', 'PROVIDER_RESULT_MISSING_GLB', 'PROVIDER_RESULT_INVALID',
     'PROVIDER_RESULT_DOWNLOAD_FAILED', 'PROVIDER_RESULT_TOO_LARGE', 'PROVIDER_TIMEOUT',
   ]);
   if (safeCodes.has(error?.message)) return error.message;
+  if (error?.submissionUncertain) return 'PROVIDER_SUBMISSION_UNCONFIRMED';
+  if (error?.providerPhase === 'connecting') return 'PROVIDER_CONNECT_FAILED';
+  if (error?.providerPhase === 'starting-session') return 'PROVIDER_SESSION_FAILED';
+  if (error?.providerPhase === 'preprocessing') return 'PROVIDER_PREPROCESS_FAILED';
+  if (error?.providerPhase === 'submitting') return 'PROVIDER_SUBMISSION_FAILED';
   return 'PROVIDER_FAILED';
 }
 
@@ -96,19 +103,24 @@ function findProviderFile(value) {
   return null;
 }
 
-export async function generateGlb({ token, bytes, fileName, mimeType, connect = Client.connect, onConnected, onPhase, onSubmitStarting, onSubmitted, onProgress }) {
-  const client = await connect(SPACE, { token, events: ['status', 'data'] });
+export async function generateGlb({ token, bytes, fileName, mimeType, connect = Client.connect.bind(Client), onConnected, onPhase, onSubmitStarting, onSubmitted, onProgress }) {
+  let client = null;
+  let phase = 'connecting';
   let submissionStarted = false;
-  onConnected?.(client);
   let submissionCompleted = false;
   try {
+    client = await connect(SPACE, { token, events: ['status', 'data'] });
+    onConnected?.(client);
+    phase = 'starting-session';
+    onPhase?.(phase);
     // The Space's Python workflow explicitly starts a session before generation.
     const session = client.submit('/start_session', {});
     for await (const event of session) {
       if (event.type === 'status' && event.stage === 'error') throw new Error('PROVIDER_SESSION_FAILED');
     }
 
-    onPhase?.('preprocessing');
+    phase = 'preprocessing';
+    onPhase?.(phase);
     const uploadedImage = new File([bytes], fileName, { type: mimeType });
     const preprocessed = await client.predict('/preprocess_image', { image: uploadedImage });
     const preprocessedFile = findProviderFile(preprocessed?.data);
@@ -116,7 +128,8 @@ export async function generateGlb({ token, bytes, fileName, mimeType, connect = 
     const preprocessedBytes = await downloadProviderFile(client, preprocessedFile, 10 * 1024 * 1024);
     const image = new File([preprocessedBytes], 'preprocessed-input.png', { type: 'image/png' });
 
-    onPhase?.('submitting');
+    phase = 'submitting';
+    onPhase?.(phase);
     const permit = onSubmitStarting?.();
     if (permit === false) throw definitiveProviderError('JOB_NO_LONGER_ACTIVE');
     if (permit && typeof permit.then === 'function' && await permit === false) throw definitiveProviderError('JOB_NO_LONGER_ACTIVE');
@@ -151,7 +164,8 @@ export async function generateGlb({ token, bytes, fileName, mimeType, connect = 
     if (!glb) throw definitiveProviderError('PROVIDER_RESULT_MISSING_GLB');
     return { client, file: glb };
   } catch (error) {
-    client.close();
+    client?.close();
+    if (error && typeof error === 'object' && !error.providerPhase) error.providerPhase = phase;
     if (submissionStarted && !submissionCompleted && !error?.definitive) {
       error.submissionUncertain = !isDefinitiveRejection(error);
       if (!error.submissionUncertain) error.definitive = true;

@@ -36,24 +36,43 @@ function readStoredSession(): StoredImageTo3dSession | null {
 
 function jobMessage(job: ImageTo3dJobStatus | null) {
   if (!job) return "选择单个物体图片后开始生成";
-  if (job.state === "storing-input") return "正在安全保存输入图片…";
-  if (job.state === "queued") return "任务已排队，正在启动";
-  if (job.phase === "connecting") return "正在连接生成服务…";
-  if (job.phase === "preprocessing") return "正在进行官方图片预处理…";
-  if (job.state === "submitting") return "正在提交3D生成任务…";
-  if (job.phase === "waiting-in-queue") return "生成任务正在排队…";
-  if (job.state === "processing" || job.phase === "generating") return "正在生成3D模型…";
-  if (job.phase === "saving-result") return "正在保存生成结果…";
   if (job.state === "completed") return `模型已生成（${Math.ceil((job.glbBytes ?? 0) / 1024)} KB），请预览后确认导入`;
   if (job.state === "unknown") return "提交状态不确定，系统不会自动重试；远端任务可能仍在运行，20分钟保护期后可再试";
   if (job.state === "cancelled") return "任务已取消（仅排队任务可取消）";
-  if (job.error === "PROVIDER_QUOTA_EXHAUSTED") return "生成服务额度不足，请稍后或检查 Hugging Face 账户额度";
-  if (job.error === "PROVIDER_CAPACITY_LIMIT") return "生成服务当前繁忙，请稍后再试";
-  if (job.error === "PROVIDER_AUTH_FAILED") return "生成服务凭据失效，请联系管理员更新服务配置";
-  if (job.error === "PROVIDER_AUTH_UPDATE_REQUIRED") return "生成服务授权已到期，请联系管理员刷新服务配置";
-  if (job.error === "PREPROCESS_INTERRUPTED") return "图片预处理中断了，可重新发起任务";
-  if (job.error === "PROVIDER_NOT_CONFIGURED") return "生成服务尚未配置，请联系管理员";
-  return "生成失败，请检查图片后重试";
+  if (job.state === "failed") {
+    if (job.error === "PROVIDER_CONNECT_FAILED") return "连接3D生成服务失败，请检查服务状态后重试";
+    if (job.error === "PROVIDER_SESSION_FAILED") return "生成服务初始化会话失败，请稍后重试";
+    if (job.error === "PROVIDER_PREPROCESS_FAILED") return "官方图片预处理失败，请更换图片后重试";
+    if (job.error === "PROVIDER_SUBMISSION_FAILED") return "生成服务未能接受任务，请稍后重试";
+    if (job.error === "PROVIDER_SUBMISSION_UNCONFIRMED") return "生成任务提交状态未确认，请查看任务状态后再操作";
+    if (job.error === "PROVIDER_REQUEST_REJECTED") return "生成服务拒绝了请求，请检查图片格式与服务配置";
+    if (job.error === "PROVIDER_QUOTA_EXHAUSTED") return "生成服务额度不足，请检查 Hugging Face 账户额度";
+    if (job.error === "PROVIDER_CAPACITY_LIMIT") return "生成服务当前繁忙，请稍后再试";
+    if (job.error === "PROVIDER_AUTH_FAILED") return "生成服务凭据失效，请联系管理员更新服务配置";
+    if (job.error === "PROVIDER_AUTH_UPDATE_REQUIRED") return "生成服务授权已到期，请联系管理员刷新服务配置";
+    if (job.error === "PREPROCESS_INTERRUPTED") return "图片预处理中断了，可重新发起任务";
+    if (job.error === "PROVIDER_NOT_CONFIGURED") return "生成服务尚未配置，请联系管理员";
+    const phaseLabels: Record<string, string> = {
+      connecting: "连接服务",
+      "starting-session": "初始化会话",
+      preprocessing: "图片预处理",
+      submitting: "提交任务",
+      generating: "生成模型",
+      "saving-result": "保存结果",
+    };
+    return `生成失败（${phaseLabels[job.phase] || "阶段未知"}），可检查图片后重试`;
+  }
+  if (job.state === "storing-input") return "正在安全保存输入图片…";
+  if (job.state === "queued") return "任务已排队，正在启动";
+  if (job.phase === "connecting") return "正在连接生成服务…";
+  if (job.phase === "starting-session") return "正在初始化生成会话…";
+  if (job.phase === "preprocessing") return "正在进行官方图片预处理…";
+  if (job.phase === "submitting") return "正在提交3D生成任务…";
+  if (job.phase === "waiting-in-queue") return "生成任务正在排队…";
+  if (job.phase === "saving-result") return "正在保存生成结果…";
+  if (job.phase === "generating") return "正在生成3D模型…";
+  if (job.state === "processing") return "任务正在处理…";
+  return "任务正在处理…";
 }
 
 export function AssetImportPanel() {

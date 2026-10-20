@@ -149,3 +149,12 @@ test('DO records malformed or oversized provider results as failed, not unknown'
   const failed = await waitForJob(mf, invalid, 'failed');
   assert.equal(failed.error, 'PROVIDER_RESULT_INVALID');
 });
+
+test('DO keeps the last provider phase on a definitive connect failure', async (t) => {
+  const mf = await makeWorker();
+  t.after(() => mf.dispose());
+  const created = await createAuthorizedJob(mf, 'connect-error.png');
+  const failed = await waitForJob(mf, created, 'failed');
+  assert.equal(failed.phase, 'connecting');
+  assert.equal(failed.error, 'PROVIDER_CONNECT_FAILED');
+});

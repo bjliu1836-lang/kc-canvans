@@ -1,10 +1,35 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { Client } from '@gradio/client';
 import { handleImageTo3dRequest, validateGlbBytes, validateImageBytes } from '../worker/imageTo3dJob.js';
 import { downloadProviderGlb, findGlbFile, generateGlb, safeProviderError } from '../worker/imageTo3dProvider.js';
 
 const PNG = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
 const GLB = Uint8Array.from([0x67, 0x6c, 0x54, 0x46, 2, 0, 0, 0, 12, 0, 0, 0]);
+
+test('default TRELLIS connection preserves the Gradio static Client receiver and classifies connect failures', async () => {
+  const originalConnect = Client.connect;
+  let receiver;
+  let receivedSpace;
+  let receivedOptions;
+  Client.connect = function (space, options) {
+    receiver = this;
+    receivedSpace = space;
+    receivedOptions = options;
+    throw new TypeError('synthetic non-provider connection stop');
+  };
+  try {
+    await assert.rejects(
+      () => generateGlb({ token: 'test-token', bytes: PNG, fileName: 'object.png', mimeType: 'image/png' }),
+      (error) => error.providerPhase === 'connecting' && safeProviderError(error) === 'PROVIDER_CONNECT_FAILED',
+    );
+  } finally {
+    Client.connect = originalConnect;
+  }
+  assert.equal(receiver, Client);
+  assert.equal(receivedSpace, 'trellis-community/TRELLIS');
+  assert.deepEqual(receivedOptions, { token: 'test-token', events: ['status', 'data'] });
+});
 
 test('image and GLB validation checks MIME magic, GLB version, and hard size limits', () => {
   assert.equal(validateImageBytes(PNG, 'image/png'), true);
@@ -74,7 +99,7 @@ test('TRELLIS adapter follows official preprocess, start-session, and frozen sin
   ]);
   assert.ok(calls.indexOf('submit-starting-persisted') < calls.indexOf('submit:/generate_and_extract_glb'));
   assert.ok(calls.indexOf('event-persisted:provider-event-1:mock-session') > calls.indexOf('submit:/generate_and_extract_glb'));
-  assert.deepEqual(progress, ['preprocessing', 'submitting', 'complete']);
+  assert.deepEqual(progress, ['starting-session', 'preprocessing', 'submitting', 'complete']);
   assert.equal(findGlbFile(result.file)?.path, '/file=sample.glb');
   assert.equal(validateGlbBytes(await downloadProviderGlb(result.client, result.file, 20 * 1024 * 1024)), true);
   assert.deepEqual(Object.keys(events[0]).sort(), [
@@ -191,7 +216,7 @@ test('provider distinguishes explicit failure from uncertain submission interrup
   const brokenConnection = await statusFailure({ broken: true, message: 'signed URL disconnected' });
   assert.equal(brokenConnection.definitive, undefined);
   assert.equal(brokenConnection.submissionUncertain, true);
-  assert.equal(safeProviderError(brokenConnection), 'PROVIDER_FAILED');
+  assert.equal(safeProviderError(brokenConnection), 'PROVIDER_SUBMISSION_UNCONFIRMED');
 
   const connectionError = await statusFailure({ code: 'connection_error', message: 'private socket details' });
   assert.equal(connectionError.submissionUncertain, true);

@@ -1,6 +1,6 @@
 # 线上单物体图片生成 GLB 接入
 
-状态：本地 mock、干净依赖闭环及预览/应用归一化一致性复核完成；核心接入已提交 `6cad138`。当前待提交窄一致性补丁，然后配置服务访问码、部署及执行唯一一次真实生成验收。`HF_TOKEN` 已按批准配置为 Cloudflare secret；operator access key 尚未配置；尚无本轮新增 HF GPU 调用，也未部署。
+状态：线上接入已部署（预览共享规范化修复 `cbf9883`）。第一条真实任务曾创建并终态 `failed/PROVIDER_FAILED`，尚无成功GLB。复现并修复了Gradio静态 `Client.connect` 默认裸调用丢失 `this` 的问题；真实518图CPU-only路径已在workerd运行至GPU提交门前并主动停止。当前待完成clean-head补丁验证、重新部署，以及一次真实GPU提交/预览导入验收。原失败任务的公开status不返回provider event ID，不能仅凭其泛化错误字段直证是否到达上游；本地同代码路径复现证明connect失败发生在提交前。
 
 ## 范围与边界
 
@@ -35,9 +35,10 @@
 6. [x] 后端定向单测及Workerd/Miniflare SQL DO+KV路由测试；真provider仍待复核，未发起新GPU任务。
 7. [x] 隔离Vite生产构建成功，不覆盖 `public/`；mock浏览器流程已跑上传→任务运行中刷新→同ID恢复→完成/GLB预览→导入→刷新后资产可见。回执与截图在下方过程记录路径。
 8. [x] 将核心代码、状态分类和依赖闭包交主代理复核；候选提交需仅含本任务源/测试/文档与基于HEAD重建的root lock。旧public、artifact及其它dirty明确排除。
-9. [~] `HF_TOKEN` 已配置；待以stdin设置 `IMAGE_TO_3D_ACCESS_KEY`（访问码仅保存到gitignored本机私有文件），并复查HF凭据有效期/免费配额；不购买或启用付费。真实任务仍待部署后发起一次。
+9. [x] `HF_TOKEN` 与 `IMAGE_TO_3D_ACCESS_KEY` 已以批准的secret流程配置；访问码保存在本机私有文件。HF账户读取结果为 `isPro=false`、`canPay=false`；未启用付费额度。
 10. [x] 使用固定真实椅子GLB做本地 mock 浏览器验证：预览/应用/刷新后三阶段的实际 mesh world bounds 与 `matrixWorld` 一致；边界与回执见下方。
-11. [ ] 提交本任务核定闭包、推送`origin HEAD:main`并部署；检查线上版本激活与任务入口后，执行唯一一次真实GPU任务并更新运行回执。
+11. [~] 接入已部署到线上版本 `eb00f8d7-513b-4b4e-a125-b0bbd702d25c`。唯一一次旧真实任务返回 `failed/PROVIDER_FAILED`，没有GLB回执；已定位部署代码中的静态方法this丢失，正在补丁修复。不得重复旧任务；补丁发布后将作为一次新的线上任务创建，且最多一次GPU提交。
+12. [x] 静态连接错误修复与状态可诊断性：Worker默认使用绑定后的`Client.connect`；状态表记录`starting-session`，终态失败保留最后有效phase并返回安全阶段错误码；UI优先显示终态与具体阶段。固定518图CPU-only workerd探针已到`onSubmitStarting`后主动拒绝生成，GPU submit为0。Worker/Miniflare测试15/15通过，状态映射5/5通过，Director Desk TypeScript构建通过；仍需干净发布构建。
 
 ## 过程记录
 
@@ -67,3 +68,7 @@
 - 2026-10-20：主代理复核发现初版生成预览仅 `gltf.scene.clone + Bounds`，没有走 SceneRoot 对普通导入 GLB 使用的 `NormalizedImportedObject`；自动取景会掩盖预览/应用物理尺寸差异。窄修复在 `SceneRoot.tsx` 导出该共享组件，`GeneratedAssetPreview.tsx` 将同一 `gltf.scene` 交给组件，默认沿用普通导入规范（最长边2、XZ居中、minY落地、SkeletonUtils clone及材质隔离）；不修改生成mesh，不改 layout-only unit-box 资产路径。
 - 2026-10-20：真实固定 GLB 回放文件 `artifacts/image-to-3d-trellis-2026-10-20/trellis-community-authenticated-centered-chair.glb`（1,735,512 bytes；SHA256见本目录原始导入receipt）通过本地Vite+Miniflare mock 流程；providerCalls=0、创建POST=1。R3F Fiber store场景中同一 mesh `geometry_0`：预览、确认导入、刷新后bounds均为 min `[-1,0,-0.5264948788]` / max `[1,0.6849825927,0.5264948788]`；mesh `matrixWorld` 三阶段逐项一致，scale约`2.002904`、position约`[0.001300,0.341381,-0.003085]`，应用根`obj_3` rotation为零、scale为1。边界误差阈值`1e-5`。预览与场景canvas/camera不同（预览470×240、FOV38；场景1440×930、FOV50），因此只断言实际mesh世界几何矩阵/边界一致，不宣称相机取景相同。
 - 2026-10-20：parity浏览器receipt `artifacts/online-image-to-3d-integration-2026-10-20/browser-mock-receipt.json`；截图 `browser-generation-preview.png` 与关闭模型库后的 `browser-imported-after-reload.png`。通过真实任务UI mock请求→GLB预览→确认导入→刷新，R3F真实mesh验证通过；不是新的HF识别/生成质量证据。本轮新增临时browser脚本仅为本地artifact，不纳入产品提交。`SceneRoot.test.tsx` 46/46通过，`npx tsc -b --pretty false`通过；仍需对clean HEAD+本轮窄patch做发布构建和部署复核。
+- 2026-10-20线上失败复核：部署版本 `cbf9883`、静态入口/JS hash已按此前过程记录核验。唯一旧任务POST一次并返回202；随后同一job直接status GET为HTTP200、`state=failed`、`phase=failed`、`error=PROVIDER_FAILED`。`publicJob()`不返回providerEventId；原浏览器脚本/临时Chrome退出且未写receipt，旧capability仅存在已销毁的sessionStorage，因此没有createdAt/deadlineAt/私有status可复查。没有重发POST。
+- 2026-10-20根因复现：`@gradio/client@2.7.1`官方`Client.connect()`静态方法内部执行`new this(...)`。生产adapter默认参数原为裸`connect = Client.connect`并直接`connect(...)`；workerd/Miniflare以同HF token和SDK复现安全短错`TypeError: this is not a constructor`，堆栈落在connect静态调用，阶段为`connecting`。同一Client.connect在Node运行时连接成功并发现官方预处理/生成端点；明确说明此前只有connect/view_api握手并未覆盖adapter中裸静态调用。
+- 2026-10-20CPU-only正式adapter探针：`artifacts/online-image-to-3d-integration-2026-10-20/workerd-cpu-diagnostic-receipt.json`，输入为`input-armchair-model-ready-518-centered.png`（134035 bytes）。修复`Client.connect.bind(Client)`后，同版本SDK/workerd执行connect→start_session→原图上传→`/preprocess_image`→同源预处理文件下载，抵达GPU调用前的`onSubmitStarting`并由诊断回调主动返回false；结果为`phase=submitting`、`gpuGateReached=true`、`gpuSubmitAllowed=false`。该复现只覆盖CPU路径，不是新的GPU任务。
+- 2026-10-20本轮窄改：`worker/imageTo3dProvider.js`绑定静态连接并在错误上附安全阶段分类；`worker/imageTo3dJob.js`持久化`starting-session`并在失败时保留最后phase；前端终态优先、阶段优先映射；Worker adapter receiver回归与DO终态phase回归。`node --test tests/worker-image-to-3d.test.mjs tests/worker-image-to-3d-miniflare.test.mjs` 15/15；`npx vitest run src/editor/panels/AssetImportPanel.test.tsx` 5/5（替换已被6cad138职责迁移淘汰的“本地导入”断言，保留在ViewportToolbar入口的本地导入验证）；ViewportToolbar对应单测1/1；`npx tsc -b --pretty false`通过。待干净副本完整构建/Worker dry-run、补丁提交部署后再进行一次真实GPU调用。
