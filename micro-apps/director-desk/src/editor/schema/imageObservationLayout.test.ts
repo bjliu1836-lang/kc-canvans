@@ -87,6 +87,66 @@ function bedObservation(side: "image_left" | "image_right") {
 }
 
 describe("imageObservationToLayoutDraft", () => {
+  it("uses the same canonical X scale for generic bbox centers and widths at different image aspects", () => {
+    const observation = {
+      spaceType: "enclosed",
+      surfaces: [],
+      items: [{ id: "bench", name: "bench", category: "sofa", semanticType: "bench", bbox: [0.65, 0.4, 0.88, 0.76], confidence: 0.8, visibility: "visible", placement: "floor" }],
+    };
+    const layouts = [1, 1672 / 941].map((aspect) =>
+      imageObservationToLayoutDraft(observation, source, { imageAspectRatio: aspect }).components[0],
+    );
+
+    for (const component of layouts) {
+      expect(component.size[0]).toBeCloseTo(1.38);
+      expect(component.position[0]).toBeCloseTo(1.59);
+      expect(component.position[0] - component.size[0] / 2).toBeCloseTo(0.9);
+      expect(component.position[0] + component.size[0] / 2).toBeCloseTo(2.28);
+    }
+    expect(layouts[0].size[0]).toBeCloseTo(layouts[1].size[0]);
+    expect(layouts[0].position[0]).toBeCloseTo(layouts[1].position[0]);
+    expect(layouts[1].uncertain).toBe(true);
+  });
+
+  it("rejects a lower-residual camera when it cannot project the observed floor", () => {
+    const draft = imageObservationToLayoutDraft({
+      spaceType: "enclosed",
+      surfaces: [
+        { id: "floor_main", kind: "floor", side: "floor", bbox: [0, 0.62, 1, 1], confidence: 0.98, visibility: "visible" },
+        { id: "wall_back", kind: "wall", side: "image_back", bbox: [0, 0, 1, 0.62], confidence: 0.9, visibility: "partly_occluded" },
+        { id: "wall_right", kind: "wall", side: "image_right", bbox: [0.72, 0, 1, 0.72], confidence: 0.9, visibility: "visible" },
+        { id: "wall_left", kind: "wall", side: "image_left", bbox: [0, 0, 0.2, 0.62], confidence: 0.75, visibility: "partly_occluded" },
+      ],
+      items: [
+        { id: "sofa_main", name: "大型组合沙发", category: "sofa", bbox: [0.07, 0.52, 0.59, 0.83], confidence: 0.97, visibility: "visible", placement: "floor" },
+        { id: "coffee_table", name: "黑色茶几", category: "table", bbox: [0.42, 0.63, 0.62, 0.75], confidence: 0.95, visibility: "visible", placement: "floor" },
+        { id: "rug_main", name: "客厅地毯", semanticType: "rug", category: "prop", bbox: [0, 0.62, 0.82, 0.9], confidence: 0.9, visibility: "visible", placement: "floor" },
+        { id: "armchair_right", name: "棕色单人沙发椅", semanticType: "armchair", category: "sofa", bbox: [0.73, 0.6, 0.96, 0.88], confidence: 0.95, visibility: "visible", placement: "floor" },
+        { id: "side_table", name: "黑色小边几", category: "table", bbox: [0.73, 0.7, 0.8, 0.88], confidence: 0.9, visibility: "visible", placement: "floor" },
+        { id: "tv_cabinet", name: "电视柜", category: "cabinet", bbox: [0.73, 0.58, 0.99, 0.68], confidence: 0.9, visibility: "visible", contactWallSide: "image_right", placement: "floor" },
+        { id: "plant_right", name: "室内绿植", semanticType: "potted plant", category: "prop", bbox: [0.64, 0.35, 0.72, 0.62], confidence: 0.9, visibility: "visible", placement: "floor" },
+      ],
+    }, source, { imageAspectRatio: 2 });
+    const floor = draft.components.find((component) => component.id === "floor_main");
+    const backWall = draft.components.find((component) => component.id === "wall_back");
+    const rightWall = draft.components.find((component) => component.id === "wall_right");
+    const fit = draft.referenceCamera?.fitDiagnostics;
+
+    expect(fit?.floorProjectionRejectedCandidateCount).toBeGreaterThan(0);
+    expect(fit?.qualityStatus).toBe("needsReview");
+    expect(fit?.passedErrorThreshold).toBe(false);
+    expect(floor?.size).toEqual([0.1, 0.02, 0.1]);
+    expect(floor?.uncertain).toBe(true);
+    expect(backWall?.size[0]).toBeCloseTo(6);
+    expect(backWall?.position[2]).toBeCloseTo(-3);
+    expect(backWall?.confidence).toBeLessThanOrEqual(0.35);
+    expect(backWall?.uncertain).toBe(true);
+    expect(rightWall?.position[0]).toBeCloseTo(3);
+    expect(rightWall?.size[2]).toBeCloseTo(6);
+    expect(rightWall?.confidence).toBeLessThanOrEqual(0.35);
+    expect(rightWall?.uncertain).toBe(true);
+  });
+
   it("back-projects visible ground footprints through conservative camera candidates when VP evidence is absent", () => {
     const aspect = 1.5;
     const fixture = groundEvidenceFixture(aspect);
@@ -385,7 +445,7 @@ describe("imageObservationToLayoutDraft", () => {
     expect(actualWindow.position[2]).toBe(-3); // true openings retain the wall plane.
     expect(draft.relations).toContainEqual(expect.objectContaining({ fromId: "curtain", toId: "back_wall", type: "attached_to" }));
     expect(draft.relations).toContainEqual(expect.objectContaining({ fromId: "painting", toId: "left_wall", type: "attached_to" }));
-    expect(draft.validationWarnings ?? []).not.toContain("attachment_unresolved");
+    expect(draft.validationWarnings ?? []).toContain("attachment_unresolved");
     expect(curtain.uncertain).toBe(true);
     expect(actualWindow.size[2]).toBeLessThanOrEqual(0.12);
   });
@@ -542,8 +602,8 @@ describe("imageObservationToLayoutDraft", () => {
       expect(table.size[1]).toBe(0.75);
       expect(table.size[0]).toBeGreaterThan(0.25);
     }
-    expect(draft.components.find((component) => component.id === "altar")?.size[0]).toBeCloseTo(3.5);
-    expect(draft.components.find((component) => component.id === "stand")?.size[0]).toBeCloseTo(1.7066667);
+    expect(draft.components.find((component) => component.id === "altar")?.size[0]).toBeCloseTo(3.48);
+    expect(draft.components.find((component) => component.id === "stand")?.size[0]).toBeCloseTo(0.96);
     expect(draft.components.find((component) => component.id === "lamp")?.category).toBe("prop");
     expect(draft.components.find((component) => component.id === "cloth")?.size[1]).toBe(0.08);
   });
@@ -1118,7 +1178,7 @@ describe("imageObservationToLayoutDraft", () => {
     }, source);
     const wall = draft.components.find((component) => component.id === "back")!;
     expect(wall.uncertain).toBe(true);
-    expect(wall.notes).toContain("2.8m墙高为先验估算");
+    expect(wall.notes).toContain("房间尺寸为暂估值，尚未根据图像标定");
     expect(draft.validationWarnings ?? []).not.toContain("component_exceeds_room_height");
   });
 

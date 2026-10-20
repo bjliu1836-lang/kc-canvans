@@ -716,6 +716,7 @@ function normalizeLayoutReferenceCamera(raw: unknown, components: readonly Layou
     && (rawFit.baselineProjectionError === null || typeof rawFit.baselineProjectionError === "number" && Number.isFinite(rawFit.baselineProjectionError) && rawFit.baselineProjectionError >= 0 && rawFit.baselineProjectionError <= 10)
     && (rawFit.bestProjectionError === null || typeof rawFit.bestProjectionError === "number" && Number.isFinite(rawFit.bestProjectionError) && rawFit.bestProjectionError >= 0 && rawFit.bestProjectionError <= 10)
     && (rawFit.cameraOnlyBestProjectionError === undefined || rawFit.cameraOnlyBestProjectionError === null || typeof rawFit.cameraOnlyBestProjectionError === "number" && Number.isFinite(rawFit.cameraOnlyBestProjectionError) && rawFit.cameraOnlyBestProjectionError >= 0 && rawFit.cameraOnlyBestProjectionError <= 10)
+    && (rawFit.floorProjectionRejectedCandidateCount === undefined || Number.isInteger(rawFit.floorProjectionRejectedCandidateCount) && Number(rawFit.floorProjectionRejectedCandidateCount) >= 0 && Number(rawFit.floorProjectionRejectedCandidateCount) <= 600)
     && (rawFit.appliedProjectionError === undefined || rawFit.appliedProjectionError === null || typeof rawFit.appliedProjectionError === "number" && Number.isFinite(rawFit.appliedProjectionError) && rawFit.appliedProjectionError >= 0 && rawFit.appliedProjectionError <= 10)
     ? {
       qualityStatus: (rawFit.qualityStatus ?? (rawFit.applied ? "accepted" : "unavailable")) as "accepted" | "needsReview" | "unavailable",
@@ -725,6 +726,7 @@ function normalizeLayoutReferenceCamera(raw: unknown, components: readonly Layou
       bestProjectionError: rawFit.bestProjectionError as number | null,
       ...(rawFit.appliedProjectionError !== undefined ? { appliedProjectionError: rawFit.appliedProjectionError as number | null } : {}),
       ...(rawFit.cameraOnlyBestProjectionError !== undefined ? { cameraOnlyBestProjectionError: rawFit.cameraOnlyBestProjectionError as number | null } : {}),
+      ...(rawFit.floorProjectionRejectedCandidateCount !== undefined ? { floorProjectionRejectedCandidateCount: Number(rawFit.floorProjectionRejectedCandidateCount) } : {}),
       ...(rawPairDiagnostics ? { pairDiagnostics: pairDiagnostics ?? [] } : {}),
       bestCandidate: bestCandidate ?? null,
       applied: rawFit.applied,

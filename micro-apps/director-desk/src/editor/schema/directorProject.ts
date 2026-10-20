@@ -204,6 +204,7 @@ export interface DirectorLayoutReferenceCamera {
     bestProjectionError: number | null;
     appliedProjectionError?: number | null;
     cameraOnlyBestProjectionError?: number | null;
+    floorProjectionRejectedCandidateCount?: number;
     pairDiagnostics?: Array<{
       id: string;
       observedCenter: [number, number];

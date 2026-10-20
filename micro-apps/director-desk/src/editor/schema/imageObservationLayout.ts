@@ -599,7 +599,10 @@ function dimensionsFor(item: ImageObservationItem, sourceAspectRatio: number): [
   if (preset && !flat) return [...preset];
   const screenHeight = item.bbox[3] - item.bbox[1];
   const screenWidth = (item.bbox[2] - item.bbox[0]) * sourceAspectRatio;
-  const rawWidth = clamp(screenWidth * METERS_PER_IMAGE_EXTENT, 0.25, 3.5);
+  // The bbox center maps normalized X across the canonical room width below.
+  // Keep generic world-X extents on that same scale; source aspect belongs only
+  // in pixel-ratio calculations such as the upright semantic estimate below.
+  const rawWidth = clamp((item.bbox[2] - item.bbox[0]) * ROOM_WIDTH_METERS, 0.25, 3.5);
   const widthLimits: Partial<Record<DirectorLayoutCategory, [number, number]>> = {
     table: [0.35, 3.5], chair: [0.3, 1.5], sofa: [0.6, 3.5], cabinet: [0.3, 2.8], door: [0.55, 1.6], window: [0.4, 3.5],
   };
@@ -1763,7 +1766,7 @@ function refineJointSceneCandidate(
 
 /** Fits only the camera against observed object bounds. Scene geometry and explicit
  * support/partOf relationships remain fixed; a high residual stays under review. */
-export function fitReferenceScene(pairs: readonly CameraFitPair[], fallback: LayoutDraft["referenceCamera"], aspect: number, allComponents: readonly LayoutDraftComponent[], characters: readonly LayoutDraftCharacter[] = []) {
+export function fitReferenceScene(pairs: readonly CameraFitPair[], fallback: LayoutDraft["referenceCamera"], aspect: number, allComponents: readonly LayoutDraftComponent[], characters: readonly LayoutDraftCharacter[] = [], visibleFloorBbox?: readonly [number, number, number, number]) {
   const initialComponents = [...allComponents, ...characterCollisionComponents(characters, allComponents)];
   const initialCollisionPairs = fitCollisionPairs(initialComponents, initialComponents);
   const initialCollisionCounts = summarizeFitCollisions(initialCollisionPairs);
@@ -1781,7 +1784,7 @@ export function fitReferenceScene(pairs: readonly CameraFitPair[], fallback: Lay
     finalCollisionCounts: initialCollisionCounts,
     roomBoundaryViolations: initialRoomBoundaryViolations,
   };
-  if (pairs.length < 3 || !fallback) return { camera: fallback, before: undefined, best: undefined, bestCandidate: undefined, cameraOnlyBest: undefined, count: pairs.length, candidateCount: 0, rejectionReason: "insufficient-evidence" as const, qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], movedCount: 0, movedComponentCount: 0, movement: 0, collisionPairs: initialCollisionPairs, physicalValidity: initialPhysicalValidity, passedErrorThreshold: undefined };
+  if (pairs.length < 3 || !fallback) return { camera: fallback, before: undefined, best: undefined, bestCandidate: undefined, cameraOnlyBest: undefined, count: pairs.length, candidateCount: 0, floorProjectionRejectedCandidateCount: 0, rejectionReason: "insufficient-evidence" as const, qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], movedCount: 0, movedComponentCount: 0, movement: 0, collisionPairs: initialCollisionPairs, physicalValidity: initialPhysicalValidity, passedErrorThreshold: undefined };
   const floor = allComponents.find((component) => component.category === "ground");
   const before = cameraFitError(pairs, fallback, aspect);
   type RefinementSearch = ReturnType<typeof refineJointSceneCandidate>["search"] | undefined;
@@ -1800,8 +1803,15 @@ export function fitReferenceScene(pairs: readonly CameraFitPair[], fallback: Lay
     ...pairs.flatMap(({ groundCamera }) => groundCamera ? [{ position: [...groundCamera.position] as [number, number, number], target: [...groundCamera.target] as [number, number, number], fov: groundCamera.fov }] : []),
   ];
   const candidateKey = (camera: FitCamera) => [...camera.position, ...camera.target, camera.fov].map((value) => value.toFixed(4)).join(":");
+  let floorProjectionRejectedCandidateCount = 0;
   const uniqueCandidates = [...new Map([...explicitCameras, ...generatedCandidates].map((camera) => [candidateKey(camera), camera])).values()]
-    .filter((camera) => camera.position[2] > camera.target[2] && !cameraInsideGeometry(camera.position, allComponents));
+    .filter((camera) => {
+      if (!(camera.position[2] > camera.target[2]) || cameraInsideGeometry(camera.position, allComponents)) return false;
+      if (!visibleFloorBbox) return true;
+      if (projectVisibleFloorBounds(visibleFloorBbox, camera, aspect)) return true;
+      floorProjectionRejectedCandidateCount += 1;
+      return false;
+    });
   const hasParsedGroundCamera = pairs.some((pair) => pair.groundCamera);
   const usableFootprintPairIndices = pairs.flatMap((pair, index) => pair.onGround && pair.groundFootprints?.some((footprint) => footprint.visibility === "visible" && footprint.confidence >= 0.55) ? [index] : []);
   const useFootprintCameraCandidates = !hasParsedGroundCamera && usableFootprintPairIndices.length > 0;
@@ -1952,7 +1962,7 @@ export function fitReferenceScene(pairs: readonly CameraFitPair[], fallback: Lay
   const failedJointInitialization = new Map<string, number>();
   if (!hasSpatialEvidence && !bestCameraOnly) return {
     camera: fallback, before, best: undefined, bestCandidate: undefined, cameraOnlyBest: undefined,
-    count: pairs.length, candidateCount: candidates.length, rejectionReason: "no-safe-candidate" as const,
+    count: pairs.length, candidateCount: candidates.length, floorProjectionRejectedCandidateCount, rejectionReason: "no-safe-candidate" as const,
     qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], movedCount: 0,
     movedComponentCount: 0, movement: 0, collisionPairs: initialCollisions,
     physicalValidity: initialPhysicalValidity, passedErrorThreshold: undefined,
@@ -2049,7 +2059,7 @@ export function fitReferenceScene(pairs: readonly CameraFitPair[], fallback: Lay
     };
     return { camera: fallback, before, best: undefined, bestCandidate: undefined, cameraOnlyBest: bestCameraOnly?.rawError,
       count: pairs.length, candidateCount: candidates.length, rejectionReason: "no-safe-candidate" as const,
-      qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], spatialEvidenceTrace,
+      qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], spatialEvidenceTrace, floorProjectionRejectedCandidateCount,
       movedCount: 0, movedComponentCount: 0, movement: 0, collisionPairs: initialCollisions,
       physicalValidity: initialPhysicalValidity, passedErrorThreshold: undefined };
   }
@@ -2082,7 +2092,7 @@ export function fitReferenceScene(pairs: readonly CameraFitPair[], fallback: Lay
       if (!best || score < best.error) { best = { camera, error: score, rawError, components: fittedRoots, movement, refinementConstraintHits: option.constraintHits, refinementSearch: option.search }; selectedBranch = "joint"; }
     }
   }
-  if (!best || !Number.isFinite(best.rawError)) return { camera: fallback, before, best: undefined, bestCandidate: undefined, cameraOnlyBest: bestCameraOnly?.rawError, count: pairs.length, candidateCount: candidates.length, rejectionReason: "no-safe-candidate" as const, qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], movedCount: 0, movedComponentCount: 0, movement: 0, collisionPairs: initialCollisions, physicalValidity: initialPhysicalValidity, passedErrorThreshold: undefined };
+  if (!best || !Number.isFinite(best.rawError)) return { camera: fallback, before, best: undefined, bestCandidate: undefined, cameraOnlyBest: bestCameraOnly?.rawError, count: pairs.length, candidateCount: candidates.length, floorProjectionRejectedCandidateCount, rejectionReason: "no-safe-candidate" as const, qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], movedCount: 0, movedComponentCount: 0, movement: 0, collisionPairs: initialCollisions, physicalValidity: initialPhysicalValidity, passedErrorThreshold: undefined };
   // Once camera-only fitting meets the same acceptance threshold, keep every
   // observed object and its support/partOf relationships fixed.
   if (bestCameraOnly && !hasSpatialEvidence) {
@@ -2093,7 +2103,7 @@ export function fitReferenceScene(pairs: readonly CameraFitPair[], fallback: Lay
     const original = pairs[index].component.position;
     return Math.hypot(component.position[0] - original[0], component.position[2] - original[2]) > 0.05;
   }).length;
-  if (best.error >= beforeObjective * 0.9 && !hasSpatialEvidence) return { camera: fallback, before, best: best.rawError, bestCandidate, cameraOnlyBest: bestCameraOnly?.rawError, count: pairs.length, candidateCount: candidates.length, rejectionReason: "insufficient-improvement" as const, qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], movedCount: 0, movedComponentCount: 0, movement: best.movement, collisionPairs: initialCollisions, physicalValidity: initialPhysicalValidity, passedErrorThreshold: undefined };
+  if (best.error >= beforeObjective * 0.9 && !hasSpatialEvidence) return { camera: fallback, before, best: best.rawError, bestCandidate, cameraOnlyBest: bestCameraOnly?.rawError, count: pairs.length, candidateCount: candidates.length, floorProjectionRejectedCandidateCount, rejectionReason: "insufficient-improvement" as const, qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], movedCount: 0, movedComponentCount: 0, movement: best.movement, collisionPairs: initialCollisions, physicalValidity: initialPhysicalValidity, passedErrorThreshold: undefined };
   const carried = carryFittedParentMotion(best.components, allComponents);
   const selectedInitializedIds = best.components.filter((component) => component.groundFootprint?.length).map((component) => component.id);
   const selectedAfterCarryIds = carried.components.filter((component) => component.groundFootprint?.length).map((component) => component.id);
@@ -2144,13 +2154,14 @@ export function fitReferenceScene(pairs: readonly CameraFitPair[], fallback: Lay
   const unresolvedRigidPenetration = hardCollisionCount > 0
     && (hardCollisionCount > initialCollisionCounts.hard || finalPenetrationMeters >= initialPenetrationMeters - 1e-3);
   if (!cameraOutsideGeometry || unresolvedRigidPenetration) {
-    return { camera: fallback, before, best: best.rawError, bestCandidate, cameraOnlyBest: bestCameraOnly?.rawError, count: pairs.length, candidateCount: candidates.length, rejectionReason: hardCollisionCount ? "unsafe-collision" as const : "no-safe-candidate" as const, qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], movedCount: 0, movedComponentCount: 0, movement: best.movement, collisionPairs, physicalValidity: { withinRoom, roomBoundsEvaluated: Boolean(floor), cameraOutsideGeometry, cameraGeometryEvaluated: true, hardCollisionCount, initialCollisionCounts, finalCollisionCounts, initialPenetrationMeters, finalPenetrationMeters, roomBoundaryViolations } };
+    return { camera: fallback, before, best: best.rawError, bestCandidate, cameraOnlyBest: bestCameraOnly?.rawError, count: pairs.length, candidateCount: candidates.length, floorProjectionRejectedCandidateCount, rejectionReason: hardCollisionCount ? "unsafe-collision" as const : "no-safe-candidate" as const, qualityStatus: "unavailable" as const, components: [] as LayoutDraftComponent[], movedCount: 0, movedComponentCount: 0, movement: best.movement, collisionPairs, physicalValidity: { withinRoom, roomBoundsEvaluated: Boolean(floor), cameraOutsideGeometry, cameraGeometryEvaluated: true, hardCollisionCount, initialCollisionCounts, finalCollisionCounts, initialPenetrationMeters, finalPenetrationMeters, roomBoundaryViolations } };
   }
   if (best.rawError > 0.22) return {
     camera: { ...best.camera, projection: "perspective" as const, confidence: fallback.confidence, source: "estimated" as const, imageAspectRatio: aspect },
     before, best: best.rawError, bestCandidate, count: pairs.length, candidateCount: candidates.length,
     rejectionReason: "error-too-high" as const, qualityStatus: "needsReview" as const,
     cameraOnlyBest: bestCameraOnly?.rawError,
+    floorProjectionRejectedCandidateCount,
     components: returnedComponents, spatialEvidenceTrace, movedCount, movedComponentCount: carried.movedComponentCount, movement: best.movement, collisionPairs, physicalValidity: { withinRoom, roomBoundsEvaluated: Boolean(floor), cameraOutsideGeometry, cameraGeometryEvaluated: true, hardCollisionCount, initialCollisionCounts, finalCollisionCounts, initialPenetrationMeters, finalPenetrationMeters, roomBoundaryViolations }, passedErrorThreshold: false,
   };
   return {
@@ -2163,6 +2174,7 @@ export function fitReferenceScene(pairs: readonly CameraFitPair[], fallback: Lay
     rejectionReason: null,
     qualityStatus: "needsReview" as const,
     cameraOnlyBest: bestCameraOnly?.rawError,
+    floorProjectionRejectedCandidateCount,
     components: returnedComponents,
     spatialEvidenceTrace,
     movedCount,
@@ -2582,12 +2594,12 @@ export function imageObservationToLayoutDraft(
         || surface.bbox[2] >= 0.99 || surface.bbox[3] >= 0.99;
       components.push({
         id: surface.id, name: "识别到的地面", category: "ground", primitive: "box",
-        // A visible floor bbox has no metric extent until a candidate camera
-        // projects it. Keep only a non-authoritative placeholder here.
+        // A visible floor bbox is only an image envelope, not a metric room
+        // boundary. Keep only a non-authoritative placeholder here.
         position: [0, 0, 0], size: [0.1, 0.02, 0.1], rotationYDegrees: 0,
         confidence: Math.min(surface.confidence, 0.35), uncertain: true,
         visible: (surface.visibility ?? "visible") !== "occluded", ...(surface.mainColor ? { appearance: { color: surface.mainColor } } : {}),
-        notes: `${BOX_NOTE}地面范围待按相机候选和可见轮廓反投影；该占位尺寸不代表真实房间范围。${floorBoundaryCropped ? "地面触及图像边界，需人工复核。" : ""}`,
+        notes: `${BOX_NOTE}已识别地面，但边界尚未确定；该占位尺寸不代表真实房间范围。${floorBoundaryCropped ? "地面触及图像边界，需人工复核。" : ""}`,
       });
       generated.set(surface.id, { position: [0, 0, 0], size: [0.1, 0.02, 0.1], rotationYDegrees: 0, category: "ground" });
       observations.push({ componentId: surface.id, state: observationState(surface.visibility ?? "visible"), confidence: surface.confidence });
@@ -2602,10 +2614,13 @@ export function imageObservationToLayoutDraft(
     const wallTopCropped = surface.bbox[1] <= 0.01;
     components.push({
       id: surface.id, name: `可见墙面 ${surface.side}`, category: "wall", primitive: "box",
-      position, size, rotationYDegrees: 0, confidence: surface.confidence,
-      uncertain: wallTopCropped || surface.confidence < 0.65 || !isVisible(surface.visibility ?? "visible"), visible: (surface.visibility ?? "visible") !== "occluded",
+      position, size, rotationYDegrees: 0,
+      // Canonical wall extents and default height are placement priors, not
+      // metric measurements from the wall's image confidence.
+      confidence: Math.min(surface.confidence, 0.35),
+      uncertain: true, visible: (surface.visibility ?? "visible") !== "occluded",
       ...(surface.mainColor ? { appearance: { color: surface.mainColor } } : {}),
-      notes: wallTopCropped ? `${BOX_NOTE}墙顶触及图像上边界，2.8m墙高为先验估算，不视为完整测量值。` : BOX_NOTE,
+      notes: `${BOX_NOTE}房间尺寸为暂估值，尚未根据图像标定。${wallTopCropped ? "墙顶触及图像上边界，需人工复核。" : ""}`,
     });
     generated.set(surface.id, { position, size, rotationYDegrees: 0, category: "wall" });
     observations.push({ componentId: surface.id, state: observationState(surface.visibility ?? "visible"), confidence: surface.confidence });
@@ -2989,8 +3004,9 @@ export function imageObservationToLayoutDraft(
   const baselineCharacterCollisionComponents = characterCollisionComponents(baselineCharactersForSafety, baselineComponentsForSafety);
   const baselineSceneForSafety = [...baselineComponentsForSafety, ...baselineCharacterCollisionComponents];
   const baselineCollisionsForSafety = fitCollisionPairs(baselineSceneForSafety, baselineSceneForSafety);
+  const observedFloor = observation.surfaces.find((surface) => surface.kind === "floor" && surface.visibility !== "occluded");
   if (typeof aspect === "number" && Number.isFinite(aspect) && aspect >= 0.1 && aspect <= 10) {
-    const fit = fitReferenceScene(fitPairs, validated.referenceCamera, aspect, validated.components, validated.characters);
+    const fit = fitReferenceScene(fitPairs, validated.referenceCamera, aspect, validated.components, validated.characters, observedFloor?.bbox);
     if (fit.rejectionReason === null && fit.components.length) {
       const fittedById = new Map(fit.components.map((component) => [component.id, component]));
       validated.components = validated.components.map((component) => {
@@ -3009,6 +3025,7 @@ export function imageObservationToLayoutDraft(
         baselineProjectionError: Number.isFinite(fit.before) ? fit.before! : null,
         bestProjectionError: Number.isFinite(fit.best) ? fit.best! : null,
         cameraOnlyBestProjectionError: Number.isFinite(fit.cameraOnlyBest) ? fit.cameraOnlyBest! : null,
+        floorProjectionRejectedCandidateCount: fit.floorProjectionRejectedCandidateCount,
         pairDiagnostics,
         bestCandidate: fit.bestCandidate ?? null,
         applied: fit.qualityStatus !== "unavailable",
@@ -3027,65 +3044,11 @@ export function imageObservationToLayoutDraft(
       const fittedById = new Map(fit.components.map((component) => [component.id, component]));
       validated.components = validated.components.map((component) => fittedById.get(component.id) ?? component);
     }
-    // Keep the accepted candidate geometry so the later low-confidence wall/floor
-    // alignment can be rolled back as one dependency group if it creates a new clash.
+    // Preserve the fitted scene baseline for the existing post-fit safety check.
     const componentsBeforeSurfaceAlignment = new Map(validated.components.map((component) => [component.id, component]));
-    const observedFloor = observation.surfaces.find((surface) => surface.kind === "floor");
-    const projectedFloor = observedFloor && fit.camera ? projectVisibleFloorBounds(observedFloor.bbox, fit.camera, aspect) : undefined;
-    if (observedFloor && projectedFloor) {
-      validated.components = validated.components.map((component) => component.id !== observedFloor.id ? component : {
-        ...component,
-        position: projectedFloor.position,
-        size: projectedFloor.size,
-        confidence: Math.min(observedFloor.confidence, fit.camera?.confidence ?? 0.35, 0.35),
-        uncertain: true,
-        notes: "地面可见bbox按同一相机候选反投影；透视裁切和单图尺度有歧义，extent仅作低置信参考。",
-      });
-      if (fit.physicalValidity) {
-        // A projected visible floor bbox is only a soft image envelope, never a
-        // complete room boundary, even when none of its corners touch the image edge.
-        fit.physicalValidity.roomBoundsEvaluated = false;
-        fit.physicalValidity.roomBoundaryViolations = [];
-        fit.physicalValidity.withinRoom = false;
-      }
-      const floorMinX = projectedFloor.position[0] - projectedFloor.size[0] / 2;
-      const floorMaxX = projectedFloor.position[0] + projectedFloor.size[0] / 2;
-      const floorMinZ = projectedFloor.position[2] - projectedFloor.size[2] / 2;
-      const floorMaxZ = projectedFloor.position[2] + projectedFloor.size[2] / 2;
-      const wallById = new Map(observation.surfaces.filter((surface) => surface.kind === "wall").map((surface) => [surface.id, surface]));
-      const wallBySide = new Map(observation.surfaces.filter((surface) => surface.kind === "wall").map((surface) => [surface.side, surface]));
-      validated.components = validated.components.map((component) => {
-        if (component.category !== "wall") return component;
-        const wall = wallById.get(component.id);
-        if (!wall || wall.side === "unknown" || wall.side === "floor") return component;
-        const size: [number, number, number] = wall.side === "image_back"
-          ? [projectedFloor.size[0], component.size[1], component.size[2]]
-          : [component.size[0], component.size[1], projectedFloor.size[2]];
-        const position: [number, number, number] = wall.side === "image_back"
-          ? [projectedFloor.position[0], component.position[1], floorMinZ]
-          : [wall.side === "image_left" ? floorMinX : floorMaxX, component.position[1], projectedFloor.position[2]];
-        return { ...component, position, size, uncertain: true, confidence: Math.min(component.confidence, 0.35),
-          notes: [component.notes, "墙面平面按同一候选相机与可见地面bbox作低置信坐标对齐；地面bbox只是软包络，不代表完整房间边界。"].filter(Boolean).join(" ").slice(0, 240) };
-      });
-      const observedItemsById = new Map(observation.items.map((item) => [item.id, item]));
-      const componentById = new Map(validated.components.map((component) => [component.id, component]));
-      validated.components = validated.components.map((component) => {
-        const item = observedItemsById.get(component.id);
-        if (!item || effectivePlacement(item) !== "wall_attached") return component;
-        const wall = item.againstSurfaceId ? wallById.get(item.againstSurfaceId)
-          : item.contactWallSide && item.contactWallSide !== "unknown" && item.contactWallSide !== "none" ? wallBySide.get(item.contactWallSide) : undefined;
-        const wallComponent = wall ? componentById.get(wall.id) : undefined;
-        if (!wall || !wallComponent || wall.side === "unknown" || wall.side === "floor") return component;
-        const relativeX = clamp(((item.bbox[0] + item.bbox[2]) / 2 - wall.bbox[0]) / Math.max(0.05, wall.bbox[2] - wall.bbox[0]), 0, 1);
-        const relativeY = clamp(((item.bbox[1] + item.bbox[3]) / 2 - wall.bbox[1]) / Math.max(0.05, wall.bbox[3] - wall.bbox[1]), 0, 1);
-        const position: [number, number, number] = wall.side === "image_back"
-          ? [floorMinX + relativeX * projectedFloor.size[0], component.position[1], floorMinZ + WALL_THICKNESS_METERS]
-          : [wall.side === "image_left" ? floorMinX + WALL_THICKNESS_METERS : floorMaxX - WALL_THICKNESS_METERS,
-            component.position[1], floorMinZ + relativeY * projectedFloor.size[2]];
-        return { ...component, position, uncertain: true,
-          notes: [component.notes, "墙面挂接位置按可见墙bbox比例映射到同一候选地面坐标系；墙地边界与像素比例仅为低置信估算。"].filter(Boolean).join(" ").slice(0, 240) };
-      });
-    }
+    // A visible floor bbox is an image envelope, not a metric room boundary.
+    // Keep the canonical floor placeholder, walls and wall-attached placements;
+    // projectVisibleFloorBounds is still used above to reject unsafe camera candidates.
     const collisionReviewIds = new Set(fit.collisionPairs
       .filter((pair) => pair.classification !== "allowed")
       .flatMap((pair) => [pair.firstId, pair.secondId])
