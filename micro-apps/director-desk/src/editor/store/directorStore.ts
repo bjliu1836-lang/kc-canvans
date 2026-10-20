@@ -2521,7 +2521,9 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         const layoutCatalogAssets = new Map<string, DirectorAssetRef>();
         const objectsWithResolvedAssets = built.objects.map((object) => {
           const component = componentsById.get(object.layoutSource?.componentId ?? "");
-          const catalogItem = component ? resolveLayoutCatalogItem(component) : null;
+          const catalogItem = component && object.layoutSource?.catalogFit
+            ? resolveLayoutCatalogItem(component)
+            : null;
           if (!catalogItem) return object;
           const assetId = `layout_catalog_${catalogItem.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
           const existingAsset = state.project.assets.find((asset) => asset.id === assetId);

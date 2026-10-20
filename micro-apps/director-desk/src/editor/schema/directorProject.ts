@@ -133,6 +133,8 @@ export interface DirectorObject {
     category: DirectorLayoutCategory | "character";
     confidence: number;
     uncertain: boolean;
+    /** Layout-generated catalog asset whose local model is fitted to the recognized unit box. */
+    catalogFit?: "unit-box-bottom-center-v1";
     /** 参考图识别出的受限模型语义与材质提示；不等同于外部 image-to-3D 资产。 */
     modelDescriptor?: string;
     appearance?: {

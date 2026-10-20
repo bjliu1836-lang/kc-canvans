@@ -14,6 +14,7 @@ import {
   getUE4SeatedPelvisSupportHeight,
 } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { VIEWPORT_OBJECT_LABEL_VERTICAL_GAP } from "./viewportLabels";
+import { LAYOUT_CATALOG_FIT_MODE, resolveLayoutComponentRepresentation } from "./layoutComponentRepresentation";
 
 export const LAYOUT_DRAFT_MAX_COMPONENTS = 30;
 export const LAYOUT_COMPONENT_CATEGORIES = [
@@ -1798,6 +1799,7 @@ export function buildLayoutBatch(
 ): { batch: DirectorLayoutBatch; objects: DirectorObject[] } {
   const usedIds = new Set(existingObjectIds);
   const objects = draft.components.map((component) => {
+    const representation = resolveLayoutComponentRepresentation(draft, component);
     const renderAssembly = getLayoutComponentAssembly(component);
     const id = uniqueId(`${sanitizeId(batchId)}_${sanitizeId(component.id)}`, usedIds);
     return {
@@ -1810,7 +1812,7 @@ export function buildLayoutBatch(
       color: component.appearance?.color ?? LAYOUT_CATEGORY_COLORS[component.category],
       transform: {
         position: getLayoutComponentRenderPosition(component, groundHeight),
-        rotation: [0, getLayoutComponentRotationYDegrees(component) * Math.PI / 180, 0] as [number, number, number],
+        rotation: [0, getLayoutComponentRotationYDegrees(component) * Math.PI / 180 + (representation.kind === "catalog" ? representation.yawCorrectionRadians : 0), 0] as [number, number, number],
         scale: [...component.size] as [number, number, number],
       },
       layoutSource: {
@@ -1822,6 +1824,7 @@ export function buildLayoutBatch(
         category: component.category,
         confidence: component.confidence,
         uncertain: component.uncertain,
+        ...(representation.kind === "catalog" ? { catalogFit: LAYOUT_CATALOG_FIT_MODE } : {}),
         ...(component.modelDescriptor ? { modelDescriptor: component.modelDescriptor } : {}),
         ...(component.appearance ? { appearance: { ...component.appearance } } : {}),
         ...(renderAssembly ? { assembly: renderAssembly.map((part) => ({ ...part, position: [...part.position] as [number, number, number], size: [...part.size] as [number, number, number], ...(part.rotation ? { rotation: [...part.rotation] as [number, number, number] } : {}) })) } : {}),

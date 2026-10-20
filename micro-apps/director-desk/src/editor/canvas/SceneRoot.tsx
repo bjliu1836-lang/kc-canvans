@@ -57,6 +57,11 @@ import {
   getLayoutComponentRenderPosition,
   LAYOUT_CATEGORY_COLORS,
 } from "../schema/layoutDraft";
+import {
+  getLayoutCatalogUnitBoxTransform,
+  LAYOUT_CATALOG_FIT_MODE,
+  resolveLayoutComponentRepresentation,
+} from "../schema/layoutComponentRepresentation";
 import { getEffectiveGroundOpacity } from "./panoramaMath";
 import { getCrowdAnchorTransform } from "../store/directorStore";
 import {
@@ -285,6 +290,29 @@ export function getImportedModelNormalization(bounds: Box3, targetMaxSize = IMPO
   };
 }
 
+export function getImportedModelUnitBoxNormalization(bounds: Box3) {
+  if (bounds.isEmpty()) {
+    return {
+      position: [0, 0, 0] as [number, number, number],
+      scale: [1, 1, 1] as [number, number, number],
+    };
+  }
+
+  const size = new Vector3();
+  const center = new Vector3();
+  bounds.getSize(size);
+  bounds.getCenter(center);
+  const scale: [number, number, number] = [
+    size.x > 1e-8 ? 1 / size.x : 1,
+    size.y > 1e-8 ? 1 / size.y : 1,
+    size.z > 1e-8 ? 1 / size.z : 1,
+  ];
+  return {
+    position: [-center.x * scale[0], -bounds.min.y * scale[1], -center.z * scale[2]] as [number, number, number],
+    scale,
+  };
+}
+
 function createBoxWireframeLines({
   center,
   size,
@@ -449,16 +477,18 @@ export function getViewportCameraHitArea(): CameraHitArea {
   };
 }
 
-function NormalizedImportedObject({ color, object }: { color?: string; object: Object3D }) {
+function NormalizedImportedObject({ color, object, fitToLayoutUnitBox = false }: { color?: string; object: Object3D; fitToLayoutUnitBox?: boolean }) {
   const { clone, normalization } = useMemo(() => {
     const clonedObject = cloneSkeleton(object) as Object3D;
     clonedObject.updateMatrixWorld(true);
 
     return {
       clone: clonedObject,
-      normalization: getImportedModelNormalization(new Box3().setFromObject(clonedObject)),
+      normalization: fitToLayoutUnitBox
+        ? getImportedModelUnitBoxNormalization(new Box3().setFromObject(clonedObject))
+        : getImportedModelNormalization(new Box3().setFromObject(clonedObject)),
     };
-  }, [object]);
+  }, [fitToLayoutUnitBox, object]);
 
   useLayoutEffect(() => isolateAndTintModelMaterials(clone, color), [clone, color]);
   useEffect(() => () => disposeIsolatedModelMaterials(clone), [clone]);
@@ -466,29 +496,31 @@ function NormalizedImportedObject({ color, object }: { color?: string; object: O
   return (
     <group
       position={normalization.position}
-      scale={[normalization.scale, normalization.scale, normalization.scale]}
+      scale={typeof normalization.scale === "number"
+        ? [normalization.scale, normalization.scale, normalization.scale]
+        : normalization.scale}
     >
       <primitive object={clone} />
     </group>
   );
 }
 
-function FbxModel({ color, url }: { color?: string; url: string }) {
+function FbxModel({ color, url, fitToLayoutUnitBox }: { color?: string; url: string; fitToLayoutUnitBox?: boolean }) {
   const object = useLoader(FBXLoader, url);
 
-  return <NormalizedImportedObject color={color} object={object} />;
+  return <NormalizedImportedObject color={color} object={object} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
 }
 
-function ObjModel({ color, url }: { color?: string; url: string }) {
+function ObjModel({ color, url, fitToLayoutUnitBox }: { color?: string; url: string; fitToLayoutUnitBox?: boolean }) {
   const object = useLoader(OBJLoader, url);
 
-  return <NormalizedImportedObject color={color} object={object} />;
+  return <NormalizedImportedObject color={color} object={object} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
 }
 
-function GlbModel({ color, url }: { color?: string; url: string }) {
+function GlbModel({ color, url, fitToLayoutUnitBox }: { color?: string; url: string; fitToLayoutUnitBox?: boolean }) {
   const loaded = useLoader(GLTFLoader, url);
 
-  return <NormalizedImportedObject color={color} object={loaded.scene} />;
+  return <NormalizedImportedObject color={color} object={loaded.scene} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
 }
 
 function ImportedModel({
@@ -497,17 +529,23 @@ function ImportedModel({
   url,
   roughness,
   metalness,
+  fitToLayoutUnitBox = false,
 }: {
   color?: string;
   fileName: string;
   url: string;
   roughness?: number;
   metalness?: number;
+  fitToLayoutUnitBox?: boolean;
 }) {
-  if (url.startsWith("builtin://life/")) return <BuiltInLifeModel color={color} modelId={fileName} roughness={roughness} metalness={metalness} />;
-  if (/\.fbx$/i.test(fileName)) return <FbxModel color={color} url={url} />;
-  if (/\.obj$/i.test(fileName)) return <ObjModel color={color} url={url} />;
-  if (/\.glb$/i.test(fileName)) return <GlbModel color={color} url={url} />;
+  if (url.startsWith("builtin://life/")) {
+    const fit = fitToLayoutUnitBox ? getLayoutCatalogUnitBoxTransform(fileName) : null;
+    const model = <BuiltInLifeModel color={color} modelId={fileName} roughness={roughness} metalness={metalness} />;
+    return fit ? <group position={fit.position} scale={fit.scale}>{model}</group> : model;
+  }
+  if (/\.fbx$/i.test(fileName)) return <FbxModel color={color} url={url} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
+  if (/\.obj$/i.test(fileName)) return <ObjModel color={color} url={url} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
+  if (/\.glb$/i.test(fileName)) return <GlbModel color={color} url={url} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
   return null;
 }
 
@@ -918,7 +956,7 @@ function ObjectSceneNode({
         </>
       ) : isImportedModel && asset && resolvedAssetUrl ? (
         <Suspense fallback={null}>
-          <ImportedModel color={item.color} fileName={asset.fileName} url={resolvedAssetUrl} roughness={item.layoutSource?.appearance?.roughness} metalness={item.layoutSource?.appearance?.metalness} />
+          <ImportedModel color={item.color} fileName={asset.fileName} url={resolvedAssetUrl} roughness={item.layoutSource?.appearance?.roughness} metalness={item.layoutSource?.appearance?.metalness} fitToLayoutUnitBox={item.layoutSource?.catalogFit === LAYOUT_CATALOG_FIT_MODE} />
         </Suspense>
       ) : item.kind === "prop" && item.geometryType ? (
         item.layoutSource && (item.geometryType === "box" || item.geometryType === "cylinder") ? (
@@ -1892,6 +1930,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
       {interactive && layoutDraft ? (
         <group name="layout-draft-preview" userData={{ [HIDE_FROM_VIEWPORT_CAPTURE_KEY]: true }}>
           {layoutDraft.components.filter((component) => component.visible).map((component) => {
+            const representation = resolveLayoutComponentRepresentation(layoutDraft, component);
             const isHovered = component.id === hoveredLayoutComponentId;
             const isSelected = component.id === selectedLayoutComponentId;
             const previewStyle = getLayoutDraftPreviewStyle(component.category, {
@@ -1903,10 +1942,27 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
                 key={component.id}
                 name={`${component.id}-layout-draft-component`}
                 position={getLayoutComponentRenderPosition(component, scene.groundHeight)}
-                rotation={[0, getLayoutComponentRotationYDegrees(component) * Math.PI / 180, 0]}
+                rotation={[0, getLayoutComponentRotationYDegrees(component) * Math.PI / 180 + (representation.kind === "catalog" ? representation.yawCorrectionRadians : 0), 0]}
                 scale={component.size}
               >
-                <LayoutComponentGeometry
+                {representation.kind === "catalog" ? (
+                  <>
+                    <ImportedModel
+                      color={component.appearance?.color ?? LAYOUT_CATEGORY_COLORS[component.category]}
+                      fileName={representation.item.fileName}
+                      url={representation.item.url}
+                      roughness={component.appearance?.roughness}
+                      metalness={component.appearance?.metalness}
+                      fitToLayoutUnitBox
+                    />
+                    {isHovered || isSelected || component.uncertain ? (
+                      <mesh name={`${component.id}-catalog-bounds-outline`} position={[0, 0.5, 0]}>
+                        <boxGeometry args={[1.002, 1.002, 1.002]} />
+                        <meshBasicMaterial color={isHovered || isSelected ? previewStyle.outlineColor : "#D9A441"} wireframe transparent opacity={0.72} depthTest={false} />
+                      </mesh>
+                    ) : null}
+                  </>
+                ) : <LayoutComponentGeometry
                   category={component.category}
                   primitive={component.primitive}
                   color={component.appearance?.color ?? LAYOUT_CATEGORY_COLORS[component.category]}
@@ -1925,7 +1981,7 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
                       lineWidth: isHovered || isSelected ? previewStyle.outlineWidth : 0.8,
                     }
                     : undefined}
-                />
+                />}
               </group>
             );
           })}

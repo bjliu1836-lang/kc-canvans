@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { Box3, Vector3 } from "three";
+import { Box3, Group, Vector3 } from "three";
 import { afterEach, beforeEach, vi } from "vitest";
 import { VIEWPORT_CAMERA_VISUAL_SCALE } from "../schema/cameraGeometry";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
@@ -8,6 +8,11 @@ import { getUE4SeatedPelvisSupportHeight } from "../runtime/ue4Mannequin/ue4Mann
 import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
 import { getDirectorObjectSceneNodeName } from "../runtime/semanticBodyTracking";
 import { getImportedModelNormalization, getLayoutDraftPreviewStyle, SceneRoot } from "./SceneRoot";
+
+vi.mock("@react-three/fiber", async () => {
+  const actual = await vi.importActual<typeof import("@react-three/fiber")>("@react-three/fiber");
+  return { ...actual, useLoader: () => new Group() };
+});
 
 const mockCharacterModelShouldSuspend = vi.hoisted(() => ({ current: false }));
 
@@ -276,9 +281,11 @@ it("renders outlined layout draft components only in the interactive viewport", 
 
   const { container, rerender } = render(<SceneRoot />);
   expect(container.querySelector('group[name="layout-draft-preview"]')).toBeInTheDocument();
-  // 普通草稿组件不再各自生成 Edges；只在 hover/selected 时显示轮廓。
+  // Catalog preview uses the imported-model renderer instead of rebuilding a proxy.
   expect(screen.queryAllByTestId("layout-draft-outline")).toHaveLength(0);
-  expect(container.querySelector('mesh[name="sofa-layout-draft-mesh"] meshstandardmaterial')).toHaveAttribute("opacity", "0.92");
+  expect(container.querySelector('group[name="sofa-layout-draft-component"]')).toBeInTheDocument();
+  expect(container.querySelector("primitive")).toBeInTheDocument();
+  expect(container.querySelector('mesh[name="sofa-layout-draft-mesh"]')).not.toBeInTheDocument();
 
   rerender(<SceneRoot renderMode="clean-camera" />);
   expect(container.querySelector('group[name="layout-draft-preview"]')).not.toBeInTheDocument();
@@ -308,7 +315,7 @@ it("preserves estimated draft appearance", () => {
   useLayoutDraftPreviewStore.getState().setDraft({
     ...layoutDraftFixture,
     components: layoutDraftFixture.components.map((component) => component.id === "sofa"
-      ? { ...component, uncertain: true, appearance: { color: "#654321" } }
+      ? { ...component, uncertain: true, assembly: [{ primitive: "box", position: [0, 0.5, 0], size: [1, 1, 1] }], appearance: { color: "#654321" } }
       : component),
   });
   const { container } = render(<SceneRoot />);

@@ -98,15 +98,21 @@ export const BUILTIN_LIFE_MODELS: ModelLibraryItem[] = BUILTIN_LIFE_MODEL_INPUTS
  */
 export function resolveLayoutCatalogItem(input: { category: string; name?: string; modelDescriptor?: string }) {
   const text = `${input.name ?? ""} ${input.modelDescriptor ?? ""}`.toLowerCase();
-  const fileName = input.category === "sofa"
-    ? "sofa_modern_low.fbx"
-    : input.category === "table"
-      ? "dining_table_low.fbx"
-      : input.category === "prop" && /(冰箱|refrigerator)/.test(text)
-        ? "refrigerator_modern_low.fbx"
-        : input.category === "prop" && /(洗衣机|washing)/.test(text)
-          ? "washing_machine_modern_low.fbx"
-          : null;
+  if (input.category === "sofa" && /(沙发|sofa|couch)/.test(text) && !/(转角|组合|sectional|corner|modular|l[- ]?shaped)/.test(text)) {
+    return (LOCAL_GUO_ASSETS_AVAILABLE ? GUO_PROP_MODELS.find((item) => item.id === "guo-prop:guo-prop-0027") : undefined)
+      ?? BUILTIN_LIFE_MODELS.find((item) => item.fileName === "sofa_modern_low.fbx")
+      ?? null;
+  }
+  if (input.category === "table" && /(餐桌|dining\s*table)/.test(text)) {
+    return (LOCAL_GUO_ASSETS_AVAILABLE ? GUO_PROP_MODELS.find((item) => item.id === "guo-prop:guo-prop-0136") : undefined)
+      ?? BUILTIN_LIFE_MODELS.find((item) => item.fileName === "dining_table_low.fbx")
+      ?? null;
+  }
+  const fileName = input.category === "prop" && /(冰箱|refrigerator)/.test(text)
+    ? "refrigerator_modern_low.fbx"
+    : input.category === "prop" && /(洗衣机|washing)/.test(text)
+      ? "washing_machine_modern_low.fbx"
+      : null;
   return fileName ? BUILTIN_LIFE_MODELS.find((item) => item.fileName === fileName) ?? null : null;
 }
 
