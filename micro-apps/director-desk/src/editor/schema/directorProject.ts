@@ -135,6 +135,12 @@ export interface DirectorObject {
     uncertain: boolean;
     /** Layout-generated catalog asset whose local model is fitted to the recognized unit box. */
     catalogFit?: "unit-box-bottom-center-v1";
+    /** Generated single-object assets preserve mesh proportions inside the recognized target box. */
+    generatedAssetSource?: "reference-image-object-v1";
+    generatedAssetFit?: "uniform-contained-bottom-center-v1";
+    /** Frozen fit reference; later object scale edits must not be normalized away. */
+    generatedAssetFitTargetSize?: [number, number, number];
+    generatedAssetNeedsReview?: boolean;
     /** 参考图识别出的受限模型语义与材质提示；不等同于外部 image-to-3D 资产。 */
     modelDescriptor?: string;
     appearance?: {

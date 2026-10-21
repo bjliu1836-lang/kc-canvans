@@ -6,6 +6,7 @@ import { getUE4SeatedPelvisSupportHeight } from "../runtime/ue4Mannequin/ue4Mann
 import { getCameraViewSnapshotFromShot } from "../schema/cameraGeometry";
 import { createInitialDirectorState, useDirectorStore } from "../store/directorStore";
 import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
+import { getReferenceImageFingerprint } from "./DraftComponentAssetGenerator";
 import { ReferenceLayoutPanel } from "./ReferenceLayoutPanel";
 
 const fixtureDraft = {
@@ -56,6 +57,11 @@ beforeEach(() => {
     status: 200,
     json: async () => ({ draft: fixtureDraft }),
   })));
+});
+
+it("changes the private source fingerprint when the same reference node receives a new image URL", () => {
+  expect(getReferenceImageFingerprint("data:image/png;base64,first")).not.toBe(getReferenceImageFingerprint("data:image/png;base64,second"));
+  expect(getReferenceImageFingerprint(null)).toBe("missing");
 });
 
 it("edits a controlled layout fixture in preview and commits it as one generated batch", async () => {

@@ -212,6 +212,18 @@ export interface LayoutDraftComponent {
     holes?: [number, number][][];
     confidence: number;
   }>;
+  /** Safe image-space crop evidence for an explicitly confirmed single-object generation input. */
+  sourceImageEvidence?: {
+    bbox: [number, number, number, number];
+    confidence: number;
+    visibility: "visible" | "partial" | "occluded" | "uncertain";
+    hasPartComponents?: boolean;
+  };
+  /** Local asset registered from the confirmed single-object result; never a provider URL or capability. */
+  generatedAssetRefId?: string;
+  generatedAssetNeedsReview?: boolean;
+  generatedAssetState?: "generating" | "ready" | "failed";
+  generatedAssetUnavailable?: boolean;
   notes?: string;
   visible: boolean;
 }
@@ -257,6 +269,22 @@ export interface LayoutDraft {
   components: LayoutDraftComponent[];
   /** 参考图识别到的人物占位；旧数据/纯布景图为空数组。 */
   characters: LayoutDraftCharacter[];
+}
+
+/** Merge a registered local asset into the latest draft without reverting concurrent layout edits. */
+export function bindGeneratedAssetToLayoutDraft(draft: LayoutDraft, componentId: string, assetRefId: string): LayoutDraft | null {
+  if (!assetRefId || !draft.components.some((component) => component.id === componentId)) return null;
+  return {
+    ...draft,
+    components: draft.components.map((component) => component.id === componentId ? {
+      ...component,
+      generatedAssetRefId: assetRefId,
+      generatedAssetNeedsReview: true,
+      generatedAssetState: undefined,
+      generatedAssetUnavailable: undefined,
+      uncertain: true,
+    } : component),
+  };
 }
 
 export interface LayoutDraftSource {
@@ -1549,6 +1577,20 @@ export function validateLayoutDraftCandidate(
     const supportComponentId = typeof raw.supportComponentId === "string"
       ? boundedString(raw.supportComponentId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
       : undefined;
+    const sourceEvidence = isRecord(raw.sourceImageEvidence) ? raw.sourceImageEvidence : undefined;
+    const sourceBbox = sourceEvidence && Array.isArray(sourceEvidence.bbox)
+      && sourceEvidence.bbox.length === 4
+      && sourceEvidence.bbox.every((value) => typeof value === "number" && Number.isFinite(value))
+      ? sourceEvidence.bbox as [number, number, number, number]
+      : undefined;
+    const sourceEvidenceConfidence = sourceEvidence?.confidence;
+    const sourceEvidenceVisibility = sourceEvidence?.visibility;
+    const generatedAssetRefId = typeof raw.generatedAssetRefId === "string"
+      ? boundedString(raw.generatedAssetRefId, "", 120).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
+      : undefined;
+    const generatedAssetState = ["generating", "ready", "failed"].includes(String(raw.generatedAssetState))
+      ? raw.generatedAssetState as "generating" | "ready" | "failed"
+      : undefined;
     const partOfComponentId = typeof raw.partOfComponentId === "string"
       ? boundedString(raw.partOfComponentId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
       : undefined;
@@ -1596,6 +1638,21 @@ export function validateLayoutDraftCandidate(
       appearance: normalizeLayoutAppearance(raw.appearance, rotationYDegrees),
       ...(assembly ? { assembly } : {}),
       ...(groundFootprint ? { groundFootprint } : {}),
+      ...(sourceBbox && sourceBbox[0] >= 0 && sourceBbox[1] >= 0
+        && sourceBbox[2] <= 1 && sourceBbox[3] <= 1
+        && sourceBbox[2] > sourceBbox[0] && sourceBbox[3] > sourceBbox[1]
+        && typeof sourceEvidenceConfidence === "number" && Number.isFinite(sourceEvidenceConfidence)
+        && ["visible", "partial", "occluded", "uncertain"].includes(String(sourceEvidenceVisibility))
+        ? { sourceImageEvidence: {
+          bbox: [...sourceBbox] as [number, number, number, number],
+          confidence: Math.max(0, Math.min(1, sourceEvidenceConfidence)),
+          visibility: sourceEvidenceVisibility as "visible" | "partial" | "occluded" | "uncertain",
+          ...(sourceEvidence?.hasPartComponents === true ? { hasPartComponents: true } : {}),
+        } }
+        : {}),
+      ...(generatedAssetRefId ? { generatedAssetRefId, generatedAssetNeedsReview: raw.generatedAssetNeedsReview !== false } : {}),
+      ...(generatedAssetState && !generatedAssetRefId ? { generatedAssetState } : {}),
+      ...(generatedAssetRefId && raw.generatedAssetUnavailable === true ? { generatedAssetUnavailable: true } : {}),
       notes: [boundedString(raw.notes, "", 240), semanticCategoryConflict ? "基础几何类别与语义身份提示冲突；保留原语义供诊断，不按该语义生成assembly，待确认。" : "", footprintNeedsReview ? "平面轮廓无法与当前可渲染部件可靠相交；渲染与碰撞保留保守assembly，轮廓待复核。" : ""]
         .filter(Boolean).join(" ").slice(0, 240) || undefined,
       visible: raw.visible !== false,
@@ -1799,7 +1856,9 @@ export function buildLayoutBatch(
 ): { batch: DirectorLayoutBatch; objects: DirectorObject[] } {
   const usedIds = new Set(existingObjectIds);
   const objects = draft.components.map((component) => {
-    const representation = resolveLayoutComponentRepresentation(draft, component);
+    const representation = component.generatedAssetRefId
+      ? { kind: "geometry" as const }
+      : resolveLayoutComponentRepresentation(draft, component);
     const renderAssembly = getLayoutComponentAssembly(component);
     const id = uniqueId(`${sanitizeId(batchId)}_${sanitizeId(component.id)}`, usedIds);
     return {
@@ -1823,13 +1882,20 @@ export function buildLayoutBatch(
         componentId: component.id,
         category: component.category,
         confidence: component.confidence,
-        uncertain: component.uncertain,
+        uncertain: component.uncertain || Boolean(component.generatedAssetNeedsReview),
+        ...(component.generatedAssetRefId ? {
+          generatedAssetSource: "reference-image-object-v1" as const,
+          generatedAssetFit: "uniform-contained-bottom-center-v1" as const,
+          generatedAssetFitTargetSize: [...component.size] as [number, number, number],
+          generatedAssetNeedsReview: component.generatedAssetNeedsReview !== false,
+        } : {}),
         ...(representation.kind === "catalog" ? { catalogFit: LAYOUT_CATALOG_FIT_MODE } : {}),
         ...(component.modelDescriptor ? { modelDescriptor: component.modelDescriptor } : {}),
         ...(component.appearance ? { appearance: { ...component.appearance } } : {}),
         ...(renderAssembly ? { assembly: renderAssembly.map((part) => ({ ...part, position: [...part.position] as [number, number, number], size: [...part.size] as [number, number, number], ...(part.rotation ? { rotation: [...part.rotation] as [number, number, number] } : {}) })) } : {}),
         ...(component.groundFootprint ? { groundFootprint: component.groundFootprint.map((part) => ({ ...part, outer: part.outer.map((point) => [...point] as [number, number]), ...(part.holes ? { holes: part.holes.map((loop) => loop.map((point) => [...point] as [number, number])) } : {}) })) } : {}),
       },
+      ...(component.generatedAssetRefId ? { assetRefId: component.generatedAssetRefId } : {}),
     } satisfies DirectorObject;
   });
 

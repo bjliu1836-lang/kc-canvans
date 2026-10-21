@@ -5,6 +5,7 @@ import {
   createImageTo3dJobCredentials,
   getImageTo3dJob,
   imageTo3dAssetUrl,
+  IMAGE_TO_3D_ACCESS_KEY_STORAGE,
   type ImageTo3dJobCredentials,
   type ImageTo3dJobStatus,
 } from "../io/imageTo3dClient";
@@ -12,7 +13,6 @@ import { readLocalModelFile } from "../loaders/localModelImport";
 import { useDirectorStore } from "../store/directorStore";
 import { GeneratedAssetPreview } from "./GeneratedAssetPreview";
 
-const IMAGE_TO_3D_KEY_STORAGE = "KC_IMAGE_TO_3D_ACCESS_KEY";
 const IMAGE_TO_3D_JOB_STORAGE = "KC_IMAGE_TO_3D_JOB";
 const ACTIVE_JOB_STATES = new Set(["storing-input", "queued", "running", "submitting", "processing"]);
 
@@ -78,7 +78,7 @@ function jobMessage(job: ImageTo3dJobStatus | null) {
 
 export function AssetImportPanel() {
   const addImportedAsset = useDirectorStore((state) => state.addImportedAsset);
-  const [accessKey, setAccessKey] = useState(() => sessionStorage.getItem(IMAGE_TO_3D_KEY_STORAGE) || "");
+  const [accessKey, setAccessKey] = useState(() => sessionStorage.getItem(IMAGE_TO_3D_ACCESS_KEY_STORAGE) || "");
   const [accessKeyDraft, setAccessKeyDraft] = useState(accessKey);
   const [storedSession, setStoredSession] = useState<StoredImageTo3dSession | null>(() => readStoredSession());
   const [job, setJob] = useState<ImageTo3dJobStatus | null>(null);
@@ -119,8 +119,8 @@ export function AssetImportPanel() {
 
   function saveAccessKey() {
     const value = accessKeyDraft.trim();
-    if (value) sessionStorage.setItem(IMAGE_TO_3D_KEY_STORAGE, value);
-    else sessionStorage.removeItem(IMAGE_TO_3D_KEY_STORAGE);
+    if (value) sessionStorage.setItem(IMAGE_TO_3D_ACCESS_KEY_STORAGE, value);
+    else sessionStorage.removeItem(IMAGE_TO_3D_ACCESS_KEY_STORAGE);
     setAccessKey(value);
   }
 
@@ -193,7 +193,7 @@ export function AssetImportPanel() {
         </label>
         <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
           <button type="button" onClick={saveAccessKey}>保存访问码</button>
-          <button type="button" onClick={() => { setAccessKeyDraft(""); setAccessKey(""); sessionStorage.removeItem(IMAGE_TO_3D_KEY_STORAGE); }}>清除访问码</button>
+        <button type="button" onClick={() => { setAccessKeyDraft(""); setAccessKey(""); sessionStorage.removeItem(IMAGE_TO_3D_ACCESS_KEY_STORAGE); }}>清除访问码</button>
         </div>
         <label style={{ display: "block", marginTop: 10 }}>
           单物体图片（PNG / JPG / WEBP，最大10 MB）

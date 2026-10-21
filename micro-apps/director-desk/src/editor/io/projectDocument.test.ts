@@ -103,6 +103,30 @@ it("keeps reference layout source metadata through export and import", () => {
       uncertain: false,
     },
   });
+  project.objects.push({
+    id: "layout_1_sofa_1",
+    name: "单物体生成模型",
+    kind: "prop",
+    visible: true,
+    locked: false,
+    geometryType: "box",
+    assetRefId: "generated_asset_1",
+    transform: { position: [0.8, 0.4, 0.2], rotation: [0, 0.35, 0], scale: [2, 0.8, 0.9] },
+    layoutSource: {
+      batchId: "layout_1",
+      draftId: "draft_1",
+      sourceId: "image_1",
+      sourceFileName: "room.png",
+      componentId: "sofa_1",
+      category: "sofa",
+      confidence: 0.55,
+      uncertain: true,
+      generatedAssetSource: "reference-image-object-v1",
+      generatedAssetFit: "uniform-contained-bottom-center-v1",
+      generatedAssetFitTargetSize: [2, 0.8, 0.9],
+      generatedAssetNeedsReview: true,
+    },
+  });
 
   expect(parseProject(serializeProject(project))).toEqual(project);
 });

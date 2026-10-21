@@ -3252,5 +3252,20 @@ export function imageObservationToLayoutDraft(
               : `参考机位候选未应用（${finalRejection ?? "未通过质量检查"}）：${fit.count} 个主要物件，候选误差 ${fit.before?.toFixed(3) ?? "不可用"}→${fit.best?.toFixed(3) ?? "不可用"}；保留安全的原始组件位置。${collisionEvidence}`;
     validated.observations = [...(validated.observations ?? []).slice(0, 11), { state: "ambiguous", confidence: fit.camera?.confidence ?? 0, evidence }];
   }
+  const evidenceById = new Map(observation.items.map((item) => [item.id, item]));
+  validated.components = validated.components.map((component) => {
+    const item = evidenceById.get(component.id);
+    if (!item) return component;
+    const bbox = item.visibleBbox ?? item.bbox;
+    return {
+      ...component,
+      sourceImageEvidence: {
+        bbox: [...bbox] as [number, number, number, number],
+        confidence: item.confidence,
+        visibility: item.visibility === "partly_occluded" ? "partial" : item.visibility === "uncertain" ? "uncertain" : item.visibility,
+        hasPartComponents: observation.items.some((candidate) => candidate.partOfId === item.id),
+      },
+    };
+  });
   return validated;
 }

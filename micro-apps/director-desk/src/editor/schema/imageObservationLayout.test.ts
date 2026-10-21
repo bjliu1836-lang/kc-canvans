@@ -106,6 +106,11 @@ describe("imageObservationToLayoutDraft", () => {
     expect(layouts[0].size[0]).toBeCloseTo(layouts[1].size[0]);
     expect(layouts[0].position[0]).toBeCloseTo(layouts[1].position[0]);
     expect(layouts[1].uncertain).toBe(true);
+    expect(layouts[0].sourceImageEvidence).toMatchObject({
+      bbox: [0.65, 0.4, 0.88, 0.76],
+      confidence: 0.8,
+      visibility: "visible",
+    });
   });
 
   it("rejects a lower-residual camera when it cannot project the observed floor", () => {

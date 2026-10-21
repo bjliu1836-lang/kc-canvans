@@ -1,6 +1,6 @@
 import { Edges, Html, Line, TransformControls, type TransformControlsProps } from "@react-three/drei";
 import { useLoader, type ThreeEvent } from "@react-three/fiber";
-import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react";
+import { Component, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type MutableRefObject, type ReactNode } from "react";
 import { Box3, Color, ExtrudeGeometry, Matrix4, Quaternion, Shape, Vector3, type Group, type Object3D } from "three";
 import type { TransformControls as TransformControlsImpl } from "three-stdlib";
 import type { Line2 } from "three-stdlib";
@@ -313,6 +313,29 @@ export function getImportedModelUnitBoxNormalization(bounds: Box3) {
   };
 }
 
+export function getImportedModelUniformContainedNormalization(bounds: Box3, targetSize: [number, number, number]) {
+  if (bounds.isEmpty() || targetSize.some((value) => !Number.isFinite(value) || value <= 1e-6)) return null;
+  const size = new Vector3();
+  const center = new Vector3();
+  bounds.getSize(size);
+  bounds.getCenter(center);
+  const source = [size.x, size.y, size.z] as const;
+  if (source.some((value) => !Number.isFinite(value) || value <= 1e-6)) return null;
+  const uniformScale = Math.min(...source.map((value, index) => targetSize[index] / value));
+  if (!Number.isFinite(uniformScale) || uniformScale <= 0) return null;
+  const innerScale: [number, number, number] = [
+    uniformScale / targetSize[0],
+    uniformScale / targetSize[1],
+    uniformScale / targetSize[2],
+  ];
+  return {
+    position: [-center.x * innerScale[0], -bounds.min.y * innerScale[1], -center.z * innerScale[2]] as [number, number, number],
+    scale: innerScale,
+    uniformScale,
+    occupancy: source.map((value, index) => value * uniformScale / targetSize[index]) as [number, number, number],
+  };
+}
+
 function createBoxWireframeLines({
   center,
   size,
@@ -477,18 +500,24 @@ export function getViewportCameraHitArea(): CameraHitArea {
   };
 }
 
-export function NormalizedImportedObject({ color, object, fitToLayoutUnitBox = false }: { color?: string; object: Object3D; fitToLayoutUnitBox?: boolean }) {
+export function NormalizedImportedObject({ color, object, fitToLayoutUnitBox = false, fitToLayoutUniformTarget, invalidFallback = null, onInvalidNormalization }: { color?: string; object: Object3D; fitToLayoutUnitBox?: boolean; fitToLayoutUniformTarget?: [number, number, number]; invalidFallback?: ReactNode; onInvalidNormalization?: () => void }) {
   const { clone, normalization } = useMemo(() => {
     const clonedObject = cloneSkeleton(object) as Object3D;
     clonedObject.updateMatrixWorld(true);
 
     return {
       clone: clonedObject,
-      normalization: fitToLayoutUnitBox
+      normalization: fitToLayoutUniformTarget
+        ? getImportedModelUniformContainedNormalization(new Box3().setFromObject(clonedObject), fitToLayoutUniformTarget)
+        : fitToLayoutUnitBox
         ? getImportedModelUnitBoxNormalization(new Box3().setFromObject(clonedObject))
         : getImportedModelNormalization(new Box3().setFromObject(clonedObject)),
     };
-  }, [fitToLayoutUnitBox, object]);
+  }, [fitToLayoutUnitBox, fitToLayoutUniformTarget, object]);
+  useEffect(() => {
+    if (fitToLayoutUniformTarget && !normalization) onInvalidNormalization?.();
+  }, [fitToLayoutUniformTarget, normalization, onInvalidNormalization]);
+  if (!normalization) return invalidFallback;
 
   useLayoutEffect(() => isolateAndTintModelMaterials(clone, color), [clone, color]);
   useEffect(() => () => disposeIsolatedModelMaterials(clone), [clone]);
@@ -505,22 +534,22 @@ export function NormalizedImportedObject({ color, object, fitToLayoutUnitBox = f
   );
 }
 
-function FbxModel({ color, url, fitToLayoutUnitBox }: { color?: string; url: string; fitToLayoutUnitBox?: boolean }) {
+function FbxModel({ color, url, fitToLayoutUnitBox, fitToLayoutUniformTarget, invalidFallback, onInvalidNormalization }: { color?: string; url: string; fitToLayoutUnitBox?: boolean; fitToLayoutUniformTarget?: [number, number, number]; invalidFallback?: ReactNode; onInvalidNormalization?: () => void }) {
   const object = useLoader(FBXLoader, url);
 
-  return <NormalizedImportedObject color={color} object={object} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
+  return <NormalizedImportedObject color={color} object={object} fitToLayoutUnitBox={fitToLayoutUnitBox} fitToLayoutUniformTarget={fitToLayoutUniformTarget} invalidFallback={invalidFallback} onInvalidNormalization={onInvalidNormalization} />;
 }
 
-function ObjModel({ color, url, fitToLayoutUnitBox }: { color?: string; url: string; fitToLayoutUnitBox?: boolean }) {
+function ObjModel({ color, url, fitToLayoutUnitBox, fitToLayoutUniformTarget, invalidFallback, onInvalidNormalization }: { color?: string; url: string; fitToLayoutUnitBox?: boolean; fitToLayoutUniformTarget?: [number, number, number]; invalidFallback?: ReactNode; onInvalidNormalization?: () => void }) {
   const object = useLoader(OBJLoader, url);
 
-  return <NormalizedImportedObject color={color} object={object} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
+  return <NormalizedImportedObject color={color} object={object} fitToLayoutUnitBox={fitToLayoutUnitBox} fitToLayoutUniformTarget={fitToLayoutUniformTarget} invalidFallback={invalidFallback} onInvalidNormalization={onInvalidNormalization} />;
 }
 
-function GlbModel({ color, url, fitToLayoutUnitBox }: { color?: string; url: string; fitToLayoutUnitBox?: boolean }) {
+function GlbModel({ color, url, fitToLayoutUnitBox, fitToLayoutUniformTarget, invalidFallback, onInvalidNormalization }: { color?: string; url: string; fitToLayoutUnitBox?: boolean; fitToLayoutUniformTarget?: [number, number, number]; invalidFallback?: ReactNode; onInvalidNormalization?: () => void }) {
   const loaded = useLoader(GLTFLoader, url);
 
-  return <NormalizedImportedObject color={color} object={loaded.scene} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
+  return <NormalizedImportedObject color={color} object={loaded.scene} fitToLayoutUnitBox={fitToLayoutUnitBox} fitToLayoutUniformTarget={fitToLayoutUniformTarget} invalidFallback={invalidFallback} onInvalidNormalization={onInvalidNormalization} />;
 }
 
 function ImportedModel({
@@ -530,6 +559,9 @@ function ImportedModel({
   roughness,
   metalness,
   fitToLayoutUnitBox = false,
+  fitToLayoutUniformTarget,
+  invalidFallback,
+  onInvalidNormalization,
 }: {
   color?: string;
   fileName: string;
@@ -537,16 +569,52 @@ function ImportedModel({
   roughness?: number;
   metalness?: number;
   fitToLayoutUnitBox?: boolean;
+  fitToLayoutUniformTarget?: [number, number, number];
+  invalidFallback?: ReactNode;
+  onInvalidNormalization?: () => void;
 }) {
   if (url.startsWith("builtin://life/")) {
     const fit = fitToLayoutUnitBox ? getLayoutCatalogUnitBoxTransform(fileName) : null;
     const model = <BuiltInLifeModel color={color} modelId={fileName} roughness={roughness} metalness={metalness} />;
     return fit ? <group position={fit.position} scale={fit.scale}>{model}</group> : model;
   }
-  if (/\.fbx$/i.test(fileName)) return <FbxModel color={color} url={url} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
-  if (/\.obj$/i.test(fileName)) return <ObjModel color={color} url={url} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
-  if (/\.glb$/i.test(fileName)) return <GlbModel color={color} url={url} fitToLayoutUnitBox={fitToLayoutUnitBox} />;
-  return null;
+  if (/\.fbx$/i.test(fileName)) return <FbxModel color={color} url={url} fitToLayoutUnitBox={fitToLayoutUnitBox} fitToLayoutUniformTarget={fitToLayoutUniformTarget} invalidFallback={invalidFallback} onInvalidNormalization={onInvalidNormalization} />;
+  if (/\.obj$/i.test(fileName)) return <ObjModel color={color} url={url} fitToLayoutUnitBox={fitToLayoutUnitBox} fitToLayoutUniformTarget={fitToLayoutUniformTarget} invalidFallback={invalidFallback} onInvalidNormalization={onInvalidNormalization} />;
+  if (/\.glb$/i.test(fileName)) return <GlbModel color={color} url={url} fitToLayoutUnitBox={fitToLayoutUnitBox} fitToLayoutUniformTarget={fitToLayoutUniformTarget} invalidFallback={invalidFallback} onInvalidNormalization={onInvalidNormalization} />;
+  return invalidFallback ?? null;
+}
+
+export class ImportedModelErrorBoundary extends Component<{
+  fallback: ReactNode;
+  children: ReactNode;
+  onError?: () => void;
+}, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(_error: Error, _info: ErrorInfo) {
+    this.props.onError?.();
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+function DraftGeneratedModel({ asset, targetSize, fallback, onInvalidNormalization }: {
+  asset: DirectorAssetRef;
+  targetSize: [number, number, number];
+  fallback: ReactNode;
+  onInvalidNormalization?: () => void;
+}) {
+  const url = useResolvedLocalAssetUrl(asset);
+  if (!url) return fallback;
+  return <ImportedModelErrorBoundary key={url} fallback={fallback} onError={onInvalidNormalization}>
+    <Suspense fallback={fallback}><ImportedModel fileName={asset.fileName} url={url} fitToLayoutUniformTarget={targetSize} invalidFallback={fallback} onInvalidNormalization={onInvalidNormalization} /></Suspense>
+  </ImportedModelErrorBoundary>;
 }
 
 function GeometryPrimitiveModel({
@@ -865,6 +933,19 @@ function ObjectSceneNode({
     },
     [characterLabelKey]
   );
+  const generatedAssetFallback = item.layoutSource && (item.geometryType === "box" || item.geometryType === "cylinder")
+    ? <LayoutComponentGeometry
+        category={item.layoutSource.category as DirectorLayoutCategory}
+        primitive={item.geometryType}
+        color={item.color ?? "#d7e7ff"}
+        meshName={`${item.id}-layout-draft-mesh`}
+        roughness={item.layoutSource.appearance?.roughness}
+        metalness={item.layoutSource.appearance?.metalness}
+        descriptor={`${item.name} ${item.layoutSource.modelDescriptor ?? ""}`}
+        assembly={item.layoutSource.assembly}
+        groundFootprint={item.layoutSource.groundFootprint}
+      />
+    : item.geometryType ? <GeometryPrimitiveModel color={item.color} geometryType={item.geometryType} /> : null;
 
   useEffect(() => subscribeRuntimePlayback((progress) => {
     const group = groupRef.current;
@@ -955,9 +1036,20 @@ function ObjectSceneNode({
           ) : null}
         </>
       ) : isImportedModel && asset && resolvedAssetUrl ? (
-        <Suspense fallback={null}>
-          <ImportedModel color={item.color} fileName={asset.fileName} url={resolvedAssetUrl} roughness={item.layoutSource?.appearance?.roughness} metalness={item.layoutSource?.appearance?.metalness} fitToLayoutUnitBox={item.layoutSource?.catalogFit === LAYOUT_CATALOG_FIT_MODE} />
-        </Suspense>
+        <ImportedModelErrorBoundary key={resolvedAssetUrl} fallback={item.layoutSource?.generatedAssetSource ? generatedAssetFallback : null}>
+          <Suspense fallback={item.layoutSource?.generatedAssetSource ? generatedAssetFallback : null}>
+            <ImportedModel
+              color={item.layoutSource?.generatedAssetSource ? undefined : item.color}
+              fileName={asset.fileName}
+              url={resolvedAssetUrl}
+              roughness={item.layoutSource?.generatedAssetSource ? undefined : item.layoutSource?.appearance?.roughness}
+              metalness={item.layoutSource?.generatedAssetSource ? undefined : item.layoutSource?.appearance?.metalness}
+              fitToLayoutUnitBox={item.layoutSource?.catalogFit === LAYOUT_CATALOG_FIT_MODE}
+              fitToLayoutUniformTarget={item.layoutSource?.generatedAssetFit ? item.layoutSource.generatedAssetFitTargetSize ?? item.transform.scale : undefined}
+              invalidFallback={item.layoutSource?.generatedAssetSource ? generatedAssetFallback : null}
+            />
+          </Suspense>
+        </ImportedModelErrorBoundary>
       ) : item.kind === "prop" && item.geometryType ? (
         item.layoutSource && (item.geometryType === "box" || item.geometryType === "cylinder") ? (
           <LayoutComponentGeometry
@@ -1930,13 +2022,39 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
       {interactive && layoutDraft ? (
         <group name="layout-draft-preview" userData={{ [HIDE_FROM_VIEWPORT_CAPTURE_KEY]: true }}>
           {layoutDraft.components.filter((component) => component.visible).map((component) => {
-            const representation = resolveLayoutComponentRepresentation(layoutDraft, component);
+            const generatedAsset = component.generatedAssetRefId
+              ? assetsById.get(component.generatedAssetRefId)
+              : undefined;
+            const representation = generatedAsset?.sourceType === "model"
+              ? { kind: "geometry" as const }
+              : resolveLayoutComponentRepresentation(layoutDraft, component);
             const isHovered = component.id === hoveredLayoutComponentId;
             const isSelected = component.id === selectedLayoutComponentId;
             const previewStyle = getLayoutDraftPreviewStyle(component.category, {
               hovered: isHovered,
               selected: isSelected,
             });
+            const generatedFallback = <LayoutComponentGeometry
+              category={component.category}
+              primitive={component.primitive}
+              color={component.appearance?.color ?? LAYOUT_CATEGORY_COLORS[component.category]}
+              meshName={`${component.id}-layout-draft-mesh`}
+              roughness={component.appearance?.roughness}
+              metalness={component.appearance?.metalness}
+              descriptor={`${component.name} ${component.modelDescriptor ?? ""} ${component.notes ?? ""}`}
+              assembly={component.assembly}
+              groundFootprint={component.groundFootprint}
+            />;
+            const markGeneratedUnavailable = generatedAsset ? () => {
+              const state = useLayoutDraftPreviewStore.getState();
+              const current = state.draft;
+              const target = current?.components.find((candidate) => candidate.id === component.id);
+              if (!current || current.id !== layoutDraft.id || !target || target.generatedAssetRefId !== generatedAsset.id || target.generatedAssetUnavailable) return;
+              state.setDraft({
+                ...current,
+                components: current.components.map((candidate) => candidate.id === component.id ? { ...candidate, generatedAssetUnavailable: true } : candidate),
+              }, { edited: true });
+            } : undefined;
             return (
               <group
                 key={component.id}
@@ -1945,7 +2063,17 @@ export function SceneRoot({ renderMode = "interactive" }: { renderMode?: SceneRo
                 rotation={[0, getLayoutComponentRotationYDegrees(component) * Math.PI / 180 + (representation.kind === "catalog" ? representation.yawCorrectionRadians : 0), 0]}
                 scale={component.size}
               >
-                {representation.kind === "catalog" ? (
+                {generatedAsset?.sourceType === "model" ? (
+                  <>
+                    <DraftGeneratedModel asset={generatedAsset} targetSize={component.size} fallback={generatedFallback} onInvalidNormalization={markGeneratedUnavailable} />
+                    {isHovered || isSelected || component.uncertain || component.generatedAssetNeedsReview ? (
+                      <mesh name={component.id + "-generated-bounds-outline"} position={[0, 0.5, 0]}>
+                        <boxGeometry args={[1.002, 1.002, 1.002]} />
+                        <meshBasicMaterial color={isHovered || isSelected ? previewStyle.outlineColor : "#D9A441"} wireframe transparent opacity={0.72} depthTest={false} />
+                      </mesh>
+                    ) : null}
+                  </>
+                ) : representation.kind === "catalog" ? (
                   <>
                     <ImportedModel
                       color={component.appearance?.color ?? LAYOUT_CATEGORY_COLORS[component.category]}

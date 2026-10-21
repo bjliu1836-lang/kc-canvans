@@ -2808,6 +2808,61 @@ textarea:focus-visible {
   border-top: 1px solid rgb(var(--border-rgb) / 0.25);
 }
 
+.reference-layout-generated-asset {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle, rgba(255,255,255,.12));
+  border-radius: 8px;
+  background: rgba(255,255,255,.025);
+}
+
+.reference-layout-generated-asset label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-secondary, #aab2c0);
+  font-size: 12px;
+}
+
+.reference-layout-generated-asset input {
+  min-width: 0;
+  width: 100%;
+}
+
+.reference-layout-object-crop {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  touch-action: none;
+  cursor: crosshair;
+  background: #101318;
+}
+
+.reference-layout-object-crop img {
+  display: block;
+  width: 100%;
+  max-height: 260px;
+  height: auto;
+  pointer-events: none;
+  user-select: none;
+}
+
+.reference-layout-object-crop span {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #80c7ff;
+  background: rgba(128,199,255,.08);
+  box-shadow: 0 0 0 9999px rgba(0,0,0,.38);
+  pointer-events: none;
+}
+
+.reference-layout-generated-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .reference-layout-editor-title {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 28px 28px;
@@ -2875,6 +2930,8 @@ textarea:focus-visible {
 }
 
 .reference-layout-commit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
 }
 

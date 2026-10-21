@@ -1,4 +1,5 @@
 const AUTH_TOKEN_KEY = "KC_CANVAS_AUTH_TOKEN";
+export const IMAGE_TO_3D_ACCESS_KEY_STORAGE = "KC_IMAGE_TO_3D_ACCESS_KEY";
 
 export interface ImageTo3dJobCredentials {
   id: string;

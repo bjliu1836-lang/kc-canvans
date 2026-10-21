@@ -7,7 +7,7 @@ import type { LayoutDraft } from "../schema/layoutDraft";
 import { getUE4SeatedPelvisSupportHeight } from "../runtime/ue4Mannequin/ue4MannequinRig";
 import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
 import { getDirectorObjectSceneNodeName } from "../runtime/semanticBodyTracking";
-import { getImportedModelNormalization, getLayoutDraftPreviewStyle, SceneRoot } from "./SceneRoot";
+import { getImportedModelNormalization, getImportedModelUniformContainedNormalization, getLayoutDraftPreviewStyle, SceneRoot } from "./SceneRoot";
 
 vi.mock("@react-three/fiber", async () => {
   const actual = await vi.importActual<typeof import("@react-three/fiber")>("@react-three/fiber");
@@ -289,6 +289,28 @@ it("renders outlined layout draft components only in the interactive viewport", 
 
   rerender(<SceneRoot renderMode="clean-camera" />);
   expect(container.querySelector('group[name="layout-draft-preview"]')).not.toBeInTheDocument();
+});
+
+it("keeps the simple draft geometry visible when a generated model has unusable bounds", () => {
+  const base = createInitialDirectorState();
+  useDirectorStore.setState({
+    ...useDirectorStore.getState(),
+    ...base,
+    project: {
+      ...base.project,
+      assets: [{ id: "generated_sofa", kind: "prop", sourceType: "model", fileName: "generated.fbx", url: "blob:generated.fbx" }],
+    },
+  });
+  useLayoutDraftPreviewStore.getState().setDraft({
+    ...layoutDraftFixture,
+    components: layoutDraftFixture.components.map((component) => component.id === "sofa"
+      ? { ...component, generatedAssetRefId: "generated_sofa", generatedAssetNeedsReview: true }
+      : component),
+  });
+
+  const { container } = render(<SceneRoot />);
+
+  expect(container.querySelector('group[name="sofa-layout-draft-component"] mesh[name="sofa-layout-draft-mesh"]')).toBeInTheDocument();
 });
 
 it("isolates host scene objects during draft preview and restores them after discard", () => {
@@ -725,6 +747,22 @@ it("normalizes imported model bounds to a director-desk friendly size on the gro
   expect(normalization.position[0]).toBeCloseTo(-1.4);
   expect(normalization.position[1]).toBeCloseTo(0.6);
   expect(normalization.position[2]).toBeCloseTo(0.2);
+});
+
+it("fits a generated mesh uniformly inside the layout target without stretching and rejects invalid bounds", () => {
+  const normalization = getImportedModelUniformContainedNormalization(
+    new Box3(new Vector3(-1, 2, -2), new Vector3(1, 6, 2)),
+    [1, 2, 1],
+  );
+  expect(normalization).not.toBeNull();
+  expect(normalization?.uniformScale).toBeCloseTo(0.25);
+  expect(normalization?.scale[0]).toBeCloseTo(0.25);
+  expect(normalization?.scale[1]).toBeCloseTo(0.125);
+  expect(normalization?.scale[2]).toBeCloseTo(0.25);
+  expect(normalization?.occupancy).toEqual([0.5, 0.5, 1]);
+  expect(normalization!.position[1] + 2 * normalization!.scale[1]).toBeCloseTo(0);
+  expect(getImportedModelUniformContainedNormalization(new Box3(), [1, 1, 1])).toBeNull();
+  expect(getImportedModelUniformContainedNormalization(new Box3(new Vector3(0, 0, 0), new Vector3(1, 1, 1)), [1, 0, 1])).toBeNull();
 });
 
 it("wraps each imported model in its own loading boundary so the rest of the scene stays mounted", () => {

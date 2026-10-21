@@ -31,6 +31,7 @@ import {
 } from "../io/referenceLayoutClient";
 import { downloadLayoutDiagnostics, isLayoutDiagnosticsEnabled, recordLayoutDraftApplied, recordLayoutReferencePreview } from "../io/layoutDiagnostics";
 import {
+  bindGeneratedAssetToLayoutDraft,
   calibrateLayoutDraft,
   getLayoutComponentRotationYDegrees,
   getLayoutDraftReferenceCamera,
@@ -54,6 +55,7 @@ import {
 import { useDirectorStore } from "../store/directorStore";
 import { useLayoutDraftPreviewStore } from "../store/layoutDraftPreviewStore";
 import { InspectorSection } from "./InspectorControls";
+import { DraftComponentAssetGenerator, getReferenceImageFingerprint } from "./DraftComponentAssetGenerator";
 
 const LAYOUT_VALIDATION_WARNING_LABELS: Record<string, string> = {
   space_type_invalid: "空间类型无法确认。",
@@ -240,7 +242,11 @@ export function ReferenceLayoutPanel() {
     () => [localImage, ...connectedImages].filter((image): image is ReferenceLayoutImage => Boolean(image)),
     [connectedImages, localImage]
   );
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
   const selectedImage = images.find((image) => image.sourceId === selectedSourceId) ?? images[0] ?? null;
+  const draftSourceImage = draft ? images.find((image) => image.sourceId === draft.sourceId) ?? null : null;
+  const draftSourceFingerprint = getReferenceImageFingerprint(draftSourceImage?.url);
   const selectedComponent = draft?.components.find((component) => component.id === selectedComponentId) ?? null;
   const draftReferenceCamera = draft ? getLayoutDraftReferenceCamera(draft) : null;
   const draftValidationWarnings = getLayoutValidationWarningLabels(draft?.validationWarnings);
@@ -471,6 +477,44 @@ export function ReferenceLayoutPanel() {
     setDraft({
       ...draft,
       components: draft.components.map((component) => component.id === id ? updater(component) : component),
+    }, { edited: true });
+  }
+
+  function markGeneratedAssetUnavailable(draftId: string, componentId: string, assetRefId: string) {
+    const current = useLayoutDraftPreviewStore.getState().draft;
+    if (!current || current.id !== draftId) return;
+    const target = current.components.find((component) => component.id === componentId);
+    if (!target || target.generatedAssetRefId !== assetRefId || target.generatedAssetUnavailable) return;
+    setDraft({
+      ...current,
+      components: current.components.map((component) => component.id === componentId ? { ...component, generatedAssetUnavailable: true } : component),
+    }, { edited: true });
+  }
+
+  function isCurrentGeneratedAssetTarget(draftId: string, sourceId: string, sourceFingerprint: string, componentId: string) {
+    const current = useLayoutDraftPreviewStore.getState().draft;
+    const currentSourceImage = imagesRef.current.find((image) => image.sourceId === sourceId);
+    return Boolean(current && current.id === draftId && current.sourceId === sourceId && getReferenceImageFingerprint(currentSourceImage?.url) === sourceFingerprint && current.components.some((component) => component.id === componentId));
+  }
+
+  function bindGeneratedAsset(draftId: string, sourceId: string, sourceFingerprint: string, componentId: string, assetRefId: string) {
+    if (!isCurrentGeneratedAssetTarget(draftId, sourceId, sourceFingerprint, componentId)) return false;
+    const current = useLayoutDraftPreviewStore.getState().draft;
+    if (!current) return false;
+    const next = bindGeneratedAssetToLayoutDraft(current, componentId, assetRefId);
+    if (!next) return false;
+    setDraft(next, { edited: true });
+    return true;
+  }
+
+  function setGeneratedAssetState(draftId: string, sourceId: string, componentId: string, state: "generating" | "ready" | "failed" | undefined) {
+    const current = useLayoutDraftPreviewStore.getState().draft;
+    if (!current || current.id !== draftId || current.sourceId !== sourceId || !current.components.some((component) => component.id === componentId)) return;
+    setDraft({
+      ...current,
+      components: current.components.map((component) => component.id === componentId
+        ? { ...component, generatedAssetState: component.generatedAssetRefId ? undefined : state }
+        : component),
     }, { edited: true });
   }
 
@@ -843,6 +887,7 @@ export function ReferenceLayoutPanel() {
                   <span>{component.name}</span>
                   <small>{CATEGORY_LABELS[component.category]} · {Math.round(component.confidence * 100)}%</small>
                   {component.uncertain ? <i>待确认</i> : null}
+                  {component.generatedAssetRefId ? <i>已采用生成模型</i> : component.generatedAssetState === "generating" ? <i>生成中</i> : component.generatedAssetState === "failed" ? <i>失败，保留简模</i> : component.generatedAssetState === "ready" ? <i>生成完成待采用</i> : null}
                 </button>
               ))}
             </div>
@@ -1041,6 +1086,21 @@ export function ReferenceLayoutPanel() {
                     {selectedComponent.notes}
                   </p>
                 ) : null}
+                {draft && (
+                  <DraftComponentAssetGenerator
+                    key={draft.id + ":" + draft.sourceId + ":" + draftSourceFingerprint + ":" + selectedComponent.id}
+                    scopeId={scopeId}
+                    draft={draft}
+                    component={selectedComponent}
+                    components={draft.components}
+                    sourceImage={draftSourceImage}
+                    sourceFingerprint={draftSourceFingerprint}
+                    isCurrentTarget={isCurrentGeneratedAssetTarget}
+                    onModelUnavailable={markGeneratedAssetUnavailable}
+                    onBindAsset={bindGeneratedAsset}
+                    onStateChange={setGeneratedAssetState}
+                  />
+                )}
               </div>
             ) : null}
             <div className="reference-layout-commit-row">

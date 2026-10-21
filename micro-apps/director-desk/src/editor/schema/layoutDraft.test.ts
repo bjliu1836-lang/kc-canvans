@@ -7,6 +7,7 @@ import {
 import { VIEWPORT_OBJECT_LABEL_VERTICAL_GAP } from "./viewportLabels";
 import templeCurrentModelDraft from "./__fixtures__/temple-current-model-draft.json";
 import {
+  bindGeneratedAssetToLayoutDraft,
   buildLayoutBatch,
   calibrateLayoutDraft,
   createLayoutCharacterRenderAdapter,
@@ -23,6 +24,27 @@ import {
 } from "./layoutDraft";
 
 const source = { sourceId: "image_1", fileName: "room.png" };
+
+it("binds a generated asset to the latest component while preserving intervening layout edits", () => {
+  const draft = validateLayoutDraftCandidate({
+    scale: { mode: "estimated", confidence: 0.4 },
+    components: [{
+      id: "sofa_1", name: "沙发", category: "sofa", primitive: "box",
+      position: [1.2, 0.5, -0.3], size: [2.4, 0.9, 1.1], rotationYDegrees: 35,
+      confidence: 0.5, uncertain: true, supportComponentId: "rug_1", notes: "保留的识别说明",
+    }],
+  }, source, { draftId: "draft_bind" });
+  const notesBeforeBinding = draft.components[0].notes;
+  const adopted = bindGeneratedAssetToLayoutDraft(draft, "sofa_1", "local_asset_1");
+
+  expect(adopted?.components[0]).toMatchObject({
+    position: [1.2, 0.5, -0.3], size: [2.4, 0.9, 1.1], rotationYDegrees: 35,
+    supportComponentId: "rug_1", notes: notesBeforeBinding,
+    generatedAssetRefId: "local_asset_1", generatedAssetNeedsReview: true, uncertain: true,
+  });
+  expect(draft.components[0]).not.toHaveProperty("generatedAssetRefId");
+  expect(bindGeneratedAssetToLayoutDraft(draft, "missing", "local_asset_1")).toBeNull();
+});
 
 function candidate() {
   return {
@@ -94,6 +116,34 @@ describe("layout draft validation", () => {
     expect(draft.components[0]).not.toHaveProperty("supportComponentId");
     expect(draft.components[0]).not.toHaveProperty("assembly");
     expect(draft.characters[0]).not.toHaveProperty("supportComponentId");
+  });
+
+  it("keeps crop evidence in the draft and carries only a local generated asset binding into the applied object", () => {
+    const value = candidate();
+    value.components[0] = {
+      ...value.components[0],
+      sourceImageEvidence: { bbox: [0.1, 0.2, 0.6, 0.8], confidence: 0.88, visibility: "visible" },
+      generatedAssetRefId: "local_asset_generated_glb",
+      generatedAssetNeedsReview: true,
+    } as typeof value.components[0];
+    const draft = validateLayoutDraftCandidate(value, source);
+    const object = buildLayoutBatch(draft, "layout_generated", []).objects[0];
+
+    expect(draft.components[0].sourceImageEvidence).toEqual({
+      bbox: [0.1, 0.2, 0.6, 0.8],
+      confidence: 0.88,
+      visibility: "visible",
+    });
+    expect(object.assetRefId).toBe("local_asset_generated_glb");
+    expect(object.layoutSource).toMatchObject({
+      generatedAssetSource: "reference-image-object-v1",
+      generatedAssetFit: "uniform-contained-bottom-center-v1",
+      generatedAssetFitTargetSize: [6, 2.8, 0.15],
+      generatedAssetNeedsReview: true,
+    });
+    expect(object.layoutSource).not.toHaveProperty("catalogFit");
+    expect(object.layoutSource).not.toHaveProperty("sourceImageEvidence");
+    expect(JSON.stringify(object)).not.toContain("capability");
   });
 
   it.each([
