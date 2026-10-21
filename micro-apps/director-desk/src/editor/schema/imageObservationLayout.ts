@@ -3263,6 +3263,7 @@ export function imageObservationToLayoutDraft(
         bbox: [...bbox] as [number, number, number, number],
         confidence: item.confidence,
         visibility: item.visibility === "partly_occluded" ? "partial" : item.visibility === "uncertain" ? "uncertain" : item.visibility,
+        sourceId: source.sourceId,
         hasPartComponents: observation.items.some((candidate) => candidate.partOfId === item.id),
       },
     };

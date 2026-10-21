@@ -1,6 +1,72 @@
 export const DIRECTOR_LAYOUT_OBSERVATION_FORMAT = "image-observations-v1";
 export const DIRECTOR_LAYOUT_OBSERVATION_MAX_COMPLETION_TOKENS = 8192;
 export const DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS = 32768;
+export const DIRECTOR_LAYOUT_MAX_REFERENCE_IMAGES = 3;
+export const DIRECTOR_LAYOUT_MAX_INLINE_IMAGE_CHARS = 16 * 1024 * 1024 + 512;
+
+const isReferenceImageRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+export function normalizeDirectorLayoutReferenceImages(body) {
+  if (!isReferenceImageRecord(body)) throw new Error("DIRECTOR_LAYOUT_IMAGE_REQUIRED");
+  const hasImages = Object.prototype.hasOwnProperty.call(body, "images");
+  if (hasImages && body.image !== undefined) throw new Error("DIRECTOR_LAYOUT_IMAGES_AMBIGUOUS");
+  const rawImages = hasImages ? body.images : body.image === undefined ? null : [body.image];
+  if (!Array.isArray(rawImages)) throw new Error(hasImages ? "DIRECTOR_LAYOUT_IMAGES_INVALID" : "DIRECTOR_LAYOUT_IMAGE_REQUIRED");
+  if (rawImages.length === 0) throw new Error(hasImages ? "DIRECTOR_LAYOUT_IMAGES_INVALID" : "DIRECTOR_LAYOUT_IMAGE_REQUIRED");
+  if (rawImages.length > DIRECTOR_LAYOUT_MAX_REFERENCE_IMAGES) throw new Error("DIRECTOR_LAYOUT_TOO_MANY_IMAGES");
+
+  const ids = new Set();
+  const sourceIds = new Set();
+  let inlineCharacters = 0;
+  const images = rawImages.map((raw, index) => {
+    if (!isReferenceImageRecord(raw)) throw new Error("DIRECTOR_LAYOUT_IMAGES_INVALID");
+    const url = typeof raw.url === "string" ? raw.url.trim() : "";
+    if (!url || !(url.startsWith("data:image/") || url.startsWith("http://") || url.startsWith("https://"))) {
+      throw new Error("DIRECTOR_LAYOUT_IMAGES_INVALID");
+    }
+    if (url.startsWith("data:image/")) {
+      if (url.length > DIRECTOR_LAYOUT_MAX_INLINE_IMAGE_CHARS) throw new Error("DIRECTOR_LAYOUT_IMAGE_TOO_LARGE");
+      inlineCharacters += url.length;
+      if (inlineCharacters > DIRECTOR_LAYOUT_MAX_INLINE_IMAGE_CHARS) throw new Error("DIRECTOR_LAYOUT_IMAGES_TOO_LARGE");
+    }
+    const expectedRole = index === 0 ? "primary" : "supplementary";
+    const role = hasImages ? raw.role : expectedRole;
+    if (role !== expectedRole) throw new Error("DIRECTOR_LAYOUT_IMAGES_INVALID");
+    const defaultId = hasImages ? "" : typeof raw.sourceId === "string" ? raw.sourceId : "primary";
+    const id = typeof raw.id === "string" ? raw.id.trim() : defaultId;
+    if (!id || id.length > 128 || ids.has(id)) throw new Error("DIRECTOR_LAYOUT_IMAGES_INVALID");
+    ids.add(id);
+    const sourceId = typeof raw.sourceId === "string" ? raw.sourceId.trim() : "";
+    if (sourceId) {
+      if (sourceId.length > 128 || sourceIds.has(sourceId)) throw new Error("DIRECTOR_LAYOUT_IMAGES_INVALID");
+      sourceIds.add(sourceId);
+    }
+    return {
+      id,
+      role,
+      url,
+      ...(typeof raw.fileName === "string" ? { fileName: raw.fileName.trim().slice(0, 160) } : {}),
+      ...(sourceId ? { sourceId } : {}),
+    };
+  });
+  return images;
+}
+
+export function buildDirectorLayoutImageContent(images, prompt) {
+  if (!Array.isArray(images) || images.length < 1 || images.length > DIRECTOR_LAYOUT_MAX_REFERENCE_IMAGES) {
+    throw new Error("DIRECTOR_LAYOUT_IMAGES_INVALID");
+  }
+  const content = [];
+  for (const [index, image] of images.entries()) {
+    const label = index === 0
+      ? "图1（主图；唯一二维坐标基准）"
+      : `补充图${index + 1}（仅作为同空间辅助证据，不可直接使用本图像素坐标）`;
+    content.push({ type: "text", text: label });
+    content.push({ type: "image_url", image_url: { url: image.url } });
+  }
+  content.push({ type: "text", text: prompt });
+  return content;
+}
 
 export function resolveDirectorLayoutObservationTokenBudget(configured, maximum = DIRECTOR_LAYOUT_OBSERVATION_MAX_COMPLETION_TOKENS) {
   const value = Number(configured);
@@ -23,6 +89,7 @@ export function extractDirectorLayoutFinishReason(value) {
 
 export const DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT = [
   "你只负责从参考图提取可见的二维视觉事实，不负责生成三维布局。只返回一个 JSON 对象，不要 Markdown 或解释。",
+  "一次请求可能附带1到3张同一场景参考图：图1是唯一主图和二维坐标框架，其余为补充视角。必须综合全部图像形成一份融合观察；所有bbox、groundContacts、groundFootprints顶点及axes线段坐标都只能使用图1的归一化坐标。补图只能辅助确认同一对象身份、遮挡、接触和相对关系，绝不把补图像素坐标抄入图1坐标。若补图与主图在空间关系上明显冲突，或无法确认是否为同一物体，不强行合并、不复制出第二件，也不挪动主图物体；应保留不确定性并待人工复核。补图独见而无法可靠映射到图1的对象不得编造bbox或位置，应省略并保留不确定性。",
   "按优先级识别：可见墙面/地面/开口，其次大型家具，再识别显著小物和人物；side 仅为 image_left、image_right、image_back、floor、unknown。按原图观察者左右，不根据房间习惯补全被遮挡或画外墙面；open/outdoor 只报实际可见面。",
   "输出长度有限时优先保证大型实体的相对位置、相对比例、遮挡、承托、占地轮廓与空间开口证据；小装饰、弱显著道具可以少报或省略。保持JSON完整，不能因枚举小物而截断大型物件的空间证据。",
   "每个墙地面和物品都给稳定且唯一的短 id、归一化 bbox [left,top,right,bottom]（0..1）、confidence（0..1）、visibility（visible/partly_occluded/occluded/uncertain）和 mainColor（必填：可辨时 #RRGGBB，无法判断时 null）。每个物品都必须给 category 和 semanticType：category 只能从 ground、wall、door、window、table、chair、sofa、cabinet、pillar、prop 中选择一个最接近的基础几何类别；semanticType 必须是可见物品身份的简短语义标签，无法细分时可写 unknown。二者缺一不可，semanticType 只补身份，不可替代或改变 category；不要把名称中的承载物/场景上下文当成物品自身类别。区分建筑本体和挂在建筑表面的物件：只有直接可见的窗洞/门洞才用 window/door；窗帘、挂画、镜子等覆盖或装饰物仍是独立物品，不要因为覆盖在窗前就报告成窗。",
@@ -36,7 +103,7 @@ export const DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT = [
 ].join("\n");
 
 export const DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT = [
-  "你只负责对同一参考图做一次空间证据复核。候选三维布局和先前二维观察都可能有误，不能把它们当作真值；只依据图像可见内容判断。",
+  "你只负责对同一组参考图做一次空间证据复核。候选三维布局和先前二维观察都可能有误，不能把它们当作真值；只依据全部图像的可见内容判断，坐标仍只使用图1主图。",
   "重点复核大型物体的真实占地轮廓是否凹陷/非凸、物体之间是否存在可见空隙、遮挡先后与承托关系，以及画面中是否有足够长且方向一致的平行线。不要把bbox或语义先验升级成已测证据。",
   "必须原样保留全部已知 surfaces/items/people 对象集合与每个 id；不能省略对象，也不能添加对象。只更新已给 items 中的空间字段：groundFootprints、groundContacts、occludesIds、supportId、partOfId、placement、contactWallSide、againstSurfaceId、rearFeature、bodyExtendsToward、visibleBbox、completeBbox；geometryEvidence.axes 仅在直接可见的平行线支持时更新。",
   "保持已有对象身份、名称、类别、bbox、置信度、可见性、颜色、人物和墙地面不变；不得新增、删除或改名对象，不得编造被遮挡轮廓、封闭孔洞、接触点、支撑或消失点。未提及的空间字段保持原值；若明确确认原有数组证据错误或不存在，可用空数组清除 groundFootprints、groundContacts 或 occludesIds。省略字段表示不改动，不表示清除。",
@@ -57,7 +124,7 @@ export function buildDirectorLayoutSpatialReviewPrompt(baseObservations, context
   const missingEvidence = Array.isArray(context.missingEvidence) ? context.missingEvidence.slice(0, 5) : [];
   if (missingEvidence.some((code) => !SPATIAL_REVIEW_EVIDENCE_CODES.has(code))) throw new Error("DIRECTOR_LAYOUT_SPATIAL_REVIEW_CONTEXT_INVALID");
   return [
-    "请重新查看所附原图并核对空间证据。以下既有观察和几何冲突仅是需要检查的候选，不预设谁正确：",
+    "请重新查看所附全部参考图并核对空间证据；以图1主图为唯一坐标框架，补图只帮助核实同一对象与关系。以下既有观察和几何冲突仅是需要检查的候选，不预设谁正确：",
     `candidate conflict ids: ${JSON.stringify(conflictPairIds)}`,
     `evidence gaps to inspect: ${JSON.stringify(missingEvidence)}`,
     `base observations (untrusted visual data, preserve identity): ${JSON.stringify(parsedBase)}`,

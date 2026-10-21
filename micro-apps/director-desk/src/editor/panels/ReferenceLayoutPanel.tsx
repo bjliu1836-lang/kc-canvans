@@ -143,8 +143,9 @@ const STAGE_LABELS: Record<GenerationStage, string> = {
 };
 
 interface RetainedReferenceLayoutPanelState {
-  localImage: ReferenceLayoutImage | null;
+  localImages: ReferenceLayoutImage[];
   selectedSourceId: string;
+  supplementarySourceIds: string[];
   appliedBatchId: string | null;
 }
 
@@ -156,8 +157,9 @@ function getPanelScopeKey(scopeId: string | null) {
 
 function getRetainedPanelState(scopeId: string | null) {
   return retainedPanelStateByScope.get(getPanelScopeKey(scopeId)) ?? {
-    localImage: null,
+    localImages: [],
     selectedSourceId: "",
+    supplementarySourceIds: [],
     appliedBatchId: null,
   };
 }
@@ -204,6 +206,8 @@ export function ReferenceLayoutPanel() {
   const layoutBatches = useDirectorStore((state) => state.project.layoutBatches ?? []);
   const scopeId = useLayoutDraftPreviewStore((state) => state.scopeId);
   const draft = useLayoutDraftPreviewStore((state) => state.draft);
+  const currentDraftRef = useRef(draft);
+  currentDraftRef.current = draft;
   const draftEdited = useLayoutDraftPreviewStore((state) => state.draftEdited);
   const selectedComponentId = useLayoutDraftPreviewStore((state) => state.selectedComponentId);
   const setDraft = useLayoutDraftPreviewStore((state) => state.setDraft);
@@ -216,8 +220,10 @@ export function ReferenceLayoutPanel() {
   const hoverCharacter = useLayoutDraftPreviewStore((state) => state.hoverCharacter);
   const initialRetainedPanelState = getRetainedPanelState(scopeId);
   const [connectedImages, setConnectedImages] = useState(() => getHostReferenceImages().map(connectedImageToReference));
-  const [localImage, setLocalImage] = useState<ReferenceLayoutImage | null>(initialRetainedPanelState.localImage);
+  const [localImages, setLocalImages] = useState<ReferenceLayoutImage[]>(initialRetainedPanelState.localImages);
   const [selectedSourceId, setSelectedSourceId] = useState<string>(initialRetainedPanelState.selectedSourceId);
+  const [supplementarySourceIds, setSupplementarySourceIds] = useState<string[]>(initialRetainedPanelState.supplementarySourceIds);
+  const [supplementCandidateId, setSupplementCandidateId] = useState("");
   const [generating, setGenerating] = useState(false);
   const [stage, setStage] = useState<GenerationStage | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -239,12 +245,26 @@ export function ReferenceLayoutPanel() {
   const activeScopeRef = useRef(scopeId);
 
   const images = useMemo(
-    () => [localImage, ...connectedImages].filter((image): image is ReferenceLayoutImage => Boolean(image)),
-    [connectedImages, localImage]
+    () => [...localImages, ...connectedImages],
+    [connectedImages, localImages]
   );
+  const connectedImagesRef = useRef(connectedImages);
+  connectedImagesRef.current = connectedImages;
   const imagesRef = useRef(images);
   imagesRef.current = images;
   const selectedImage = images.find((image) => image.sourceId === selectedSourceId) ?? images[0] ?? null;
+  const selectedReferenceImages = useMemo(() => {
+    if (!selectedImage) return [];
+    const supplements = supplementarySourceIds
+      .filter((sourceId) => sourceId !== selectedImage.sourceId)
+      .map((sourceId) => images.find((image) => image.sourceId === sourceId))
+      .filter((image): image is ReferenceLayoutImage => Boolean(image));
+    return [selectedImage, ...supplements].slice(0, 3);
+  }, [images, selectedImage, supplementarySourceIds]);
+  const selectedReferenceSourceIdsRef = useRef(new Set(selectedReferenceImages.map((image) => image.sourceId)));
+  selectedReferenceSourceIdsRef.current = new Set(selectedReferenceImages.map((image) => image.sourceId));
+  const selectedReferenceFingerprint = selectedReferenceImages.map((image) => `${image.sourceId}:${getReferenceImageFingerprint(image.url)}`).join("|");
+  const selectedReferenceFingerprintRef = useRef(selectedReferenceFingerprint);
   const draftSourceImage = draft ? images.find((image) => image.sourceId === draft.sourceId) ?? null : null;
   const draftSourceFingerprint = getReferenceImageFingerprint(draftSourceImage?.url);
   const selectedComponent = draft?.components.find((component) => component.id === selectedComponentId) ?? null;
@@ -310,19 +330,15 @@ export function ReferenceLayoutPanel() {
   useEffect(() => {
     function handlePaste(event: ClipboardEvent) {
       if (isEditableTarget(event.target)) return;
-      const file = Array.from(event.clipboardData?.files ?? []).find((item) => item.type.startsWith("image/"));
-      if (!file) return;
+      const files = Array.from(event.clipboardData?.files ?? []).filter((item) => item.type.startsWith("image/"));
+      if (!files.length) return;
       event.preventDefault();
-      void readReferenceImageFile(file).then((image) => {
-        updateRetainedPanelState(scopeId, { localImage: image, selectedSourceId: image.sourceId });
-        setLocalImage(image);
-        chooseSource(image.sourceId);
-      }).catch((reason) => setError(reason instanceof Error ? reason.message : "参考图读取失败"));
+      handleImageFiles(files);
     }
     document.addEventListener("paste", handlePaste);
     return () => document.removeEventListener("paste", handlePaste);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeId]);
+  }, [localImages, scopeId]);
 
   useEffect(() => {
     if (activeScopeRef.current === scopeId) return;
@@ -337,9 +353,10 @@ export function ReferenceLayoutPanel() {
     setGenerating(false);
     setStage(null);
     setError(null);
-    setLocalImage(retained.localImage);
+    setLocalImages(retained.localImages);
     setConnectedImages(getHostReferenceImages().map(connectedImageToReference));
     setSelectedSourceId(retained.selectedSourceId);
+    setSupplementarySourceIds(retained.supplementarySourceIds);
     setAppliedBatchId(retained.appliedBatchId);
     setConfirmRegenerate(false);
     setViewingImage(null);
@@ -349,8 +366,28 @@ export function ReferenceLayoutPanel() {
     const updateConnectedImages = (event: Event) => {
       const detail = (event as CustomEvent<{ images?: HostReferenceImage[] }>).detail;
       const next = Array.isArray(detail?.images) ? detail.images.map(connectedImageToReference) : [];
+      const previous = connectedImagesRef.current;
       setConnectedImages(next);
       setSelectedSourceId((current) => current || next[0]?.sourceId || "");
+      const selectedSourceIds = selectedReferenceSourceIdsRef.current;
+      const staleSelectedUrl = previous.some((image) => selectedSourceIds.has(image.sourceId)
+        && next.some((updated) => image.sourceId === updated.sourceId && image.url !== updated.url));
+      if (staleSelectedUrl) {
+        abortRef.current?.abort();
+        requestIdRef.current += 1;
+        setGenerating(false);
+        setStage(null);
+        const currentDraft = currentDraftRef.current;
+        if (currentDraft && previous.some((image) => image.sourceId === currentDraft.sourceId && next.some((updated) => updated.sourceId === image.sourceId && updated.url !== image.url))) {
+          discardDraft();
+          setError("主图来源已更新，旧草稿已清除，请重新识别");
+        }
+      }
+      setSupplementarySourceIds((current) => {
+        const nextIds = current.filter((sourceId) => next.some((image) => image.sourceId === sourceId) || localImages.some((image) => image.sourceId === sourceId));
+        updateRetainedPanelState(scopeId, { supplementarySourceIds: nextIds });
+        return nextIds;
+      });
     };
     const resetForInstance = (event: Event) => {
       const instanceId = (event as CustomEvent<{ instanceId?: string }>).detail?.instanceId ?? null;
@@ -375,7 +412,7 @@ export function ReferenceLayoutPanel() {
       window.removeEventListener(DIRECTOR_DESK_SESSION_OPENED_EVENT, resetForInstance);
       abortRef.current?.abort();
     };
-  }, [openDraftScope, previewReferenceCamera, setViewMode]);
+  }, [discardDraft, localImages, openDraftScope, previewReferenceCamera, setViewMode]);
 
   useEffect(() => () => {
     if (useDirectorStore.getState().referenceCameraPreview) {
@@ -390,6 +427,23 @@ export function ReferenceLayoutPanel() {
       setSelectedSourceId(images[0].sourceId);
     }
   }, [images, scopeId, selectedSourceId]);
+
+  useEffect(() => {
+    if (selectedReferenceFingerprintRef.current === selectedReferenceFingerprint) return;
+    selectedReferenceFingerprintRef.current = selectedReferenceFingerprint;
+    abortRef.current?.abort();
+    requestIdRef.current += 1;
+    setGenerating(false);
+    setStage(null);
+    if (useDirectorStore.getState().referenceCameraPreview) {
+      previewReferenceCamera(null);
+      setViewMode("director");
+    }
+    if (currentDraftRef.current) {
+      discardDraft();
+      setError("参考图组合已变化，旧草稿已清除，请重新识别");
+    }
+  }, [discardDraft, previewReferenceCamera, selectedReferenceFingerprint, setViewMode]);
 
   function chooseSource(sourceId: string) {
     if (useDirectorStore.getState().referenceCameraPreview) {
@@ -414,7 +468,7 @@ export function ReferenceLayoutPanel() {
     if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
     const aspectRatio = width / height;
     if (aspectRatio < 0.1 || aspectRatio > 10) return;
-    setLocalImage((image) => image?.sourceId === sourceId ? { ...image, aspectRatio } : image);
+    setLocalImages((images) => images.map((image) => image.sourceId === sourceId ? { ...image, aspectRatio } : image));
     setConnectedImages((images) => images.map((image) => image.sourceId === sourceId ? { ...image, aspectRatio } : image));
   }
 
@@ -440,8 +494,11 @@ export function ReferenceLayoutPanel() {
     setConfirmRegenerate(false);
     try {
       setStage("generating");
-      const nextDraft = await requestReferenceLayout(selectedImage, controller.signal);
+      const requestedSources = selectedReferenceFingerprint;
+      const nextDraft = await requestReferenceLayout(selectedReferenceImages, controller.signal);
       if (requestId !== requestIdRef.current || controller.signal.aborted) return;
+      const currentSources = selectedReferenceFingerprintRef.current;
+      if (requestedSources !== currentSources) return;
       setStage("validating");
       setDraft(nextDraft, { edited: false });
       const estimatedCamera = getLayoutDraftReferenceCamera(nextDraft);
@@ -717,12 +774,68 @@ export function ReferenceLayoutPanel() {
     }
   }
 
-  function handleImageFile(file: File) {
-    void readReferenceImageFile(file).then((image) => {
-      updateRetainedPanelState(scopeId, { localImage: image, selectedSourceId: image.sourceId });
-      setLocalImage(image);
-      chooseSource(image.sourceId);
+  function handleImageFiles(files: FileList | File[]) {
+    const additions = Array.from(files);
+    if (additions.length > 3) {
+      setError("一次最多添加 3 张参考图，请分批添加后从列表中选择");
+      return;
+    }
+    if (!additions.length) return;
+    Promise.all(additions.map(readReferenceImageFile)).then((loaded) => {
+      const nextLocalImages = [...localImages, ...loaded].slice(-12);
+      const primary = loaded[0];
+      updateRetainedPanelState(scopeId, { localImages: nextLocalImages, selectedSourceId: primary.sourceId, supplementarySourceIds: loaded.slice(1, 3).map((image) => image.sourceId) });
+      setLocalImages(nextLocalImages);
+      setSelectedSourceId(primary.sourceId);
+      setSupplementarySourceIds(loaded.slice(1, 3).map((image) => image.sourceId));
+      chooseSource(primary.sourceId);
     }).catch((reason) => setError(reason instanceof Error ? reason.message : "参考图读取失败"));
+  }
+
+  function addSupplementarySource(sourceId: string) {
+    if (!sourceId || sourceId === selectedImage?.sourceId || supplementarySourceIds.includes(sourceId)) return;
+    if (supplementarySourceIds.length >= 2) {
+      setError("最多选择 3 张图：1 张主图和 2 张补充图");
+      return;
+    }
+    abortRef.current?.abort();
+    requestIdRef.current += 1;
+    setGenerating(false);
+    setStage(null);
+    const nextIds = [...supplementarySourceIds, sourceId];
+    setSupplementarySourceIds(nextIds);
+    updateRetainedPanelState(scopeId, { supplementarySourceIds: nextIds });
+    setError(null);
+  }
+
+  function setPrimarySource(sourceId: string) {
+    if (!sourceId || sourceId === selectedSourceId) return;
+    if (useDirectorStore.getState().referenceCameraPreview) {
+      previewReferenceCamera(null);
+      setViewMode("director");
+    }
+    const nextIds = [...supplementarySourceIds.filter((id) => id !== sourceId), selectedSourceId];
+    abortRef.current?.abort();
+    requestIdRef.current += 1;
+    setGenerating(false);
+    setStage(null);
+    setSelectedSourceId(sourceId);
+    setSupplementarySourceIds(nextIds);
+    updateRetainedPanelState(scopeId, { selectedSourceId: sourceId, supplementarySourceIds: nextIds, appliedBatchId: null });
+    setAppliedBatchId(null);
+    setError(null);
+  }
+
+  function removeReferenceSource(sourceId: string) {
+    if (sourceId === selectedImage?.sourceId) return;
+    abortRef.current?.abort();
+    requestIdRef.current += 1;
+    setGenerating(false);
+    setStage(null);
+    const nextIds = supplementarySourceIds.filter((id) => id !== sourceId);
+    setSupplementarySourceIds(nextIds);
+    updateRetainedPanelState(scopeId, { supplementarySourceIds: nextIds });
+    setError(null);
   }
 
   return (
@@ -740,11 +853,11 @@ export function ReferenceLayoutPanel() {
         onDrop={(event) => {
           event.preventDefault();
           setDragOver(false);
-          const file = event.dataTransfer?.files?.[0];
-          if (file) handleImageFile(file);
+          const files = Array.from(event.dataTransfer?.files ?? []).filter((file) => file.type.startsWith("image/"));
+          if (files.length) handleImageFiles(files);
         }}
       >
-        <p className="reference-layout-help">从一张图片估算地面、墙门窗和基础家具，确认后再加入当前场景。支持拖入图片或 Ctrl+V 粘贴截图。</p>
+        <p className="reference-layout-help">最多选择 3 张同一空间参考图，一次融合识别；第一张主图决定坐标，补充图只提供关系与遮挡证据。支持拖入或 Ctrl+V 粘贴。</p>
         {selectedImage ? (
           <div className="reference-layout-source-preview">
             <button
@@ -770,12 +883,12 @@ export function ReferenceLayoutPanel() {
             <select
               aria-label="选择粗布景参考图"
               value={selectedImage?.sourceId ?? ""}
-              onChange={(event) => chooseSource(event.currentTarget.value)}
+              onChange={(event) => setPrimarySource(event.currentTarget.value)}
             >
               {images.map((image) => <option key={`${image.origin}:${image.sourceId}`} value={image.sourceId}>{image.fileName}</option>)}
             </select>
           ) : <span className="reference-layout-empty">尚无画布连接图片</span>}
-          <button className="reference-layout-icon-button" type="button" title="选择本地图片" aria-label="选择本地参考图" onClick={() => inputRef.current?.click()}>
+          <button className="reference-layout-icon-button" type="button" title="添加本地参考图" aria-label="添加本地参考图" onClick={() => inputRef.current?.click()}>
             <ImagePlus aria-hidden="true" size={15} />
           </button>
           <input
@@ -783,15 +896,41 @@ export function ReferenceLayoutPanel() {
             className="visually-hidden"
             aria-label="上传粗布景参考图"
             accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+            multiple
             type="file"
             onChange={(event) => {
               const input = event.currentTarget;
-              const file = input.files?.[0];
-              if (file) handleImageFile(file);
+              const files = input.files;
+              if (files?.length) handleImageFiles(files);
               input.value = "";
             }}
           />
         </div>
+        {selectedImage ? (
+          <div className="reference-layout-multi-image-selection" aria-label="本次融合识别图片顺序">
+            <p className="reference-layout-anchor-hint">本次请求：图1主图 · 共 {selectedReferenceImages.length}/3 张</p>
+            {selectedReferenceImages.map((image, index) => (
+              <div className="reference-layout-source-row" key={`selected-ref-${image.sourceId}`}>
+                <span>{index === 0 ? "图1 主图" : `图${index + 1} 补充图`}：{image.fileName}</span>
+                {index > 0 ? <button className="reference-layout-secondary-button" type="button" onClick={() => removeReferenceSource(image.sourceId)}>移除</button> : null}
+              </div>
+            ))}
+            {selectedReferenceImages.length < 3 && images.some((image) => image.sourceId !== selectedImage.sourceId && !supplementarySourceIds.includes(image.sourceId)) ? (
+              <div className="reference-layout-source-row">
+                <select aria-label="选择补充参考图" value={supplementCandidateId} onChange={(event) => setSupplementCandidateId(event.currentTarget.value)}>
+                  <option value="">选择补充图…</option>
+                  {images.filter((image) => image.sourceId !== selectedImage.sourceId && !supplementarySourceIds.includes(image.sourceId)).map((image) => (
+                    <option key={`candidate-${image.sourceId}`} value={image.sourceId}>{image.fileName}</option>
+                  ))}
+                </select>
+                <button className="reference-layout-secondary-button" type="button" disabled={!supplementCandidateId} onClick={() => { addSupplementarySource(supplementCandidateId); setSupplementCandidateId(""); }}>添加补充图</button>
+              </div>
+            ) : null}
+            {images.filter((image) => image.sourceId !== selectedImage.sourceId).map((image) => (
+              <button key={`make-primary-${image.sourceId}`} className="reference-layout-secondary-button" type="button" onClick={() => setPrimarySource(image.sourceId)}>设为主图：{image.fileName}</button>
+            ))}
+          </div>
+        ) : null}
 
         <div className="reference-layout-action-row">
           <button className="inspector-action-button" disabled={!selectedImage || generating} type="button" onClick={() => void generateLayout()}>

@@ -5,6 +5,8 @@ import {
   DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT,
   DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT,
   DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS,
+  normalizeDirectorLayoutReferenceImages,
+  buildDirectorLayoutImageContent,
   buildDirectorLayoutSpatialReviewPrompt,
   directorLayoutPromptHash,
   directorLayoutSpatialReviewPatch,
@@ -24,6 +26,30 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), {
     'Cache-Control': 'no-store',
   },
 });
+
+const readJsonBodyWithLimit = async (request, maxBytes) => {
+  const declaredLength = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) throw new Error('DIRECTOR_LAYOUT_REQUEST_TOO_LARGE');
+  if (!request.body) return {};
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new Error('DIRECTOR_LAYOUT_REQUEST_TOO_LARGE');
+    }
+    chunks.push(value);
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
+  try { return JSON.parse(new TextDecoder().decode(merged)); }
+  catch { throw new Error('DIRECTOR_LAYOUT_REQUEST_INVALID'); }
+};
 
 const base64UrlEncodeBytes = (bytes) => {
   let binary = '';
@@ -497,7 +523,7 @@ const MEDIA_ANALYSIS_SYSTEM_PROMPT = [
 // Keep this prompt and validation contract in sync with server/server.mjs.
 const DIRECTOR_LAYOUT_SYSTEM_PROMPT = [
   '你是 3D 影视预演的室内粗布景与人物占位分析器。',
-  '只依据一张参考图估计可编辑的粗布景和人物，不要虚构图中不可见的精细结构。',
+  '一次请求可能包含1到3张同一场景参考图。图1是唯一主图和二维坐标基准，其余是补充视角；必须综合全部图像输出一份融合布景，不得分别识别后复制对象。所有坐标只使用图1主图坐标；补图仅辅助核对身份、关系、遮挡和可见性，不能把补图像素框直接当作主图坐标。补图独见且无法可靠映射到主图的对象不得编造位置；视角冲突或对象身份不确定时不强行合并、复制或移动对象，应保留不确定性待复核。不要虚构图中不可见的精细结构。',
   '先判断空间类型 spaceType：enclosed（明确封闭）、open（开放但有可见边界）、outdoor（室外）、unknown（无法判断）。开放/室外只输出图中确实可见的墙、围栏或立面；禁止补齐看不见的四面墙。',
   '========== 第一部分：布景组件 components ==========',
   '只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet, pillar, prop。pillar 表示从支撑面延伸到顶面的柱；prop 表示香炉、花瓶、雕像等需要占位的非家具物件。',
@@ -1013,14 +1039,18 @@ const handleTextGeneration = async (request, env) => {
 const handleDirectorLayoutGeneration = async (request, env) => {
   if (request.method !== 'POST') return json({ error: 'METHOD_NOT_ALLOWED' }, 405);
   if (!(await requireAuth(request, env))) return json({ error: 'UNAUTHORIZED' }, 401);
-  const body = await request.json().catch(() => ({}));
+  let body;
+  try { body = await readJsonBodyWithLimit(request, 20 * 1024 * 1024); }
+  catch (error) { return json({ error: error?.message || 'DIRECTOR_LAYOUT_REQUEST_INVALID' }, error?.message === 'DIRECTOR_LAYOUT_REQUEST_TOO_LARGE' ? 413 : 400); }
   const observationMode = body?.outputFormat === DIRECTOR_LAYOUT_OBSERVATION_FORMAT;
   const spatialReview = body?.observationStage === 'spatial-review';
   if (body?.outputFormat !== undefined && !observationMode) return json({ error: 'DIRECTOR_LAYOUT_FORMAT_UNSUPPORTED' }, 400);
   if (body?.observationStage !== undefined && (!observationMode || !spatialReview)) return json({ error: 'DIRECTOR_LAYOUT_STAGE_UNSUPPORTED' }, 400);
-  const imageUrl = typeof body?.image?.url === 'string' ? body.image.url.trim() : '';
-  if (!imageUrl || !(imageUrl.startsWith('data:image/') || imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
-    return json({ error: 'DIRECTOR_LAYOUT_IMAGE_REQUIRED' }, 400);
+  let referenceImages;
+  try {
+    referenceImages = normalizeDirectorLayoutReferenceImages(body);
+  } catch (error) {
+    return json({ error: error?.message || 'DIRECTOR_LAYOUT_IMAGES_INVALID' }, 400);
   }
 
   const apiKey = env.DIRECTOR_LAYOUT_MODEL_DISABLED === 'true'
@@ -1032,7 +1062,7 @@ const handleDirectorLayoutGeneration = async (request, env) => {
   const model = env.DIRECTOR_LAYOUT_MODEL_ID || env.MIMO_VISION_MODEL_ID || resolveMimoTextModel('2.5', env);
   if (observationMode) {
     let systemPrompt = DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT;
-    let userPrompt = '请按约定只返回这张图的二维可见观察 JSON。';
+    let userPrompt = '请按约定综合本次全部参考图，只返回一份以主图为唯一坐标系的二维融合观察 JSON。';
     if (spatialReview) {
       try {
         systemPrompt = DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT;
@@ -1050,10 +1080,7 @@ const handleDirectorLayoutGeneration = async (request, env) => {
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: [
-            { type: 'image_url', image_url: { url: imageUrl } },
-            { type: 'text', text: userPrompt },
-          ] },
+          { role: 'user', content: buildDirectorLayoutImageContent(referenceImages, userPrompt) },
         ],
         max_completion_tokens: spatialReview
           ? resolveDirectorLayoutObservationTokenBudget(env.DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS)
@@ -1117,11 +1144,11 @@ const handleDirectorLayoutGeneration = async (request, env) => {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const correction = attempt === 1
       ? [
-          '上一次输出未通过校验。请只修正 JSON 后重新完整输出，必须同时包含 components 与 characters 两个字段。',
+          '上一次输出未通过校验。请只修正 JSON 后重新完整输出，必须同时包含 components 与 characters 两个字段；仍须综合本次全部同一场景参考图，并只用图1主图坐标。',
           `校验错误：${previousIssues.join('；')}`,
           `上一次输出：${previousText.slice(0, 12000)}`,
         ].join('\n')
-      : '分析这张参考图，同时输出粗布景组件与人物占位的 JSON。';
+      : '请综合本次全部同一场景参考图，输出一份粗布景组件与人物占位的 JSON；所有坐标以图1主图为唯一基准，补图只提供辅助证据。';
     const result = await callModelApi({
       baseUrl,
       endpoint,
@@ -1133,8 +1160,7 @@ const handleDirectorLayoutGeneration = async (request, env) => {
           {
             role: 'user',
             content: [
-              { type: 'image_url', image_url: { url: imageUrl } },
-              { type: 'text', text: correction },
+              ...buildDirectorLayoutImageContent(referenceImages, correction),
             ],
           },
         ],

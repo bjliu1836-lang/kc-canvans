@@ -75,6 +75,9 @@ describe("requestReferenceLayout failure details", () => {
     expect(JSON.stringify(record?.candidate)).not.toContain("cameraPosition");
     const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
     expect(requestBody.outputFormat).toBe("image-observations-v1");
+    expect(requestBody.images).toMatchObject([{ id: "local_test", role: "primary", sourceId: "local_test" }]);
+    expect(requestBody.image).toBeUndefined();
+    expect(draft.components.find((component) => component.id === "chair")?.sourceImageEvidence?.sourceId).toBe("local_test");
   });
 
   it("requests at most one spatial review when major-item evidence coverage is low and merges spatial fields only", async () => {
@@ -99,10 +102,20 @@ describe("requestReferenceLayout failure details", () => {
       }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const draft = await requestReferenceLayout(image);
+    const sideImage = { ...image, sourceId: "canvas_side", fileName: "side.png", origin: "canvas" as const, url: "https://example.test/side.png" };
+    const detailImage = { ...image, sourceId: "local_detail", fileName: "detail.png", url: "data:image/png;base64,AQ==" };
+    const draft = await requestReferenceLayout([image, sideImage, detailImage]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const reviewBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as Record<string, unknown>;
     expect(reviewBody.observationStage).toBe("spatial-review");
+    const expectedGroup = [
+      { id: "local_test", role: "primary", sourceId: "local_test" },
+      { id: "canvas_side", role: "supplementary", sourceId: "canvas_side" },
+      { id: "local_detail", role: "supplementary", sourceId: "local_detail" },
+    ];
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).images).toMatchObject(expectedGroup);
+    expect(reviewBody.images).toMatchObject(expectedGroup);
+    expect(reviewBody.image).toBeUndefined();
     expect((reviewBody.reviewContext as { missingEvidence?: string[] }).missingEvidence).toContain("non-convex-contact-boundary");
     expect((reviewBody.baseObservations as typeof observation).items[0]?.id).toBe("sofa");
     const records = readLayoutDiagnosticRecords();
@@ -111,6 +124,15 @@ describe("requestReferenceLayout failure details", () => {
     expect(candidate?.spatialReview).toMatchObject({ attempted: true, accepted: true, providerModel: "deepseek-flash-v4.1-1017", promptHash: "a".repeat(64) });
     expect(candidate?.visualObservations?.items[0]).toMatchObject({ id: "sofa", name: "转角组合沙发", category: "sofa", groundFootprints: [footprint] });
     expect(draft.diagnosticGenerationId).toBe(record?.generationId);
+  });
+
+  it("rejects a reference group outside the three-image and aggregate payload limits without sending it", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(requestReferenceLayout([image, image, image, image])).rejects.toThrow("1 到 3 张");
+    const tooLarge = (sourceId: string) => ({ ...image, sourceId, url: `data:image/png;base64,${"A".repeat(6 * 1024 * 1024)}` });
+    await expect(requestReferenceLayout([tooLarge("a"), tooLarge("b"), tooLarge("c")])).rejects.toThrow("合计过大");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("keeps the coarse draft when the single spatial review fails", async () => {

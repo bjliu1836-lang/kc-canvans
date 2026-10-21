@@ -28,12 +28,15 @@ interface StoredComponentJob {
   inputName: string;
 }
 
-export function getDraftComponentAssetEligibility(component: LayoutDraftComponent, components: readonly LayoutDraftComponent[]) {
+export function getDraftComponentAssetEligibility(component: LayoutDraftComponent, components: readonly LayoutDraftComponent[], primarySourceId?: string) {
   if (["ground", "wall", "door", "window", "pillar"].includes(component.category)) {
     return "墙面与建筑结构继续使用空间几何，不生成单物体模型。";
   }
   if (component.partOfComponentId) return "这是父对象的子部件；请对可独立选择的主体对象操作。";
   if (component.sourceImageEvidence?.hasPartComponents) return "识别结果包含归属于该对象的子部件；本轮不自动替换复合对象，请选择一个独立物件。";
+  if (primarySourceId && component.sourceImageEvidence?.sourceId && component.sourceImageEvidence.sourceId !== primarySourceId) {
+    return "该对象的裁剪证据不属于当前主图；请重新识别或确认主图后再生成。";
+  }
   if (components.some((candidate) => candidate.partOfComponentId === component.id)) {
     return "该对象仍包含单独显示的子部件，本轮暂不替换整组；请先选择一个独立物件。";
   }
@@ -161,7 +164,7 @@ export function DraftComponentAssetGenerator({
   const [error, setError] = useState("");
   const stateChangeRef = useRef(onStateChange);
   stateChangeRef.current = onStateChange;
-  const eligibility = getDraftComponentAssetEligibility(component, components);
+  const eligibility = getDraftComponentAssetEligibility(component, components, sourceImage?.sourceId);
   const hasUsableGeneratedAsset = Boolean(component.generatedAssetRefId && !component.generatedAssetUnavailable);
   const previewUrl = session ? imageTo3dAssetUrl(session.credentials) : "";
 

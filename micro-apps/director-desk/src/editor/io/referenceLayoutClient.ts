@@ -120,6 +120,9 @@ function readableLayoutError(status: number, data: Record<string, unknown>) {
   if (status === 402) return "图片理解模型额度不足，请补充额度后重试";
   if (code === "DIRECTOR_LAYOUT_MODEL_NOT_CONFIGURED") return "尚未配置图片理解模型，请联系管理员完成模型配置后重试";
   if (code === "DIRECTOR_LAYOUT_IMAGE_REQUIRED") return "参考图无效，请重新选择图片";
+  if (code === "DIRECTOR_LAYOUT_TOO_MANY_IMAGES") return "一次最多选择 3 张参考图";
+  if (code === "DIRECTOR_LAYOUT_IMAGES_TOO_LARGE" || code === "DIRECTOR_LAYOUT_REQUEST_TOO_LARGE") return "所选参考图合计过大，请压缩图片后重试（最多 16 MB）";
+  if (code === "DIRECTOR_LAYOUT_IMAGES_AMBIGUOUS" || code === "DIRECTOR_LAYOUT_IMAGES_INVALID") return "参考图列表无效，请重新选择主图和补充图";
   if (code === "DIRECTOR_LAYOUT_INVALID_MODEL_JSON" || code === "DIRECTOR_LAYOUT_MODEL_JSON_INVALID" || code === "DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID") {
     const issue = readableLayoutIssue(data);
     return issue ? `${INVALID_LAYOUT_MESSAGE}（${issue}）` : INVALID_LAYOUT_MESSAGE;
@@ -130,23 +133,38 @@ function readableLayoutError(status: number, data: Record<string, unknown>) {
 }
 
 export async function requestReferenceLayout(
-  image: ReferenceLayoutImage,
+  imageInput: ReferenceLayoutImage | readonly ReferenceLayoutImage[],
   signal?: AbortSignal
 ): Promise<LayoutDraft> {
-  const generationId = createLayoutGenerationId();
-  let requestUrl = image.url;
-  if (requestUrl.startsWith("blob:")) {
-    const blob = await fetch(requestUrl, { signal }).then((response) => {
-      if (!response.ok) throw new Error("无法读取画布连接的参考图");
-      return response.blob();
-    });
-    requestUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onerror = () => reject(new Error("无法读取画布连接的参考图"));
-      reader.onload = () => resolve(String(reader.result || ""));
-      reader.readAsDataURL(blob);
-    });
+  const images = Array.isArray(imageInput) ? [...imageInput] : [imageInput as ReferenceLayoutImage];
+  if (!images.length || images.length > 3) throw new Error("请选择 1 到 3 张参考图");
+  const primaryImage = images[0];
+  const requestImages: Array<ReferenceLayoutImage & { requestUrl: string }> = [];
+  let aggregateInlineLength = 0;
+  for (const image of images) {
+    let requestUrl = image.url;
+    if (requestUrl.startsWith("blob:")) {
+      const blob = await fetch(requestUrl, { signal }).then((response) => {
+        if (!response.ok) throw new Error("无法读取画布连接的参考图");
+        return response.blob();
+      });
+      requestUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("无法读取画布连接的参考图"));
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.readAsDataURL(blob);
+      });
+    }
+    if (!(/^data:image\/(?:png|jpeg|webp);base64,/i.test(requestUrl) || /^https?:\/\//i.test(requestUrl))) {
+      throw new Error("参考图格式无效，请重新选择 PNG、JPG 或 WebP 图片");
+    }
+    if (requestUrl.startsWith("data:image/")) aggregateInlineLength += requestUrl.length;
+    requestImages.push({ ...image, requestUrl });
   }
+  if (aggregateInlineLength > 16 * 1024 * 1024 + 512) {
+    throw new Error("所选参考图合计过大，请压缩图片后重试（最多 16 MB）");
+  }
+  const generationId = createLayoutGenerationId();
   const token = window.localStorage.getItem(AUTH_TOKEN_KEY) || "";
   recordLayoutGenerationStarted(generationId);
   let response: Response;
@@ -159,11 +177,13 @@ export async function requestReferenceLayout(
       },
       body: JSON.stringify({
         outputFormat: IMAGE_OBSERVATION_FORMAT,
-        image: {
-          url: requestUrl,
-          fileName: image.fileName,
+        images: requestImages.map((image, index) => ({
+          id: image.sourceId,
           sourceId: image.sourceId,
-        },
+          role: index === 0 ? "primary" : "supplementary",
+          url: image.requestUrl,
+          fileName: image.fileName,
+        })),
       }),
       signal,
     });
@@ -201,7 +221,7 @@ export async function requestReferenceLayout(
     }
     if (legacyResponse) {
       const draft = {
-        ...validateLayoutDraftCandidate(data.draft, image, { imageAspectRatio: image.aspectRatio }),
+        ...validateLayoutDraftCandidate(data.draft, primaryImage, { imageAspectRatio: primaryImage.aspectRatio }),
         diagnosticGenerationId: generationId,
       };
       recordNormalizedLayoutDraft(draft, generationId, data.draft);
@@ -209,7 +229,7 @@ export async function requestReferenceLayout(
     }
     const observation = normalizeImageObservation(data.visualObservations);
     let finalObservation = observation;
-    let draft = imageObservationToLayoutDraft(observation, image, { imageAspectRatio: image.aspectRatio });
+    let draft = imageObservationToLayoutDraft(observation, primaryImage, { imageAspectRatio: primaryImage.aspectRatio });
     let spatialReviewMetadata: Record<string, unknown> | undefined;
     if (!signal?.aborted && shouldRequestSpatialReview(observation, draft)) {
       const reviewContext = spatialReviewContext(observation, draft);
@@ -223,7 +243,13 @@ export async function requestReferenceLayout(
           body: JSON.stringify({
             outputFormat: IMAGE_OBSERVATION_FORMAT,
             observationStage: "spatial-review",
-            image: { url: requestUrl, fileName: image.fileName, sourceId: image.sourceId },
+            images: requestImages.map((image, index) => ({
+              id: image.sourceId,
+              sourceId: image.sourceId,
+              role: index === 0 ? "primary" : "supplementary",
+              url: image.requestUrl,
+              fileName: image.fileName,
+            })),
             baseObservations: observation,
             reviewContext,
           }),
@@ -241,7 +267,7 @@ export async function requestReferenceLayout(
         };
         if (reviewResponse.ok && reviewData.observationFormat === IMAGE_OBSERVATION_FORMAT) {
           const reviewedObservation = mergeSpatialReview(observation, reviewData.spatialReviewPatch);
-          const reviewedDraft = imageObservationToLayoutDraft(reviewedObservation, image, { imageAspectRatio: image.aspectRatio });
+          const reviewedDraft = imageObservationToLayoutDraft(reviewedObservation, primaryImage, { imageAspectRatio: primaryImage.aspectRatio });
           finalObservation = reviewedObservation;
           draft = reviewedDraft;
           spatialReviewMetadata.accepted = true;
@@ -283,7 +309,7 @@ export function readReferenceImageFile(file: File): Promise<ReferenceLayoutImage
     const reader = new FileReader();
     reader.onerror = () => reject(new Error("参考图读取失败，请重新选择"));
     reader.onload = () => resolve({
-      sourceId: `local_${Date.now().toString(36)}`,
+      sourceId: `local_${crypto.randomUUID()}`,
       fileName: file.name,
       url: String(reader.result || ""),
       origin: "local",

@@ -217,6 +217,7 @@ export interface LayoutDraftComponent {
     bbox: [number, number, number, number];
     confidence: number;
     visibility: "visible" | "partial" | "occluded" | "uncertain";
+    sourceId?: string;
     hasPartComponents?: boolean;
   };
   /** Local asset registered from the confirmed single-object result; never a provider URL or capability. */
@@ -1647,6 +1648,7 @@ export function validateLayoutDraftCandidate(
           bbox: [...sourceBbox] as [number, number, number, number],
           confidence: Math.max(0, Math.min(1, sourceEvidenceConfidence)),
           visibility: sourceEvidenceVisibility as "visible" | "partial" | "occluded" | "uncertain",
+          ...(typeof sourceEvidence?.sourceId === "string" && sourceEvidence.sourceId.length <= 128 ? { sourceId: sourceEvidence.sourceId } : {}),
           ...(sourceEvidence?.hasPartComponents === true ? { hasPartComponents: true } : {}),
         } }
         : {}),

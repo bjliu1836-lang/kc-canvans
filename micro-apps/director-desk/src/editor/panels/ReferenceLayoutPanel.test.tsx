@@ -64,6 +64,135 @@ it("changes the private source fingerprint when the same reference node receives
   expect(getReferenceImageFingerprint(null)).toBe("missing");
 });
 
+it("selects a primary plus ordered supplementary images and sends one fused request", async () => {
+  const user = userEvent.setup();
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ draft: fixtureDraft }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  render(<ReferenceLayoutPanel />);
+  act(() => {
+    window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+      detail: { instanceId: "multi_image_panel", images: [
+        { edgeId: "e1", sourceNodeId: "main", imageUrl: "data:image/png;base64,AA==", fileName: "主图.png" },
+        { edgeId: "e2", sourceNodeId: "side", imageUrl: "data:image/png;base64,AQ==", fileName: "侧视图.png" },
+        { edgeId: "e3", sourceNodeId: "detail", imageUrl: "data:image/png;base64,Ag==", fileName: "细节图.png" },
+      ] },
+    }));
+  });
+  await screen.findByAltText("当前粗布景参考图");
+  await user.selectOptions(screen.getByRole("combobox", { name: "选择补充参考图" }), "side");
+  await user.click(screen.getByRole("button", { name: "添加补充图" }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "选择补充参考图" }), "detail");
+  await user.click(screen.getByRole("button", { name: "添加补充图" }));
+  expect(screen.getByText("本次请求：图1主图 · 共 3/3 张")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "设为主图：细节图.png" }));
+  expect(screen.getByText("图1 主图：细节图.png")).toBeInTheDocument();
+  expect(screen.getByText("本次请求：图1主图 · 共 3/3 张")).toBeInTheDocument();
+  expect(screen.getByText("图2 补充图：侧视图.png")).toBeInTheDocument();
+  expect(screen.getByText("图3 补充图：主图.png")).toBeInTheDocument();
+  const formerPrimaryRow = screen.getByText("图3 补充图：主图.png").parentElement;
+  expect(formerPrimaryRow).not.toBeNull();
+  await user.click(within(formerPrimaryRow as HTMLElement).getByRole("button", { name: "移除" }));
+  expect(screen.getByText("本次请求：图1主图 · 共 2/3 张")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+  const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { images: Array<{ sourceId: string; role: string }>; image?: unknown };
+  expect(body.images.map(({ sourceId, role }) => [sourceId, role])).toEqual([
+    ["detail", "primary"],
+    ["side", "supplementary"],
+  ]);
+  expect(body.image).toBeUndefined();
+  await user.click(screen.getByRole("button", { name: "设为主图：侧视图.png" }));
+  await waitFor(() => expect(screen.queryByRole("heading", { name: "待应用布景" })).not.toBeInTheDocument());
+  expect(screen.getByText("参考图组合已变化，旧草稿已清除，请重新识别")).toBeInTheDocument();
+});
+
+it("does not cancel an active request when an unselected connected-image candidate changes", async () => {
+  const user = userEvent.setup();
+  let resolveFetch: ((response: Response) => void) | null = null;
+  const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => new Promise<Response>((resolve) => {
+    resolveFetch = resolve;
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  render(<ReferenceLayoutPanel />);
+  const makeImages = (candidateUrl: string) => [
+    { edgeId: "edge_main", sourceNodeId: "candidate_main", imageUrl: "data:image/png;base64,AA==", fileName: "main.png" },
+    { edgeId: "edge_side", sourceNodeId: "candidate_side", imageUrl: "data:image/png;base64,AQ==", fileName: "side.png" },
+    { edgeId: "edge_unused", sourceNodeId: "candidate_unused", imageUrl: candidateUrl, fileName: "unused.png" },
+  ];
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "unused_candidate_change", images: makeImages("data:image/png;base64,Ag==") },
+  })));
+  await user.selectOptions(await screen.findByRole("combobox", { name: "选择补充参考图" }), "candidate_side");
+  await user.click(screen.getByRole("button", { name: "添加补充图" }));
+  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+  const signal = fetchMock.mock.calls[0]?.[1]?.signal as AbortSignal;
+
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "unused_candidate_change", images: makeImages("data:image/png;base64,Aw==") },
+  })));
+
+  expect(signal.aborted).toBe(false);
+  await act(async () => {
+    resolveFetch?.(new Response(JSON.stringify({ draft: fixtureDraft }), { status: 200 }));
+  });
+  expect(await screen.findByRole("heading", { name: "待应用布景" })).toBeInTheDocument();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+it("clears the old draft and reference camera when a supplementary image is removed", async () => {
+  const user = userEvent.setup();
+  render(<ReferenceLayoutPanel />);
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "remove_supplement_camera", images: [
+      { edgeId: "edge_main", sourceNodeId: "remove_main", imageUrl: "data:image/png;base64,AA==", fileName: "main.png" },
+      { edgeId: "edge_side", sourceNodeId: "remove_side", imageUrl: "data:image/png;base64,AQ==", fileName: "side.png" },
+    ] },
+  })));
+  await user.selectOptions(await screen.findByRole("combobox", { name: "选择补充参考图" }), "remove_side");
+  await user.click(screen.getByRole("button", { name: "添加补充图" }));
+  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
+  await screen.findByRole("heading", { name: "待应用布景" });
+  await user.click(screen.getByTitle("按同一推断机位查看可编辑草稿"));
+  expect(useDirectorStore.getState().referenceCameraPreview).not.toBeNull();
+
+  const supplementRow = screen.getByText("图2 补充图：side.png").parentElement;
+  expect(supplementRow).not.toBeNull();
+  await user.click(within(supplementRow as HTMLElement).getByRole("button", { name: "移除" }));
+
+  await waitFor(() => expect(useLayoutDraftPreviewStore.getState().draft).toBeNull());
+  expect(useDirectorStore.getState().referenceCameraPreview).toBeNull();
+  expect(useDirectorStore.getState().viewMode).toBe("director");
+});
+
+it("clears the old draft and reference camera when a selected supplementary URL changes", async () => {
+  const user = userEvent.setup();
+  render(<ReferenceLayoutPanel />);
+  const baseImages = [
+    { edgeId: "edge_main", sourceNodeId: "update_main", imageUrl: "data:image/png;base64,AA==", fileName: "main.png" },
+    { edgeId: "edge_side", sourceNodeId: "update_side", imageUrl: "data:image/png;base64,AQ==", fileName: "side.png" },
+  ];
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "update_supplement_camera", images: baseImages },
+  })));
+  await user.selectOptions(await screen.findByRole("combobox", { name: "选择补充参考图" }), "update_side");
+  await user.click(screen.getByRole("button", { name: "添加补充图" }));
+  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
+  await screen.findByRole("heading", { name: "待应用布景" });
+  await user.click(screen.getByTitle("按同一推断机位查看可编辑草稿"));
+  expect(useDirectorStore.getState().referenceCameraPreview).not.toBeNull();
+
+  act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
+    detail: { instanceId: "update_supplement_camera", images: [
+      baseImages[0], { ...baseImages[1], imageUrl: "data:image/png;base64,Ag==" },
+    ] },
+  })));
+
+  await waitFor(() => expect(useLayoutDraftPreviewStore.getState().draft).toBeNull());
+  expect(useDirectorStore.getState().referenceCameraPreview).toBeNull();
+  expect(useDirectorStore.getState().viewMode).toBe("director");
+});
+
 it("edits a controlled layout fixture in preview and commits it as one generated batch", async () => {
   const user = userEvent.setup();
   const windowKeydown = vi.fn();
@@ -290,11 +419,15 @@ it("clears a reference preview when the source image or Director Desk instance c
   fireEvent.change(screen.getByRole("combobox", { name: "选择粗布景参考图" }), { target: { value: "image_b" } });
   expect(useDirectorStore.getState().referenceCameraPreview).toBeNull();
   expect(useDirectorStore.getState().viewMode).toBe("director");
+  await waitFor(() => expect(screen.queryByRole("heading", { name: "待应用布景" })).not.toBeInTheDocument());
+  expect(screen.getByText("参考图组合已变化，旧草稿已清除，请重新识别")).toBeInTheDocument();
 
+  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
   await user.click(screen.getByTitle("按同一推断机位查看可编辑草稿"));
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_SESSION_OPENED_EVENT, { detail: { instanceId: "desk_next" } })));
   expect(useDirectorStore.getState().referenceCameraPreview).toBeNull();
   expect(useDirectorStore.getState().viewMode).toBe("director");
+  expect(useLayoutDraftPreviewStore.getState().draft).toBeNull();
 });
 
 it("clears reference preview on panel unmount", async () => {

@@ -8,6 +8,8 @@ import {
   DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT,
   DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT,
   DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS,
+  normalizeDirectorLayoutReferenceImages,
+  buildDirectorLayoutImageContent,
   buildDirectorLayoutSpatialReviewPrompt,
   directorLayoutPromptHash,
   directorLayoutSpatialReviewPatch,
@@ -55,9 +57,14 @@ const json = (res, status, data) => {
   res.end(JSON.stringify(data));
 };
 
-const readBody = async (req) => {
+const readBody = async (req, maxBytes = Infinity) => {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.byteLength;
+    if (total > maxBytes) throw new Error('DIRECTOR_LAYOUT_REQUEST_TOO_LARGE');
+    chunks.push(chunk);
+  }
   if (chunks.length === 0) return {};
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 };
@@ -511,7 +518,7 @@ const MEDIA_ANALYSIS_SYSTEM_PROMPT = [
 
 const DIRECTOR_LAYOUT_SYSTEM_PROMPT = [
   '你是 3D 影视预演的室内粗布景与人物占位分析器。',
-  '只依据一张参考图估计可编辑的粗布景和人物，不要虚构图中不可见的精细结构。',
+  '一次请求可能包含1到3张同一场景参考图。图1是唯一主图和二维坐标基准，其余是补充视角；必须综合全部图像输出一份融合布景，不得分别识别后复制对象。所有坐标只使用图1主图坐标；补图仅辅助核对身份、关系、遮挡和可见性，不能把补图像素框直接当作主图坐标。补图独见且无法可靠映射到主图的对象不得编造位置；视角冲突或对象身份不确定时不强行合并、复制或移动对象，应保留不确定性待复核。不要虚构图中不可见的精细结构。',
   '先判断空间类型 spaceType：enclosed（明确封闭）、open（开放但有可见边界）、outdoor（室外）、unknown（无法判断）。开放/室外只输出图中确实可见的墙、围栏或立面；禁止补齐看不见的四面墙。',
   '========== 第一部分：布景组件 components ==========',
   '只识别这些 category：ground, wall, door, window, table, chair, sofa, cabinet, pillar, prop。pillar 表示从支撑面延伸到顶面的柱；prop 表示香炉、花瓶、雕像等需要占位的非家具物件。',
@@ -1279,14 +1286,18 @@ const handleTextGeneration = async (req, res) => {
 };
 
 const handleDirectorLayoutGeneration = async (req, res) => {
-  const body = await readBody(req);
+  let body;
+  try { body = await readBody(req, 20 * 1024 * 1024); }
+  catch (error) { return json(res, error?.message === 'DIRECTOR_LAYOUT_REQUEST_TOO_LARGE' ? 413 : 400, { error: error?.message || 'DIRECTOR_LAYOUT_REQUEST_INVALID' }); }
   const observationMode = body?.outputFormat === DIRECTOR_LAYOUT_OBSERVATION_FORMAT;
   const spatialReview = body?.observationStage === 'spatial-review';
   if (body?.outputFormat !== undefined && !observationMode) return json(res, 400, { error: 'DIRECTOR_LAYOUT_FORMAT_UNSUPPORTED' });
   if (body?.observationStage !== undefined && (!observationMode || !spatialReview)) return json(res, 400, { error: 'DIRECTOR_LAYOUT_STAGE_UNSUPPORTED' });
-  const imageUrl = typeof body?.image?.url === 'string' ? body.image.url.trim() : '';
-  if (!imageUrl || !(imageUrl.startsWith('data:image/') || imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
-    return json(res, 400, { error: 'DIRECTOR_LAYOUT_IMAGE_REQUIRED' });
+  let referenceImages;
+  try {
+    referenceImages = normalizeDirectorLayoutReferenceImages(body);
+  } catch (error) {
+    return json(res, 400, { error: error?.message || 'DIRECTOR_LAYOUT_IMAGES_INVALID' });
   }
 
   const apiKey = process.env.DIRECTOR_LAYOUT_MODEL_DISABLED === 'true'
@@ -1298,7 +1309,7 @@ const handleDirectorLayoutGeneration = async (req, res) => {
   const model = process.env.MIMO_VISION_MODEL_ID || resolveMimoTextModel('2.5');
   if (observationMode) {
     let systemPrompt = DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT;
-    let userPrompt = '请按约定只返回这张图的二维可见观察 JSON。';
+    let userPrompt = '请按约定综合本次全部参考图，只返回一份以主图为唯一坐标系的二维融合观察 JSON。';
     if (spatialReview) {
       try {
         systemPrompt = DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT;
@@ -1316,10 +1327,7 @@ const handleDirectorLayoutGeneration = async (req, res) => {
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: [
-            { type: 'image_url', image_url: { url: imageUrl } },
-            { type: 'text', text: userPrompt },
-          ] },
+          { role: 'user', content: buildDirectorLayoutImageContent(referenceImages, userPrompt) },
         ],
         max_completion_tokens: spatialReview
           ? resolveDirectorLayoutObservationTokenBudget(process.env.DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS)
@@ -1383,11 +1391,11 @@ const handleDirectorLayoutGeneration = async (req, res) => {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const correction = attempt === 1
       ? [
-          '上一次输出未通过校验。请只修正 JSON 后重新完整输出，必须同时包含 components 与 characters 两个字段。',
+          '上一次输出未通过校验。请只修正 JSON 后重新完整输出，必须同时包含 components 与 characters 两个字段；仍须综合本次全部同一场景参考图，并只用图1主图坐标。',
           `校验错误：${previousIssues.join('；')}`,
           `上一次输出：${previousText.slice(0, 12000)}`,
         ].join('\n')
-      : '分析这张参考图，同时输出粗布景组件与人物占位的 JSON。';
+      : '请综合本次全部同一场景参考图，输出一份粗布景组件与人物占位的 JSON；所有坐标以图1主图为唯一基准，补图只提供辅助证据。';
     const result = await callTextModelApi({
       baseUrl,
       endpoint,
@@ -1399,8 +1407,7 @@ const handleDirectorLayoutGeneration = async (req, res) => {
           {
             role: 'user',
             content: [
-              { type: 'image_url', image_url: { url: imageUrl } },
-              { type: 'text', text: correction },
+              ...buildDirectorLayoutImageContent(referenceImages, correction),
             ],
           },
         ],

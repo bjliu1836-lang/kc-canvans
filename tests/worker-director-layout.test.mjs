@@ -74,11 +74,23 @@ test('director-layout observation mode uses one model call and returns only boun
 
   const response = await call('/api/director-layout', {
     method: 'POST', token, env: layoutEnv,
-    body: { outputFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT, image: { url: 'data:image/png;base64,AA==' } },
+    body: { outputFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT, images: [
+      { id: 'room-main', sourceId: 'room-main', role: 'primary', url: 'data:image/png;base64,AA==' },
+      { id: 'room-side', sourceId: 'room-side', role: 'supplementary', url: 'data:image/jpeg;base64,AQ==' },
+      { id: 'room-detail', sourceId: 'room-detail', role: 'supplementary', url: 'data:image/webp;base64,Ag==' },
+    ] },
   });
   assert.equal(response.status, 200);
   assert.equal(calls, 1);
   assert.equal(providerPayload.messages[0].role, 'system');
+  const providerImages = providerPayload.messages[1].content.filter((part) => part.type === 'image_url');
+  assert.deepEqual(providerImages.map((part) => part.image_url.url), [
+    'data:image/png;base64,AA==', 'data:image/jpeg;base64,AQ==', 'data:image/webp;base64,Ag==',
+  ]);
+  assert.match(providerPayload.messages[1].content[0].text, /图1（主图/);
+  assert.match(providerPayload.messages[1].content[2].text, /补充图2/);
+  assert.equal(providerPayload.messages.filter((message) => message.role === 'user').length, 1);
+  assert.match(providerPayload.messages[1].content.filter((part) => part.type === 'text').at(-1).text, /本次全部参考图.*主图为唯一坐标系/s);
   assert.equal(providerPayload.max_completion_tokens, 8192);
   assert.equal(
     createHash('sha256').update(providerPayload.messages[0].content, 'utf8').digest('hex'),
@@ -149,7 +161,11 @@ test('spatial review uses one bounded DeepSeek thinking call and only returns sp
     body: {
       outputFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT,
       observationStage: 'spatial-review',
-      image: { url: 'data:image/png;base64,AA==' },
+      images: [
+        { id: 'room-main', sourceId: 'room-main', role: 'primary', url: 'data:image/png;base64,AA==' },
+        { id: 'room-side', sourceId: 'room-side', role: 'supplementary', url: 'data:image/jpeg;base64,AQ==' },
+        { id: 'room-detail', sourceId: 'room-detail', role: 'supplementary', url: 'data:image/webp;base64,Ag==' },
+      ],
       baseObservations,
       reviewContext: { conflictPairIds: [], missingEvidence: ['non-convex-contact-boundary', 'parallel-lines'] },
     },
@@ -159,12 +175,16 @@ test('spatial review uses one bounded DeepSeek thinking call and only returns sp
   assert.equal(providerPayload.max_completion_tokens, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS);
   assert.deepEqual(providerPayload.thinking, { type: 'enabled' });
   assert.equal(providerPayload.reasoning_effort, 'max');
+  assert.deepEqual(providerPayload.messages[1].content.filter((part) => part.type === 'image_url').map((part) => part.image_url.url), [
+    'data:image/png;base64,AA==', 'data:image/jpeg;base64,AQ==', 'data:image/webp;base64,Ag==',
+  ]);
+  assert.match(providerPayload.messages[1].content.filter((part) => part.type === 'text').at(-1).text, /所附全部参考图.*图1主图/s);
   assert.equal(providerPayload.messages[0].content, DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT);
   const data = await response.json();
   assert.deepEqual(data.spatialReviewPatch.items, [{ id: 'sofa', groundFootprints: reviewOutput.items[0].groundFootprints }]);
   assert.equal(data.providerContent, undefined);
   assert.equal(data.providerModel, 'deepseek-flash-v4.1-1017');
-  const userText = providerPayload.messages[1].content.find((part) => part.type === 'text').text;
+  const userText = providerPayload.messages[1].content.filter((part) => part.type === 'text').at(-1).text;
   assert.equal(
     data.promptHash,
     createHash('sha256').update(`${providerPayload.messages[0].content}\n---\n${userText}`, 'utf8').digest('hex'),
@@ -414,7 +434,7 @@ test('director-layout rejects a rotated assembly that escapes its parent bounds 
       invalid.components[0].assembly = [{ primitive: 'box', position: [0.12, 0.5, 0.5], size: [0.4, 0.2, 0.2], rotation: [0, 0, 45] }];
       return Response.json({ choices: [{ message: { content: JSON.stringify(invalid) } }] });
     }
-    assert.match(JSON.parse(init.body).messages[1].content[1].text, /assembly/);
+    assert.match(JSON.parse(init.body).messages[1].content.at(-1).text, /assembly/);
     return Response.json({ choices: [{ message: { content: JSON.stringify(validDraft) } }] });
   };
   t.after(() => { globalThis.fetch = originalFetch; });
@@ -456,7 +476,37 @@ test('director-layout rejects an invalid image before calling the model', async 
     body: { image: { url: 'file:///local/reference.png' } },
   });
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: 'DIRECTOR_LAYOUT_IMAGE_REQUIRED' });
+  assert.deepEqual(await response.json(), { error: 'DIRECTOR_LAYOUT_IMAGES_INVALID' });
+});
+
+test('director-layout treats images as authoritative and rejects empty, over-limit, or conflicting groups before provider calls', async () => {
+  const token = await login();
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  globalThis.fetch = async (...args) => {
+    providerCalls += 1;
+    return originalFetch(...args);
+  };
+  try {
+    const cases = [
+      { body: { images: [] }, error: 'DIRECTOR_LAYOUT_IMAGES_INVALID' },
+      { body: { images: Array.from({ length: 4 }, (_, index) => ({ id: `image-${index}`, sourceId: `source-${index}`, role: index ? 'supplementary' : 'primary', url: 'data:image/png;base64,AA==' })) }, error: 'DIRECTOR_LAYOUT_TOO_MANY_IMAGES' },
+      { body: { images: [{ id: 'main', sourceId: 'main', role: 'primary', url: 'data:image/png;base64,AA==' }], image: { url: 'data:image/png;base64,AQ==' } }, error: 'DIRECTOR_LAYOUT_IMAGES_AMBIGUOUS' },
+    ];
+    for (const { body, error } of cases) {
+      const response = await call('/api/director-layout', {
+        method: 'POST',
+        token,
+        env: layoutEnv,
+        body,
+      });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { error });
+    }
+    assert.equal(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('dedicated director-layout configuration does not activate text generation', async () => {
@@ -483,7 +533,7 @@ test('director-layout returns a validated draft without a retry', async (t) => {
     const payload = JSON.parse(init.body);
     assert.equal(url, 'https://director-layout.test/custom-layout');
     assert.equal(payload.model, 'director-layout-model');
-    assert.equal(payload.messages[1].content[0].image_url.url, 'data:image/png;base64,AA==');
+    assert.equal(payload.messages[1].content[1].image_url.url, 'data:image/png;base64,AA==');
     return Response.json({
       choices: [{ message: { content: JSON.stringify(validDraft) } }],
       usage: { total_tokens: 42 },
@@ -563,10 +613,16 @@ test('director-layout corrects invalid model JSON once and then succeeds', async
   globalThis.fetch = async (_url, init) => {
     modelCalls += 1;
     const payload = JSON.parse(init.body);
+    assert.deepEqual(payload.messages[1].content.filter((part) => part.type === 'image_url').map((part) => part.image_url.url), [
+      'data:image/png;base64,AA==',
+      'data:image/jpeg;base64,AQ==',
+      'data:image/webp;base64,Ag==',
+    ]);
     if (modelCalls === 1) {
+      assert.match(payload.messages[1].content.at(-1).text, /本次全部同一场景参考图/);
       return Response.json({ choices: [{ message: { content: '{"components":[]}' } }] });
     }
-    assert.match(payload.messages[1].content[1].text, /上一次输出未通过校验/);
+    assert.match(payload.messages[1].content.at(-1).text, /上一次输出未通过校验/);
     return Response.json({ choices: [{ message: { content: `\`\`\`json\n${JSON.stringify(validDraft)}\n\`\`\`` } }] });
   };
   t.after(() => { globalThis.fetch = originalFetch; });
@@ -575,7 +631,11 @@ test('director-layout corrects invalid model JSON once and then succeeds', async
     method: 'POST',
     token,
     env: { ...baseEnv, MIMO_API_KEY: 'fallback-key' },
-    body: { image: { url: 'https://example.com/reference.png' } },
+    body: { images: [
+      { id: 'main', sourceId: 'main', role: 'primary', url: 'data:image/png;base64,AA==' },
+      { id: 'side', sourceId: 'side', role: 'supplementary', url: 'data:image/jpeg;base64,AQ==' },
+      { id: 'detail', sourceId: 'detail', role: 'supplementary', url: 'data:image/webp;base64,Ag==' },
+    ] },
   });
   assert.equal(response.status, 200);
   assert.equal(modelCalls, 2);
@@ -599,7 +659,7 @@ test('director-layout rejects a cyclic support graph and requests one correction
       return Response.json({ choices: [{ message: { content: JSON.stringify(cyclicDraft) } }] });
     }
     const payload = JSON.parse(init.body);
-    assert.match(payload.messages[1].content[1].text, /支撑关系形成循环/);
+    assert.match(payload.messages[1].content.at(-1).text, /支撑关系形成循环/);
     return Response.json({ choices: [{ message: { content: JSON.stringify(validDraft) } }] });
   };
   t.after(() => { globalThis.fetch = originalFetch; });
@@ -687,7 +747,7 @@ test('director-layout rejects an out-of-range character height and retries', asy
       });
     }
     const payload = JSON.parse(init.body);
-    assert.match(payload.messages[1].content[1].text, /身高必须是/);
+    assert.match(payload.messages[1].content.at(-1).text, /身高必须是/);
     return Response.json({ choices: [{ message: { content: JSON.stringify(draftWithCharacters) } }] });
   };
   t.after(() => { globalThis.fetch = originalFetch; });
@@ -714,7 +774,7 @@ test('director-layout corrects a fresh model response that omits characters', as
       return Response.json({ choices: [{ message: { content: JSON.stringify(withoutCharacters) } }] });
     }
     const payload = JSON.parse(init.body);
-    assert.match(payload.messages[1].content[1].text, /缺少 characters 数组/);
+    assert.match(payload.messages[1].content.at(-1).text, /缺少 characters 数组/);
     return Response.json({ choices: [{ message: { content: JSON.stringify(validDraft) } }] });
   };
   t.after(() => { globalThis.fetch = originalFetch; });
