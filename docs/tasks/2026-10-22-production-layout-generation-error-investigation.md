@@ -6,9 +6,9 @@
 
 ## 线上事实与边界
 
-- https://kc-canvans.bjliu1836.workers.dev 当前 Worker deployment status 为 55d04cd4-c5da-4bd6-9baa-4914ac0495db，创建于 2026-10-21T07:28:18.855Z，100%流量。其版本早于V2功能提交，但这只能证明部署落后，不能单独证明此次报错原因。
+- 调查时读取的 https://kc-canvans.bjliu1836.workers.dev Worker deployment status 为 55d04cd4-c5da-4bd6-9baa-4914ac0495db，创建于 2026-10-21T07:28:18.855Z，100%流量。该快照早于V2功能提交，但这只能证明当时部署落后，不能单独证明此次报错原因。
 - 官方 Workers Scripts GET /accounts/{account}/workers/scripts/kc-canvans/content/v2 返回HTTP 200。精确multipart与解析后的module及SHA manifest保存在 artifacts/unified-multiview-layout-contract-2026-10-21/production-investigation-2026-10-22/；主module SHA-256 30aba90b2c13968d13ab6cee118f575cf20cfe0edca87b412c7ad3f6c0400801。
-- 当前公开 /director-desk/ bundle index-Cycf1ekd.js 返回HTTP 200，SHA-256 eea78fe93c5c992afa406c4a4445fe0f36ac40645c56f4e99fdef5b8fd335b04。它发往 /api/director-layout 的请求明确为 outputFormat: image-observations-v1，最多3张，并发送 role: primary/supplementary；不含V2格式。bundle副本在同一artifact目录。
+- 调查时公开 /director-desk/ bundle index-Cycf1ekd.js 返回HTTP 200，SHA-256 eea78fe93c5c992afa406c4a4445fe0f36ac40645c56f4e99fdef5b8fd335b04。该bundle发往 /api/director-layout 的请求明确为 outputFormat: image-observations-v1，最多3张，并发送 role: primary/supplementary；不含V2格式。bundle副本在同一artifact目录。
 - Worker module中有两条不同路径，不能混为一谈：
   - 正常图像观察路径只接受V1 outputFormat，使用DIRECTOR_LAYOUT_OBSERVATION_MAX_COMPLETION_TOKENS（默认常量8192；空间复核另用最多32768），JSON payload未设置response_format: json_object。模型输出解析/合同失败分别以DIRECTOR_LAYOUT_MODEL_JSON_INVALID或DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID返回422，并带provider finish reason、model、prompt hash、issues/issuePaths。
   - 未带图像观察format的legacy草稿路径才使用DIRECTOR_LAYOUT_MAX_COMPLETION_TOKENS || MIMO_DIRECTOR_LAYOUT_MAX_COMPLETION_TOKENS || 6144，最多两次draft解析/校验；失败返回DIRECTOR_LAYOUT_INVALID_MODEL_JSON（502）。公开bundle的实际请求带V1 format，不应仅凭报错文案认定此次走了legacy分支。
@@ -21,7 +21,7 @@
 
 - 补齐V2 system prompt里parser可接受的字段shape/枚举/上限，增加覆盖surface/item/person局部观察、接触点、轮廓、遮挡、方向、landmarks、axes的完整JSON样例，并由shared parser测试确认该样例合法。没有放宽parser，也没有改场景/空间解算阈值。
 - 客户端针对malformed JSON、V2 schema错误、legacy草稿兼容校验失败、输出截断、服务端格式不兼容给出不同中文说明。安全诊断保存HTTP状态、请求格式、响应格式（仅实际返回时）、provider finish reason/model/prompt hash、output shape及受限issues/issuePaths；不记录token、图片字节或provider原始正文。
-- 线上正常observation分支未设置 `response_format: {type:"json_object"}` 是已核实的代码风险；本地源码中此前已有JSON mode修复，但当前线上Worker仍为旧版本。本轮没有推送或部署，因此不能将该风险修复宣称为线上已经生效或本次错误已经解决。
+- 调查时读取的线上正常observation分支未设置 `response_format: {type:"json_object"}`，这是已核实的代码风险；本地源码中此前已有JSON mode修复。本轮已推送源码但尚未部署，因此不能宣称该修复已在线上生效或解决了本次错误。
 
 ## 验证
 
