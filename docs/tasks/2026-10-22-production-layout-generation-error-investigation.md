@@ -31,7 +31,7 @@
 - 显式 `npx tsc --noEmit`：通过（exit 0）。Node/Worker/V2合同组合测试：45/45通过，覆盖正常观察输出、V2截断拒绝、JSON解析失败与安全诊断等路径。对应日志：`production-investigation-2026-10-22/director-desk-tsc.txt`、`node-worker-layout-contract-tests.txt`。
 - 客户端/诊断/Panel回归：54/54通过（含Panel完整24项）。此前独立套件汇总分别为ReferenceLayoutClient+layoutDiagnostics 30/30、Panel 24/24。日志：`production-investigation-2026-10-22/director-desk-targeted-tests.txt`。
 - 精确隔离源目录执行根目录标准 `npm run build`：exit 0，其中micro `npm ci`在隔离实体node_modules完成，Director Desk构建与根Vite构建均成功。日志和新输出位于 `production-investigation-2026-10-22/isolated-root-build/`；此前release快照及主工作区 `public/` 未用于构建目标。
-- Git交付：代码与过程记录提交 `453aae0828d13a190cf6fabc716558df293b4ef7`，推送后 `origin/main` 指向同一SHA。推送只更新GitHub源码，不包含Worker部署。
+- Git交付：代码与过程记录提交 `453aae0828d13a190cf6fabc716558df293b4ef7`，推送后 `origin/main` 指向同一SHA；后续提交 `ccdee9b761b54bf9856703b0a4ac2c13d544a04e` 和 `49b9064984f4594e0713d5c237ee30b2ca7414fa`修正文档。此处“未部署”只表示我没有手动运行Wrangler deploy；后来确认Git push会触发Cloudflare Workers Builds，但当时自动构建因根pnpm冻结锁失配而失败，线上仍保持旧版本，详见 `docs/tasks/2026-10-22-cloudflare-workers-build-lock-repair.md`。
 - 本地5175真实UI按钮链mock错误回放：脚本exit 0，1次 `/api/director-layout` 请求，`image-observations-v2`、1张图；模拟HTTP 422 `DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID` 后，页面显示“图片模型返回的JSON未通过图像观察结构校验（图像观察对象无效）”，诊断保留 `$.views[0].entities[0].bbox:invalid`、finish reason、model与prompt hash；没有暂存预览草稿，provider调用数0。证据JSON/截图为本目录 `production-investigation-2026-10-22/browser-mock-schema-error.json` 与 `.png`。CDP `pageErrors` 收到两个404资源日志及预期的422资源失败日志；脚本未单独断言没有Runtime.exceptionThrown，不能据此写“无页面错误”。
 - 最终已核实5175仍由PID 28968监听，原public构建产物和主工作区依赖未被隔离构建触碰；既有dirty均保留，Git index为空。
 
