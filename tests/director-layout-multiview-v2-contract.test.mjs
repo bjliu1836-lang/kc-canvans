@@ -118,12 +118,13 @@ test("v2 source IDs allow the request limit and images have neutral V2 labels", 
 });
 
 test("the V2 prompt includes a complete parseable example consistent with the shared parser", () => {
-  const match = DIRECTOR_LAYOUT_OBSERVATION_V2_SYSTEM_PROMPT.match(/最小单图例子：(\{.*\})。关系形状/);
+  const match = DIRECTOR_LAYOUT_OBSERVATION_V2_SYSTEM_PROMPT.match(/完整字段示例（JSON可解析，涵盖各类图像证据）：(\{.*\})$/s);
   assert.ok(match, "prompt should contain an explicit complete sample");
   assert.doesNotThrow(() => parseDirectorLayoutObservationV2(match[1], ["source-1"]));
   assert.match(DIRECTOR_LAYOUT_OBSERVATION_V2_SYSTEM_PROMPT, /ground\|wall\|door\|window\|table\|chair\|sofa\|cabinet\|pillar\|prop/);
-  assert.match(DIRECTOR_LAYOUT_OBSERVATION_V2_SYSTEM_PROMPT, /support为item\/person→item或floor surface；partOf为item→item；against为item→wall surface/);
+  assert.match(DIRECTOR_LAYOUT_OBSERVATION_V2_SYSTEM_PROMPT, /support仅item\/person→item或floor surface；partOf仅item→item；against仅item→wall surface/);
   assert.match(DIRECTOR_LAYOUT_OBSERVATION_V2_SYSTEM_PROMPT, /sourceId最多128字符/);
+  for (const field of ["groundContacts", "groundFootprints", "groundLandmarks", "geometryEvidence", "occludesEntityIds", "contactWallSide", "bodyExtendsToward", "rearFeature", "visibleBbox", "completeBbox"]) {
+    assert.ok(match[1].includes(`\"${field}\"`), `sample should exercise ${field}`);
+  }
 });
-
-\n

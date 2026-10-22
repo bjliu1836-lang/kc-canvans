@@ -209,14 +209,41 @@ describe("requestReferenceLayout failure details", () => {
       issues: ["图像观察对象无效"],
       issuePaths: ["$.items[0].contactWallSide:invalid"],
       outputShape: { outputBytes: 500, rootKeys: ["surfaces", "items"], rootTypes: { items: "array" } },
+      observationFormat: "image-observations-v2",
+      providerFinishReason: "stop",
+      providerModel: "deepseek-flash",
+      promptHash: "a".repeat(64),
       raw: "must-not-be-recorded",
     }), { status: 422, headers: { "Content-Type": "application/json" } })));
     await expect(requestReferenceLayout(image)).rejects.toThrow("图像观察对象无效");
     const records = readLayoutDiagnosticRecords();
     const stages = records[records.length - 1]?.stages ?? [];
     const failed = stages[stages.length - 1];
-    expect(failed).toMatchObject({ code: "model-schema", evidence: { issuePaths: ["$.items[0].contactWallSide:invalid"] } });
+    expect(failed).toMatchObject({ code: "model-schema", evidence: {
+      httpStatus: 422, requestedObservationFormat: "image-observations-v2", responseObservationFormat: "image-observations-v2", providerFinishReason: "stop",
+      providerModel: "deepseek-flash", promptHash: "a".repeat(64), issuePaths: ["$.items[0].contactWallSide:invalid"],
+    } });
     expect(JSON.stringify(failed)).not.toContain("must-not-be-recorded");
+  });
+
+  it("distinguishes truncation, incompatible format, and legacy structure rejection", async () => {
+    const cases = [
+      { response: { error: "DIRECTOR_LAYOUT_MODEL_OUTPUT_TRUNCATED", providerFinishReason: "length" }, status: 422, message: "输出被截断", code: "model-truncated" },
+      { response: { error: "DIRECTOR_LAYOUT_FORMAT_UNSUPPORTED" }, status: 400, message: "版本与当前服务端不兼容", code: "format-mismatch" },
+      { response: { error: "DIRECTOR_LAYOUT_INVALID_MODEL_JSON", issues: ["窗户没有墙面引用"] }, status: 502, message: "布景结构未通过兼容校验", code: "model-schema" },
+    ];
+    for (const item of cases) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(item.response), { status: item.status, headers: { "Content-Type": "application/json" } })));
+      await expect(requestReferenceLayout(image)).rejects.toThrow(item.message);
+      const records = readLayoutDiagnosticRecords();
+      const stages = records[records.length - 1]?.stages ?? [];
+      const failed = stages[stages.length - 1];
+      expect(failed).toMatchObject({ code: item.code, evidence: {
+        httpStatus: item.status,
+        requestedObservationFormat: "image-observations-v2",
+      } });
+      expect(failed?.evidence).not.toHaveProperty("responseObservationFormat");
+    }
   });
 
   it("classifies converter failures as geometry failures", async () => {
@@ -251,13 +278,13 @@ describe("requestReferenceLayout failure details", () => {
     await expect(
       rejectWithIssues(["第 1 个窗未依附任何墙面", "第 2 个组件无效"])
     ).rejects.toThrow(
-      "图片模型未能返回可用的布景结构，请重试或更换参考图（第 1 个窗未依附任何墙面）"
+      "图片模型返回的布景结构未通过兼容校验（第 1 个窗未依附任何墙面）"
     );
   });
 
   it("keeps the generic message when the Worker has no usable issue", async () => {
     await expect(rejectWithIssues()).rejects.toThrow(
-      "图片模型未能返回可用的布景结构，请重试或更换参考图"
+      "图片模型返回的布景结构未通过兼容校验"
     );
   });
 
@@ -269,7 +296,7 @@ describe("requestReferenceLayout failure details", () => {
     const error = await rejectWithIssues([issue]).catch((reason: unknown) => reason);
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe(
-      "图片模型未能返回可用的布景结构，请重试或更换参考图"
+      "图片模型返回的布景结构未通过兼容校验"
     );
     expect((error as Error).message).not.toContain("secret-value");
   });

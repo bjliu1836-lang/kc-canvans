@@ -348,7 +348,7 @@ export function recordLayoutGenerationFailed(generationId: string, code: string,
   const index = records.findIndex((item) => item.generationId === generationId);
   if (index < 0) return;
   const record = records[index];
-  const safeEvidence = pick(evidence, ["error", "issues", "issuePaths", "outputShape", "providerEnvelope"]);
+  const safeEvidence = pick(evidence, ["error", "issues", "issuePaths", "outputShape", "providerEnvelope", "httpStatus", "requestedObservationFormat", "responseObservationFormat", "providerFinishReason", "providerModel", "promptHash"]);
   const boundedEvidence = safeEvidence ? boundDiagnosticValue(safeEvidence) : undefined;
   records[index] = { ...record, stages: [...record.stages, {
     phase: "request-failed", code, at: new Date().toISOString(), ...(boundedEvidence ? { evidence: boundedEvidence } : {}),

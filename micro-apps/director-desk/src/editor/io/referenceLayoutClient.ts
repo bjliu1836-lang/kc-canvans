@@ -5,7 +5,6 @@ import { assertMultiViewContract, multiViewToCanonicalObservation, registerGroun
 import { createLayoutGenerationId, recordLayoutGenerationFailed, recordLayoutGenerationStarted, recordNormalizedLayoutDraft } from "./layoutDiagnostics";
 
 const AUTH_TOKEN_KEY = "KC_CANVAS_AUTH_TOKEN";
-const INVALID_LAYOUT_MESSAGE = "图片模型未能返回可用的布景结构，请重试或更换参考图";
 const IMAGE_OBSERVATION_FORMAT = "image-observations-v2";
 function stableImageFingerprint(url: string) {
   let hash = 2166136261;
@@ -154,9 +153,19 @@ function readableLayoutError(status: number, data: Record<string, unknown>) {
   if (code === "DIRECTOR_LAYOUT_TOO_MANY_IMAGES") return "一次最多选择 3 张参考图";
   if (code === "DIRECTOR_LAYOUT_IMAGES_TOO_LARGE" || code === "DIRECTOR_LAYOUT_REQUEST_TOO_LARGE") return "所选参考图合计过大，请压缩图片后重试（最多 16 MB）";
   if (code === "DIRECTOR_LAYOUT_IMAGES_AMBIGUOUS" || code === "DIRECTOR_LAYOUT_IMAGES_INVALID") return "参考图列表无效，请重新选择图片";
-  if (code === "DIRECTOR_LAYOUT_INVALID_MODEL_JSON" || code === "DIRECTOR_LAYOUT_MODEL_JSON_INVALID" || code === "DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID") {
+  if (code === "DIRECTOR_LAYOUT_FORMAT_UNSUPPORTED") return "图片观察版本与当前服务端不兼容，请刷新页面后重试";
+  if (code === "DIRECTOR_LAYOUT_MODEL_OUTPUT_TRUNCATED") return "图片模型输出被截断，未生成完整的布景结构，请重试";
+  if (code === "DIRECTOR_LAYOUT_INVALID_MODEL_JSON") {
     const issue = readableLayoutIssue(data);
-    return issue ? `${INVALID_LAYOUT_MESSAGE}（${issue}）` : INVALID_LAYOUT_MESSAGE;
+    const base = "图片模型返回的布景结构未通过兼容校验";
+    return issue ? `${base}（${issue}）` : base;
+  }
+  if (code === "DIRECTOR_LAYOUT_MODEL_JSON_INVALID" || code === "DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID") {
+    const issue = readableLayoutIssue(data);
+    const base = code === "DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID"
+      ? "图片模型返回的JSON未通过图像观察结构校验"
+      : "图片模型返回内容不是有效JSON";
+    return issue ? `${base}（${issue}）` : base;
   }
   return typeof data.message === "string" && data.message.trim()
     ? data.message
@@ -231,14 +240,22 @@ export async function requestReferenceLayout(
       : data.error === "DIRECTOR_LAYOUT_MODEL_JSON_INVALID" ? "model-json"
       : data.error === "DIRECTOR_LAYOUT_INVALID_MODEL_JSON" ? "model-schema"
       : data.error === "DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID" ? "model-schema"
+      : data.error === "DIRECTOR_LAYOUT_MODEL_OUTPUT_TRUNCATED" ? "model-truncated"
+      : data.error === "DIRECTOR_LAYOUT_FORMAT_UNSUPPORTED" ? "format-mismatch"
       : response.status >= 500 ? "server-error" : "request-rejected";
-    const safeErrors = ["DIRECTOR_LAYOUT_UPSTREAM_HTTP", "DIRECTOR_LAYOUT_UPSTREAM_FAILURE", "DIRECTOR_LAYOUT_UPSTREAM_RESPONSE_INVALID", "DIRECTOR_LAYOUT_INVALID_MODEL_JSON", "DIRECTOR_LAYOUT_MODEL_JSON_INVALID", "DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID"];
+    const safeErrors = ["DIRECTOR_LAYOUT_UPSTREAM_HTTP", "DIRECTOR_LAYOUT_UPSTREAM_FAILURE", "DIRECTOR_LAYOUT_UPSTREAM_RESPONSE_INVALID", "DIRECTOR_LAYOUT_INVALID_MODEL_JSON", "DIRECTOR_LAYOUT_MODEL_JSON_INVALID", "DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID", "DIRECTOR_LAYOUT_MODEL_OUTPUT_TRUNCATED", "DIRECTOR_LAYOUT_FORMAT_UNSUPPORTED"];
     recordLayoutGenerationFailed(generationId, code, {
       error: typeof data.error === "string" && safeErrors.includes(data.error) ? data.error : undefined,
       issues: Array.isArray(data.issues) ? data.issues : undefined,
       issuePaths: Array.isArray(data.issuePaths) ? data.issuePaths : undefined,
       outputShape: data.outputShape,
       providerEnvelope: data.providerEnvelope,
+      httpStatus: response.status,
+      requestedObservationFormat: IMAGE_OBSERVATION_FORMAT,
+      responseObservationFormat: typeof data.observationFormat === "string" ? data.observationFormat : undefined,
+      providerFinishReason: data.providerFinishReason,
+      providerModel: data.providerModel,
+      promptHash: data.promptHash,
     });
     throw new Error(readableLayoutError(response.status, data));
   }
