@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { PerspectiveCamera, Vector3 } from "three";
 import { buildLayoutBatch, createLayoutCharacterRenderAdapter, getLayoutComponentAssembly, getLayoutComponentRotationYDegrees, validateLayoutDraftCandidate } from "./layoutDraft";
-import { cameraFitBreakdown, cameraFitError, cameraWorldCorners, carryFittedParentMotion, fitReferenceCamera, fitReferenceScene, imageObservationToLayoutDraft, ImageObservationValidationError, type CameraFitPair } from "./imageObservationLayout";
+import { buildDerivedGroundPlacementComponent, cameraFitBreakdown, cameraFitError, cameraWorldCorners, carryFittedParentMotion, fitReferenceCamera, fitReferenceScene, imageObservationToLayoutDraft, ImageObservationValidationError, normalizeImageObservation, type CameraFitPair } from "./imageObservationLayout";
+import type { CalibratedGroundCamera } from "./referenceGroundProjection";
 import type { LayoutDraftComponent } from "./layoutDraft";
 import { resolveLayoutSemanticProfile } from "./layoutSemanticProfiles";
 import { deriveObservedAssemblyPrisms } from "../canvas/layoutGeometryBounds";
@@ -87,6 +88,16 @@ function bedObservation(side: "image_left" | "image_right") {
 }
 
 describe("imageObservationToLayoutDraft", () => {
+  it("normalizes explicit null relationships to no relation in the client observation model", () => {
+    const parsed = normalizeImageObservation({
+      surfaces: [],
+      items: [{ id: "item", name: "item", semanticType: "prop", bbox: [0.1, 0.1, 0.4, 0.5], confidence: 0.8, visibility: "visible", supportId: null, partOfId: null, againstSurfaceId: null, contactWallSide: null }],
+    });
+    for (const field of ["supportId", "partOfId", "againstSurfaceId", "contactWallSide"] as const) {
+      expect(parsed.items[0][field]).toBeUndefined();
+    }
+  });
+
   it("uses the same canonical X scale for generic bbox centers and widths at different image aspects", () => {
     const observation = {
       spaceType: "enclosed",
@@ -239,6 +250,66 @@ describe("imageObservationToLayoutDraft", () => {
     }
   });
 
+  it("adds a safely projected off-frame entity with its original source-local crop evidence", () => {
+    const aspect = 1.5;
+    const fixture = groundEvidenceFixture(aspect);
+    const anchors: LayoutDraftComponent[] = [
+      { id: "anchor_rug", name: "rug", category: "prop", primitive: "box", position: [-0.8, 0, -2.2], size: [1.2, 0.04, 1], rotationYDegrees: 0, confidence: 0.98, uncertain: false, visible: true },
+      { id: "anchor_sofa", name: "sofa", category: "sofa", primitive: "box", position: [-0.15, 0, -2.35], size: [1.1, 0.75, 0.65], rotationYDegrees: 0, confidence: 0.98, uncertain: false, visible: true },
+      { id: "anchor_chair", name: "chair", category: "chair", primitive: "box", position: [0.75, 0, -2.8], size: [0.55, 0.85, 0.55], rotationYDegrees: 0, confidence: 0.98, uncertain: false, visible: true },
+    ];
+    const observation = {
+      spaceType: "open", imageAspectRatio: aspect, geometryEvidence: fixture.geometryEvidence,
+      surfaces: [],
+      items: anchors.map((component) => ({ id: component.id, name: component.name, category: component.category, semanticType: component.category,
+        bbox: projectedBoxByThree(component, fixture.camera), confidence: 0.98, visibility: "visible", placement: "floor" })),
+    };
+    const contact = fixture.project(new Vector3(1.25, 0, -2.7));
+    const draft = imageObservationToLayoutDraft(observation, source, {
+      imageAspectRatio: aspect,
+      layoutResolution: { recognizedCount: 4, locatedCount: 3, unresolved: [{ entityId: "offframe_bed", name: "床", sourceId: "view_side", sourceFileName: "side.png", reason: "等待其他视图定位" }] },
+      derivedGroundPlacements: [{
+        entityId: "offframe_bed", name: "床", semanticType: "bed", category: "prop", confidence: 0.9, uncertain: false,
+        sourceId: "view_side", sourceIds: ["view_side"], sourceBbox: [0.2, 0.3, 0.8, 0.72],
+        groundContacts: [{ point: contact, kind: "center", visibility: "visible", confidence: 0.95 }], groundFootprints: [],
+      }],
+    });
+    const derived = draft.components.find((component) => component.id === "offframe_bed");
+    expect(derived).toBeUndefined();
+    expect(draft.layoutResolution).toMatchObject({ recognizedCount: 4, locatedCount: 3, unresolved: [
+      { entityId: "offframe_bed", reason: "最终参考机位缺少可信地面相机，已识别但暂不定位。" },
+    ] });
+  });
+
+  it("projects a derived ground center through one trusted camera and carries its crop source into the applied batch", () => {
+    const calibration = {
+      camera: { projection: "perspective", position: [0, 1.6, 6.6], target: [0, 0.3, 0], fov: 60, confidence: 0.95, source: "estimated" },
+      confidence: 0.95, status: "calibrated", evidenceAxes: [], focalLengthY: 0.866, cameraHeightMeters: 1.6,
+    } as unknown as CalibratedGroundCamera;
+    const result = buildDerivedGroundPlacementComponent({
+      entityId: "offframe_bed", name: "床", semanticType: "bed", category: "prop", confidence: 0.9, uncertain: false,
+      sourceId: "view_side", sourceIds: ["view_side"], sourceBbox: [0.2, 0.3, 0.8, 0.72],
+      groundContacts: [{ point: [0.5, 0.7], kind: "center", visibility: "visible", confidence: 0.95 }], groundFootprints: [],
+    }, calibration, 1.5);
+    expect("component" in result).toBe(true);
+    if (!("component" in result) || !result.component) throw new Error("reason" in result ? result.reason : "derived component missing");
+    expect(result.component.category).toBe("sofa");
+    expect(result.component.uncertain).toBe(true);
+    expect(result.component.sourceImageEvidence).toMatchObject({ sourceId: "view_side", bbox: [0.2, 0.3, 0.8, 0.72] });
+    const draft = validateLayoutDraftCandidate({
+      spaceType: "open", sourceGroupKey: "view_front|view_side",
+      layoutResolution: { recognizedCount: 2, locatedCount: 1, unresolved: [{ entityId: "other", name: "柜子", sourceId: "view_side", sourceFileName: "side.png", reason: "地面未配准" }] },
+      components: [result.component],
+    }, source, {
+      draftId: "derived_projected", sourceGroupKey: "view_front|view_side",
+      layoutResolution: { recognizedCount: 2, locatedCount: 1, unresolved: [{ entityId: "other", name: "柜子", sourceId: "view_side", sourceFileName: "side.png", reason: "地面未配准" }] },
+    });
+    const built = buildLayoutBatch(draft, "derived_batch", []);
+    expect(built.objects[0].layoutSource).toMatchObject({ evidenceSourceId: "view_side", sourceGroupKey: "view_front|view_side" });
+    expect(built.batch.layoutResolution?.unresolved).toMatchObject([{ entityId: "other", sourceFileName: "side.png", reason: "地面未配准" }]);
+    expect(built.batch.objectIds).toContain("derived_batch_offframe_bed");
+  });
+
   it("carries a sofa L-notch through parser, conversion, preview, rotation and apply", () => {
     const { geometryEvidence } = groundEvidenceFixture(1.5);
     const draft = imageObservationToLayoutDraft({
@@ -347,7 +418,42 @@ describe("imageObservationToLayoutDraft", () => {
     expect(resolveLayoutSemanticProfile("uncatalogued_item", "地毯上的物品")).toBeUndefined();
   });
 
-  it("keeps the finite category in control when it conflicts with a known semantic hint", () => {
+  it("normalizes known identities to one geometry category while keeping unknowns conservative", () => {
+    const input = {
+      spaceType: "open",
+      surfaces: [],
+      items: [
+        { id: "bed_sofa_category", name: "bed", semanticType: "bed", category: "sofa", bbox: [0.33, 0.03, 0.62, 0.63], confidence: 0.95, visibility: "visible", placement: "floor", groundFootprints: [{ outer: [[0.34, 0.06], [0.61, 0.06], [0.62, 0.6], [0.33, 0.6]], visibility: "visible", confidence: 0.8 }] },
+        { id: "bed_table_category", name: "bed", semanticType: "bed", category: "table", bbox: [0.33, 0.03, 0.62, 0.63], confidence: 0.95, visibility: "visible", placement: "floor", groundFootprints: [{ outer: [[0.34, 0.06], [0.61, 0.06], [0.62, 0.6], [0.33, 0.6]], visibility: "visible", confidence: 0.8 }] },
+        { id: "bookshelf_table_category", name: "bookshelf", semanticType: "bookshelf", category: "table", bbox: [0.1, 0.2, 0.3, 0.8], confidence: 0.9, visibility: "visible", placement: "floor" },
+        { id: "unknown_chair_category", name: "odd object", semanticType: "uncatalogued_object", category: "chair", bbox: [0.6, 0.2, 0.8, 0.8], confidence: 0.9, visibility: "visible", placement: "floor" },
+      ],
+    } as const;
+    const original = structuredClone(input);
+    const draft = imageObservationToLayoutDraft(input, source);
+    const byId = new Map(draft.components.map((component) => [component.id, component]));
+    const bedSofa = byId.get("bed_sofa_category")!;
+    const bedTable = byId.get("bed_table_category")!;
+    expect(bedTable.category).toBe("sofa");
+    expect(bedTable.size).toEqual(bedSofa.size);
+    expect(bedTable.assembly).toEqual(bedSofa.assembly);
+    expect(bedTable.rotationYDegrees).toBe(bedSofa.rotationYDegrees);
+    expect(bedTable.uncertain).toBe(true);
+    expect(bedTable.notes).toContain("table 与已知身份 bed 不一致");
+
+    const bookshelf = byId.get("bookshelf_table_category")!;
+    expect(bookshelf.category).toBe("cabinet");
+    expect(bookshelf.size).toEqual([0.9, 1.8, 0.35]);
+    expect(bookshelf.uncertain).toBe(true);
+    expect(bookshelf.notes).toContain("table 与已知身份 bookshelf 不一致");
+
+    const unknown = byId.get("unknown_chair_category")!;
+    expect(unknown.category).toBe("chair");
+    expect(unknown.size).not.toEqual([2, 1.2, 2.2]);
+    expect(input).toEqual(original);
+  });
+
+  it("uses canonical geometry for known identity conflicts and does not fall back to a generic unit box", () => {
     const draft = imageObservationToLayoutDraft({
       spaceType: "open", surfaces: [],
       items: [
@@ -360,20 +466,21 @@ describe("imageObservationToLayoutDraft", () => {
     }, source);
     const component = draft.components[0];
     const identityConflict = draft.components[1];
-    expect(component.category).toBe("chair");
-    expect(component.size[0]).toBeLessThanOrEqual(1.5);
+    expect(component.category).toBe("table");
+    expect(component.size[1]).toBe(0.75);
     expect(component.uncertain).toBe(true);
-    expect(component.notes).toContain("基础几何类别与语义身份提示冲突");
+    expect(component.notes).toContain("识别类别 chair 与已知身份 table 不一致");
     expect(component.semanticType).toBe("table");
-    expect(component.assembly).toEqual([{ primitive: "box", position: [0.5, 0.5, 0.5], size: [1, 1, 1] }]);
-    expect(identityConflict.assembly).toEqual([{ primitive: "box", position: [0.5, 0.5, 0.5], size: [1, 1, 1] }]);
-    expect(identityConflict.category).toBe("chair");
-    expect(identityConflict.size[1]).not.toBe(1.2);
+    expect(component.assembly).toBeDefined();
+    expect(identityConflict.category).toBe("sofa");
+    expect(identityConflict.size).toEqual([2, 1.2, 2.2]);
+    expect(identityConflict.assembly).toHaveLength(5);
+    expect(identityConflict.notes).toContain("chair 与已知身份 bed 不一致");
     const propBedConflict = draft.components[2];
-    expect(propBedConflict.category).toBe("prop");
+    expect(propBedConflict.category).toBe("sofa");
     expect(propBedConflict.uncertain).toBe(true);
-    expect(propBedConflict.assembly).toEqual([{ primitive: "box", position: [0.5, 0.5, 0.5], size: [1, 1, 1] }]);
-    expect(propBedConflict.size).not.toEqual([2, 1.2, 2.2]);
+    expect(propBedConflict.assembly).toHaveLength(5);
+    expect(propBedConflict.size).toEqual([2, 1.2, 2.2]);
     expect(draft.components[3].category).toBe("prop");
     expect(draft.components[3].assembly).toEqual([{ primitive: "box", position: [0.5, 0.5, 0.5], size: [1, 1, 1] }]);
     expect(draft.components[4].category).toBe("table");
@@ -830,6 +937,52 @@ describe("imageObservationToLayoutDraft", () => {
     expect(pairs.map(({ id }) => id)).not.toContain("unknown_object");
     expect(draft.components.find(({ id }) => id === "tabletop_vase")?.supportComponentId).toBe("table");
     expect(draft.referenceCamera?.fitDiagnostics?.movedGroundItems).toBe(0);
+  });
+
+  it("keeps floor placement when a non-ground support edge contradicts it and excludes that item from camera fitting", () => {
+    const draft = imageObservationToLayoutDraft({
+      spaceType: "enclosed",
+      imageAspectRatio: 1.5,
+      surfaces: [],
+      items: [
+        { id: "bed_main", name: "bed", semanticType: "bed", category: "sofa", bbox: [0.25, 0.25, 0.75, 0.7], confidence: 0.95, visibility: "visible", placement: "floor" },
+        { id: "bed_bench", name: "bench", semanticType: "bench", category: "sofa", bbox: [0.3, 0.68, 0.7, 0.85], confidence: 0.95, visibility: "visible", placement: "floor", supportId: "bed_main" },
+        { id: "rug", name: "rug", semanticType: "rug", category: "prop", bbox: [0.15, 0.68, 0.85, 0.9], confidence: 0.9, visibility: "visible", placement: "floor" },
+        { id: "lamp", name: "lamp", semanticType: "table_lamp", category: "prop", bbox: [0.4, 0.2, 0.5, 0.35], confidence: 0.9, visibility: "visible", placement: "supported", supportId: "rug" },
+      ],
+    }, source, { imageAspectRatio: 1.5 });
+    const bench = draft.components.find(({ id }) => id === "bed_bench")!;
+    const lamp = draft.components.find(({ id }) => id === "lamp")!;
+    const pairs = draft.referenceCamera?.fitDiagnostics?.pairDiagnostics ?? [];
+    expect(bench.position[1]).toBe(0);
+    expect(bench.supportComponentId).toBeUndefined();
+    expect(bench.uncertain).toBe(true);
+    expect(bench.notes).toContain("floor placement 和非地面 supportId=bed_main");
+    expect(draft.relations?.some(({ fromId, toId, type }) => fromId === "bed_bench" && toId === "bed_main" && type === "supports")).toBe(false);
+    expect(pairs.map(({ id }) => id)).not.toContain("bed_bench");
+    expect(lamp.supportComponentId).toBe("rug");
+    expect(pairs.map(({ id }) => id)).toContain("lamp");
+  });
+
+  it("accepts cabinet geometry for nightstands without accepting unrelated semantic category conflicts", () => {
+    const draft = imageObservationToLayoutDraft({
+      surfaces: [],
+      items: [
+        { id: "nightstand", name: "床头柜", semanticType: "nightstand", category: "cabinet", bbox: [0.1, 0.2, 0.3, 0.7], confidence: 0.9, visibility: "visible", placement: "floor" },
+        { id: "bad_nightstand", name: "wrong geometry", semanticType: "nightstand", category: "sofa", bbox: [0.6, 0.2, 0.9, 0.7], confidence: 0.9, visibility: "visible", placement: "floor" },
+      ],
+    }, source);
+    const compatible = draft.components.find(({ id }) => id === "nightstand")!;
+    const incompatible = draft.components.find(({ id }) => id === "bad_nightstand")!;
+    expect(compatible.category).toBe("cabinet");
+    expect(compatible.size).toEqual([0.5, 0.55, 0.4]);
+    expect(compatible.assembly?.length).toBeGreaterThan(1);
+    expect(compatible.notes).not.toContain("基础几何类别与语义身份提示冲突");
+    expect(incompatible.uncertain).toBe(true);
+    expect(incompatible.category).toBe("table");
+    expect(incompatible.size).toEqual(compatible.size);
+    expect(incompatible.notes).toContain("识别类别 sofa 与已知身份 nightstand 不一致");
+    expect(incompatible.assembly).toEqual(compatible.assembly);
   });
 
   it("rejects camera and object fits that reverse confident, separated image order", () => {

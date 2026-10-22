@@ -128,6 +128,9 @@ export interface DirectorObject {
     batchId: string;
     draftId: string;
     sourceId: string;
+    sourceGroupKey?: string;
+    evidenceSourceId?: string;
+    groundEvidenceSourceIds?: string[];
     sourceFileName: string;
     componentId: string;
     category: DirectorLayoutCategory | "character";
@@ -179,6 +182,12 @@ export interface DirectorLayoutBatch {
   draftId: string;
   sourceId: string;
   sourceFileName: string;
+  sourceGroupKey?: string;
+  layoutResolution?: {
+    recognizedCount: number;
+    locatedCount: number;
+    unresolved: Array<{ entityId: string; name?: string; sourceId: string; sourceFileName?: string; reason: string }>;
+  };
   createdAt: string;
   scale: {
     mode: "estimated" | "anchored";

@@ -9,6 +9,18 @@ const image = {
   origin: "local" as const,
 };
 
+class FailedMetadataImage {
+  naturalWidth = 0;
+  naturalHeight = 0;
+  crossOrigin = "";
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  set src(_value: string) { queueMicrotask(() => this.onerror?.()); }
+}
+
+beforeEach(() => vi.stubGlobal("Image", FailedMetadataImage));
+afterEach(() => vi.unstubAllGlobals());
+
 function rejectWithIssues(issues?: unknown[]) {
   vi.stubGlobal(
     "fetch",
@@ -73,10 +85,11 @@ describe("requestReferenceLayout failure details", () => {
     }]);
     expect(record?.normalized.components.some((component) => component.id === "wall")).toBe(true);
     expect(JSON.stringify(record?.candidate)).not.toContain("cameraPosition");
-    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
-    expect(requestBody.outputFormat).toBe("image-observations-v1");
-    expect(requestBody.images).toMatchObject([{ id: "local_test", role: "primary", sourceId: "local_test" }]);
-    expect(requestBody.image).toBeUndefined();
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { outputFormat: string; images: Array<Record<string, unknown>> };
+    expect(requestBody.outputFormat).toBe("image-observations-v2");
+    expect(requestBody.images).toMatchObject([{ id: "local_test", sourceId: "local_test" }]);
+    expect(requestBody.images[0]).not.toHaveProperty("role");
+    expect(requestBody).not.toHaveProperty("image");
     expect(draft.components.find((component) => component.id === "chair")?.sourceImageEvidence?.sourceId).toBe("local_test");
   });
 
@@ -102,18 +115,12 @@ describe("requestReferenceLayout failure details", () => {
       }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const sideImage = { ...image, sourceId: "canvas_side", fileName: "side.png", origin: "canvas" as const, url: "https://example.test/side.png" };
-    const detailImage = { ...image, sourceId: "local_detail", fileName: "detail.png", url: "data:image/png;base64,AQ==" };
-    const draft = await requestReferenceLayout([image, sideImage, detailImage]);
+    const draft = await requestReferenceLayout(image);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const reviewBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as Record<string, unknown>;
     expect(reviewBody.observationStage).toBe("spatial-review");
-    const expectedGroup = [
-      { id: "local_test", role: "primary", sourceId: "local_test" },
-      { id: "canvas_side", role: "supplementary", sourceId: "canvas_side" },
-      { id: "local_detail", role: "supplementary", sourceId: "local_detail" },
-    ];
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).images).toMatchObject(expectedGroup);
+    const expectedGroup = [{ id: "local_test", role: "primary", sourceId: "local_test" }];
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).images).toMatchObject([{ id: "local_test", sourceId: "local_test" }]);
     expect(reviewBody.images).toMatchObject(expectedGroup);
     expect(reviewBody.image).toBeUndefined();
     expect((reviewBody.reviewContext as { missingEvidence?: string[] }).missingEvidence).toContain("non-convex-contact-boundary");
@@ -124,6 +131,37 @@ describe("requestReferenceLayout failure details", () => {
     expect(candidate?.spatialReview).toMatchObject({ attempted: true, accepted: true, providerModel: "deepseek-flash-v4.1-1017", promptHash: "a".repeat(64) });
     expect(candidate?.visualObservations?.items[0]).toMatchObject({ id: "sofa", name: "转角组合沙发", category: "sofa", groundFootprints: [footprint] });
     expect(draft.diagnosticGenerationId).toBe(record?.generationId);
+  });
+
+  it("clears an explicit null relationship in spatial review while omission preserves the original", async () => {
+    const observation = {
+      spaceType: "enclosed",
+      surfaces: [{ id: "floor", kind: "floor", side: "floor", bbox: [0, 0.65, 1, 1], confidence: 0.9, visibility: "visible" }],
+      items: [
+        { id: "sofa", name: "转角沙发", category: "sofa", semanticType: "sofa_main", bbox: [0.1, 0.2, 0.65, 0.8], confidence: 0.9, visibility: "visible", supportId: "table", partOfId: "set", againstSurfaceId: "wall", contactWallSide: "image_back" },
+        { id: "table", name: "茶几", category: "table", semanticType: "coffee_table", bbox: [0.35, 0.55, 0.65, 0.8], confidence: 0.9, visibility: "visible" },
+        { id: "lamp", name: "台灯", category: "prop", semanticType: "lamp", bbox: [0.4, 0.5, 0.5, 0.7], confidence: 0.9, visibility: "visible", supportId: "table", placement: "supported" },
+        { id: "chair", name: "椅子", category: "chair", semanticType: "chair", bbox: [0.7, 0.3, 0.9, 0.8], confidence: 0.9, visibility: "visible" },
+      ],
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ observationFormat: "image-observations-v1", visualObservations: observation }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        observationFormat: "image-observations-v1",
+        spatialReviewPatch: { items: [{ id: "sofa", supportId: null, partOfId: null, againstSurfaceId: null, contactWallSide: null }, { id: "lamp" }] },
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestReferenceLayout(image);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const records = readLayoutDiagnosticRecords();
+    const candidate = records[records.length - 1]?.candidate as { visualObservations?: typeof observation } | undefined;
+    const sofa = candidate?.visualObservations?.items.find((item) => item.id === "sofa");
+    const lamp = candidate?.visualObservations?.items.find((item) => item.id === "lamp");
+    for (const relationshipField of ["supportId", "partOfId", "againstSurfaceId", "contactWallSide"] as const) {
+      expect(sofa).not.toHaveProperty(relationshipField);
+    }
+    expect(lamp).toMatchObject({ supportId: "table", placement: "supported" });
   });
 
   it("rejects a reference group outside the three-image and aggregate payload limits without sending it", async () => {
@@ -203,7 +241,7 @@ describe("requestReferenceLayout failure details", () => {
 
   it("rejects an explicit unsupported format even when a legacy draft is present", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      observationFormat: "image-observations-v2",
+      observationFormat: "image-observations-v3",
       draft: { components: [{ id: "legacy-wall", name: "墙", category: "wall", primitive: "box", position: [0, 0, -3], size: [6, 2.8, 0.15], rotationYDegrees: 0, confidence: 0.8 }] },
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
     await expect(requestReferenceLayout(image)).rejects.toThrow("不支持的图像观察格式");
@@ -235,6 +273,57 @@ describe("requestReferenceLayout failure details", () => {
     );
     expect((error as Error).message).not.toContain("secret-value");
   });
+});
+
+it("keeps unresolved multi-view entities marked for review after a complete V2 replacement", async () => {
+  const contract = {
+    contractVersion: "image-observations-v2",
+    spaceType: "open",
+    entities: [
+      { id: "floor", kind: "surface", name: "地面", surfaceKind: "floor", identityConfidence: 0.95, uncertain: false },
+      { id: "table", kind: "item", name: "桌子", semanticType: "table", category: "table", placement: "floor", identityConfidence: 0.9, uncertain: false },
+      { id: "chair", kind: "item", name: "椅子", semanticType: "chair", category: "chair", placement: "floor", identityConfidence: 0.9, uncertain: false },
+    ],
+    views: [
+      { sourceId: "view_a", entities: [
+        { entityId: "floor", side: "floor", bbox: [0, 0.65, 1, 1], confidence: 0.95, visibility: "visible", mainColor: null },
+        { entityId: "table", bbox: [0.2, 0.35, 0.6, 0.75], confidence: 0.9, visibility: "visible", mainColor: "#886644" },
+      ] },
+      { sourceId: "view_b", entities: [
+        { entityId: "floor", side: "floor", bbox: [0, 0.6, 1, 1], confidence: 0.9, visibility: "visible", mainColor: null },
+        { entityId: "chair", bbox: [0.25, 0.3, 0.55, 0.8], confidence: 0.9, visibility: "visible", mainColor: "#555555" },
+      ] },
+    ],
+    relations: [],
+  };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ observationFormat: "image-observations-v2", visualObservations: contract }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ observationFormat: "image-observations-v2", spatialReviewPatch: contract }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const mainImage = { ...image, sourceId: "view_a", fileName: "front.png", aspectRatio: 1.5 };
+  const sideImage = { ...image, sourceId: "view_b", fileName: "side.png", aspectRatio: 1.5 };
+  const draft = await requestReferenceLayout([mainImage, sideImage]);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  const initialBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+  const reviewBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+  expect(initialBody.images.map((entry: Record<string, unknown>) => entry.sourceId)).toEqual(["view_a", "view_b"]);
+  expect(reviewBody.images.every((entry: Record<string, unknown>) => !("role" in entry))).toBe(true);
+  expect(draft.layoutResolution?.unresolved).toMatchObject([{ entityId: "chair", name: "椅子", sourceFileName: "side.png" }]);
+  expect(draft.referenceCamera?.fitDiagnostics?.qualityStatus).toBe("needsReview");
+});
+
+it("rejects a V1 response for a multi-image request because its bbox source is ambiguous", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    observationFormat: "image-observations-v1",
+    visualObservations: { spaceType: "open", surfaces: [], items: [{ id: "chair", name: "椅子", category: "chair", bbox: [0.1, 0.2, 0.5, 0.8], confidence: 0.9, visibility: "visible" }] },
+  }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const images = [
+    { ...image, sourceId: "view_a", aspectRatio: 1.5 },
+    { ...image, sourceId: "view_b", aspectRatio: 1.5 },
+  ];
+  await expect(requestReferenceLayout(images)).rejects.toThrow("多张参考图需要完整的 image-observations-v2 多视图结果");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
 });
 
 describe("complex furniture spatial review", () => {

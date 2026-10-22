@@ -76,6 +76,32 @@ it("retains placement and facing relations when sanitizing image-observation dia
   expect(item).toMatchObject({ supportId: "desk", partOfId: "set", placement: "supported", facingTowardId: "target" });
 });
 
+it("retains the validated multi-view contract and solve-frame registration summary without image bytes", () => {
+  const draft = validCandidate("trace_multiview_contract");
+  recordLayoutGenerationStarted("generation_multiview_contract");
+  recordNormalizedLayoutDraft(draft, "generation_multiview_contract", {
+    observationFormat: "image-observations-v2",
+    sourceGroupKey: "source_a:hash|source_b:hash",
+    multiViewObservation: {
+      contractVersion: "image-observations-v2", spaceType: "open",
+      entities: [{ id: "chair", kind: "item", name: "椅子", semanticType: "chair", category: "chair", placement: "floor", identityConfidence: 0.9, uncertain: false }],
+      views: [{ sourceId: "source_a", entities: [{ entityId: "chair", bbox: [0.1, 0.2, 0.4, 0.8], confidence: 0.9, visibility: "visible", mainColor: "#123456" }], groundLandmarks: [], geometryEvidence: { axes: [] } }],
+      relations: [],
+    },
+    frameSelection: { sourceId: "source_a", aspectRatio: 1.5, registrations: [{ sourceId: "source_b", registered: true, planeId: "floor", inlierPointIds: ["p1", "p2", "p3", "p4", "p5"], medianNormalizedCoordinateResidual: 0.002 }] },
+    visualObservations: { spaceType: "open", surfaces: [], items: [], people: [] },
+    privateImageUrl: "https://example.invalid/image.png",
+  });
+  const candidate = readLayoutDiagnosticRecords()[0]?.candidate as any;
+  expect(candidate.multiViewObservation).toMatchObject({
+    contractVersion: "image-observations-v2",
+    entities: [{ id: "chair", semanticType: "chair" }],
+    views: [{ sourceId: "source_a", entities: [{ entityId: "chair", bbox: [0.1, 0.2, 0.4, 0.8] }] }],
+  });
+  expect(candidate.frameSelection).toMatchObject({ sourceId: "source_a", registrations: [{ sourceId: "source_b", registered: true, planeId: "floor" }] });
+  expect(JSON.stringify(candidate)).not.toContain("https://example.invalid/image.png");
+});
+
 it("preserves bounded rear-feature and assembly geometry tuples in candidate diagnostics", () => {
   const draft = validateLayoutDraftCandidate({
     components: [{

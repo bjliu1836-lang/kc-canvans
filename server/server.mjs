@@ -5,7 +5,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DIRECTOR_LAYOUT_OBSERVATION_FORMAT,
+  DIRECTOR_LAYOUT_OBSERVATION_FORMAT_V2,
   DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT,
+  DIRECTOR_LAYOUT_OBSERVATION_V2_SYSTEM_PROMPT,
   DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT,
   DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS,
   normalizeDirectorLayoutReferenceImages,
@@ -17,6 +19,7 @@ import {
   extractDirectorLayoutFinishReason,
   resolveDirectorLayoutObservationTokenBudget,
   parseDirectorLayoutObservation,
+  parseDirectorLayoutObservationV2,
   summarizeDirectorLayoutProviderEnvelope,
   summarizeDirectorLayoutObservationOutput,
 } from '../functions/shared/director-layout-observations.js';
@@ -1289,7 +1292,8 @@ const handleDirectorLayoutGeneration = async (req, res) => {
   let body;
   try { body = await readBody(req, 20 * 1024 * 1024); }
   catch (error) { return json(res, error?.message === 'DIRECTOR_LAYOUT_REQUEST_TOO_LARGE' ? 413 : 400, { error: error?.message || 'DIRECTOR_LAYOUT_REQUEST_INVALID' }); }
-  const observationMode = body?.outputFormat === DIRECTOR_LAYOUT_OBSERVATION_FORMAT;
+  const observationV2 = body?.outputFormat === DIRECTOR_LAYOUT_OBSERVATION_FORMAT_V2;
+  const observationMode = body?.outputFormat === DIRECTOR_LAYOUT_OBSERVATION_FORMAT || observationV2;
   const spatialReview = body?.observationStage === 'spatial-review';
   if (body?.outputFormat !== undefined && !observationMode) return json(res, 400, { error: 'DIRECTOR_LAYOUT_FORMAT_UNSUPPORTED' });
   if (body?.observationStage !== undefined && (!observationMode || !spatialReview)) return json(res, 400, { error: 'DIRECTOR_LAYOUT_STAGE_UNSUPPORTED' });
@@ -1308,12 +1312,19 @@ const handleDirectorLayoutGeneration = async (req, res) => {
   const endpoint = process.env.MIMO_TEXT_ENDPOINT || process.env.TEXT_ENDPOINT || '/chat/completions';
   const model = process.env.MIMO_VISION_MODEL_ID || resolveMimoTextModel('2.5');
   if (observationMode) {
-    let systemPrompt = DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT;
-    let userPrompt = '请按约定综合本次全部参考图，只返回一份以主图为唯一坐标系的二维融合观察 JSON。';
+    let systemPrompt = observationV2 ? DIRECTOR_LAYOUT_OBSERVATION_V2_SYSTEM_PROMPT : DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT;
+    let userPrompt = observationV2
+      ? '请综合分析本次全部同等地位的参考视图。每个二维事实必须标记sourceId，只返回一份唯一实体集合和逐视图观察JSON。'
+      : '请按约定综合本次全部参考图，只返回一份以主图为唯一坐标系的二维融合观察 JSON。';
     if (spatialReview) {
       try {
-        systemPrompt = DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT;
-        userPrompt = buildDirectorLayoutSpatialReviewPrompt(body.baseObservations, body.reviewContext);
+        if (observationV2) {
+          systemPrompt = `${DIRECTOR_LAYOUT_OBSERVATION_V2_SYSTEM_PROMPT}\n复核时返回完整替换观察；可纠正身份、类别、bbox和漏识别，但保留可确认的稳定entityId。`;
+          userPrompt = `请复核完整视图组并返回完整的image-observations-v2替换结果。sourceId集合必须与输入严格相同。候选观察：${JSON.stringify(body.baseObservations)}`;
+        } else {
+          systemPrompt = DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT;
+          userPrompt = buildDirectorLayoutSpatialReviewPrompt(body.baseObservations, body.reviewContext);
+        }
       } catch {
         return json(res, 400, { error: 'DIRECTOR_LAYOUT_SPATIAL_REVIEW_CONTEXT_INVALID' });
       }
@@ -1325,9 +1336,10 @@ const handleDirectorLayoutGeneration = async (req, res) => {
       baseUrl, endpoint, apiKey,
       payload: {
         model,
+        response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: buildDirectorLayoutImageContent(referenceImages, userPrompt) },
+          { role: 'user', content: buildDirectorLayoutImageContent(referenceImages, userPrompt, { multiView: observationV2 }) },
         ],
         max_completion_tokens: spatialReview
           ? resolveDirectorLayoutObservationTokenBudget(process.env.DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS)
@@ -1356,15 +1368,24 @@ const handleDirectorLayoutGeneration = async (req, res) => {
       providerEnvelope: summarizeDirectorLayoutProviderEnvelope(result),
     });
     const outputShape = summarizeDirectorLayoutObservationOutput(modelText);
+    const finishReason = extractDirectorLayoutFinishReason(result);
+    if (["length", "max_tokens", "max_completion_tokens"].includes(String(finishReason || "").toLowerCase())) return json(res, 422, {
+      error: 'DIRECTOR_LAYOUT_MODEL_OUTPUT_TRUNCATED',
+      message: '视觉模型输出达到长度上限，未应用不完整观察结果，请减少参考图或重试',
+      outputShape,
+      providerFinishReason: finishReason,
+      providerModel: typeof result?.model === 'string' ? result.model.slice(0, 100) : null,
+      promptHash,
+    });
     try {
-      const visualObservations = spatialReview
-        ? parseDirectorLayoutSpatialReview(modelText)
-        : parseDirectorLayoutObservation(modelText);
-      const responseObservations = spatialReview
+      const visualObservations = observationV2
+        ? parseDirectorLayoutObservationV2(modelText, referenceImages.map((image) => image.sourceId).filter(Boolean))
+        : spatialReview ? parseDirectorLayoutSpatialReview(modelText) : parseDirectorLayoutObservation(modelText);
+      const responseObservations = spatialReview && !observationV2
         ? directorLayoutSpatialReviewPatch(body.baseObservations, visualObservations)
         : visualObservations;
       return json(res, 200, {
-        observationFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT,
+        observationFormat: observationV2 ? DIRECTOR_LAYOUT_OBSERVATION_FORMAT_V2 : DIRECTOR_LAYOUT_OBSERVATION_FORMAT,
         ...(spatialReview ? { spatialReviewPatch: responseObservations } : { visualObservations: responseObservations }),
         providerOutputShape: outputShape,
         providerFinishReason: extractDirectorLayoutFinishReason(result),

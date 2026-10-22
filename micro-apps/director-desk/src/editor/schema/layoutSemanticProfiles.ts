@@ -3,6 +3,11 @@ import type { DirectorLayoutCategory } from "./directorProject";
 export interface LayoutSemanticProfile {
   canonicalType: string;
   category: DirectorLayoutCategory;
+  compatibleGeometryCategories?: readonly DirectorLayoutCategory[];
+}
+
+export function isLayoutSemanticCategoryCompatible(profile: LayoutSemanticProfile, category: DirectorLayoutCategory) {
+  return profile.category === category || Boolean(profile.compatibleGeometryCategories?.includes(category));
 }
 
 const EXACT_PROFILES: Record<string, LayoutSemanticProfile> = {
@@ -38,7 +43,7 @@ const EXACT_PROFILES: Record<string, LayoutSemanticProfile> = {
   dining_table: { canonicalType: "table", category: "table" },
   garden_table: { canonicalType: "table", category: "table" },
   bedside_table: { canonicalType: "table", category: "table" },
-  nightstand: { canonicalType: "nightstand", category: "table" },
+  nightstand: { canonicalType: "nightstand", category: "table", compatibleGeometryCategories: ["cabinet"] },
   table_lamp: { canonicalType: "table_lamp", category: "prop" },
   desk_lamp: { canonicalType: "table_lamp", category: "prop" },
   floor_lamp: { canonicalType: "table_lamp", category: "prop" },

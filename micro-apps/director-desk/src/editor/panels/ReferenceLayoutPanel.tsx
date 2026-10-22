@@ -222,6 +222,7 @@ export function ReferenceLayoutPanel() {
   const [connectedImages, setConnectedImages] = useState(() => getHostReferenceImages().map(connectedImageToReference));
   const [localImages, setLocalImages] = useState<ReferenceLayoutImage[]>(initialRetainedPanelState.localImages);
   const [selectedSourceId, setSelectedSourceId] = useState<string>(initialRetainedPanelState.selectedSourceId);
+  const [previewSourceId, setPreviewSourceId] = useState<string>(initialRetainedPanelState.selectedSourceId);
   const [supplementarySourceIds, setSupplementarySourceIds] = useState<string[]>(initialRetainedPanelState.supplementarySourceIds);
   const [supplementCandidateId, setSupplementCandidateId] = useState("");
   const [generating, setGenerating] = useState(false);
@@ -252,15 +253,15 @@ export function ReferenceLayoutPanel() {
   connectedImagesRef.current = connectedImages;
   const imagesRef = useRef(images);
   imagesRef.current = images;
-  const selectedImage = images.find((image) => image.sourceId === selectedSourceId) ?? images[0] ?? null;
+  const selectedImage = images.find((image) => image.sourceId === previewSourceId) ?? images[0] ?? null;
+  const selectedReferenceBaseId = selectedSourceId || images[0]?.sourceId || "";
   const selectedReferenceImages = useMemo(() => {
-    if (!selectedImage) return [];
-    const supplements = supplementarySourceIds
-      .filter((sourceId) => sourceId !== selectedImage.sourceId)
+    if (!selectedReferenceBaseId) return [];
+    const selectedIds = [selectedReferenceBaseId, ...supplementarySourceIds]
       .map((sourceId) => images.find((image) => image.sourceId === sourceId))
       .filter((image): image is ReferenceLayoutImage => Boolean(image));
-    return [selectedImage, ...supplements].slice(0, 3);
-  }, [images, selectedImage, supplementarySourceIds]);
+    return selectedIds.sort((a, b) => a.sourceId.localeCompare(b.sourceId)).slice(0, 3);
+  }, [images, selectedReferenceBaseId, supplementarySourceIds]);
   const selectedReferenceSourceIdsRef = useRef(new Set(selectedReferenceImages.map((image) => image.sourceId)));
   selectedReferenceSourceIdsRef.current = new Set(selectedReferenceImages.map((image) => image.sourceId));
   const selectedReferenceFingerprint = selectedReferenceImages.map((image) => `${image.sourceId}:${getReferenceImageFingerprint(image.url)}`).join("|");
@@ -282,12 +283,22 @@ export function ReferenceLayoutPanel() {
   const uncertainCount = draft?.components.filter((component) => component.uncertain).length ?? 0;
   const uncertainCharacterCount = draft?.characters.filter((character) => character.uncertain).length ?? 0;
   const characterCount = draft?.characters.length ?? 0;
-  const replaceBatchId = appliedBatchId && layoutBatches.some((batch) => batch.id === appliedBatchId)
+  const sourceGroupKey = selectedReferenceFingerprint;
+  const legacySingleSourceId = selectedReferenceImages.length === 1 ? selectedReferenceImages[0].sourceId : null;
+  const batchMatchesSelection = (batch: (typeof layoutBatches)[number]) => batch.sourceGroupKey
+    ? batch.sourceGroupKey === sourceGroupKey
+    : Boolean(legacySingleSourceId && batch.sourceId === legacySingleSourceId);
+  const replaceBatchId = appliedBatchId && layoutBatches.some((batch) => batch.id === appliedBatchId && batchMatchesSelection(batch))
     ? appliedBatchId
-    : selectedImage
-      ? [...layoutBatches].reverse().find((batch) => batch.sourceId === selectedImage.sourceId)?.id ?? null
+    : selectedReferenceImages.length
+      ? [...layoutBatches].reverse().find(batchMatchesSelection)?.id ?? null
       : null;
   const activeBatch = replaceBatchId ? layoutBatches.find((batch) => batch.id === replaceBatchId) ?? null : null;
+  const layoutResolutionBatch = activeBatch?.layoutResolution
+    ? activeBatch
+    : selectedReferenceImages.length === 0
+      ? [...layoutBatches].reverse().find((batch) => batch.layoutResolution) ?? null
+      : null;
 
   // 选中组件变化时，旧类别预填常见尺寸；差异较大的新类别要求用户填写实测值。
   useEffect(() => {
@@ -378,9 +389,9 @@ export function ReferenceLayoutPanel() {
         setGenerating(false);
         setStage(null);
         const currentDraft = currentDraftRef.current;
-        if (currentDraft && previous.some((image) => image.sourceId === currentDraft.sourceId && next.some((updated) => updated.sourceId === image.sourceId && updated.url !== image.url))) {
+        if (currentDraft) {
           discardDraft();
-          setError("主图来源已更新，旧草稿已清除，请重新识别");
+          setError("本次参考图内容已更新，旧草稿已清除，请重新识别");
         }
       }
       setSupplementarySourceIds((current) => {
@@ -478,7 +489,7 @@ export function ReferenceLayoutPanel() {
   }
 
   async function generateLayout(forceReplaceEditedDraft = false) {
-    if (!selectedImage || generating) return;
+    if (!selectedReferenceImages.length || generating) return;
     if (draft && draftEdited && !forceReplaceEditedDraft) {
       setConfirmRegenerate(true);
       return;
@@ -500,13 +511,13 @@ export function ReferenceLayoutPanel() {
       const currentSources = selectedReferenceFingerprintRef.current;
       if (requestedSources !== currentSources) return;
       setStage("validating");
-      setDraft(nextDraft, { edited: false });
+      setDraft({ ...nextDraft, sourceGroupKey: selectedReferenceFingerprint }, { edited: false });
       const estimatedCamera = getLayoutDraftReferenceCamera(nextDraft);
       if (estimatedCamera.source === "estimated") {
         setViewMode("director");
         previewReferenceCamera({
           ...estimatedCamera,
-          ...(selectedImage.aspectRatio ? { imageAspectRatio: selectedImage.aspectRatio } : {}),
+          ...(nextDraft.referenceCamera?.imageAspectRatio ? { imageAspectRatio: nextDraft.referenceCamera.imageAspectRatio } : {}),
         });
       }
       setAnchorWidth("");
@@ -551,7 +562,10 @@ export function ReferenceLayoutPanel() {
   function isCurrentGeneratedAssetTarget(draftId: string, sourceId: string, sourceFingerprint: string, componentId: string) {
     const current = useLayoutDraftPreviewStore.getState().draft;
     const currentSourceImage = imagesRef.current.find((image) => image.sourceId === sourceId);
-    return Boolean(current && current.id === draftId && current.sourceId === sourceId && getReferenceImageFingerprint(currentSourceImage?.url) === sourceFingerprint && current.components.some((component) => component.id === componentId));
+    const component = current?.components.find((item) => item.id === componentId);
+    return Boolean(current && current.id === draftId && current.sourceGroupKey === selectedReferenceFingerprintRef.current
+      && component?.sourceImageEvidence?.sourceId === sourceId
+      && getReferenceImageFingerprint(currentSourceImage?.url) === sourceFingerprint);
   }
 
   function bindGeneratedAsset(draftId: string, sourceId: string, sourceFingerprint: string, componentId: string, assetRefId: string) {
@@ -566,7 +580,8 @@ export function ReferenceLayoutPanel() {
 
   function setGeneratedAssetState(draftId: string, sourceId: string, componentId: string, state: "generating" | "ready" | "failed" | undefined) {
     const current = useLayoutDraftPreviewStore.getState().draft;
-    if (!current || current.id !== draftId || current.sourceId !== sourceId || !current.components.some((component) => component.id === componentId)) return;
+    if (!current || current.id !== draftId || current.sourceGroupKey !== selectedReferenceFingerprintRef.current
+      || current.components.find((component) => component.id === componentId)?.sourceImageEvidence?.sourceId !== sourceId) return;
     setDraft({
       ...current,
       components: current.components.map((component) => component.id === componentId
@@ -700,13 +715,13 @@ export function ReferenceLayoutPanel() {
     setViewMode("director");
     const referenceCamera = {
       ...getLayoutDraftReferenceCamera(draft),
-      ...(selectedImage?.aspectRatio ? { imageAspectRatio: selectedImage.aspectRatio } : {}),
+      ...(draft.referenceCamera?.imageAspectRatio ? { imageAspectRatio: draft.referenceCamera.imageAspectRatio } : {}),
     };
     if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("directorLayoutDebugCamera")) {
       (window as Window & { __directorLayoutDraftCameraDebug?: unknown }).__directorLayoutDraftCameraDebug = {
         draftReferenceCamera: draft.referenceCamera,
         previewReferenceCamera: referenceCamera,
-        selectedImageAspectRatio: selectedImage?.aspectRatio,
+        canonicalImageAspectRatio: draft.referenceCamera?.imageAspectRatio,
       };
     }
     recordLayoutReferencePreview(draft.diagnosticGenerationId ?? draft.id, true, referenceCamera);
@@ -787,15 +802,16 @@ export function ReferenceLayoutPanel() {
       updateRetainedPanelState(scopeId, { localImages: nextLocalImages, selectedSourceId: primary.sourceId, supplementarySourceIds: loaded.slice(1, 3).map((image) => image.sourceId) });
       setLocalImages(nextLocalImages);
       setSelectedSourceId(primary.sourceId);
+      setPreviewSourceId(primary.sourceId);
       setSupplementarySourceIds(loaded.slice(1, 3).map((image) => image.sourceId));
       chooseSource(primary.sourceId);
     }).catch((reason) => setError(reason instanceof Error ? reason.message : "参考图读取失败"));
   }
 
   function addSupplementarySource(sourceId: string) {
-    if (!sourceId || sourceId === selectedImage?.sourceId || supplementarySourceIds.includes(sourceId)) return;
+    if (!sourceId || sourceId === selectedReferenceBaseId || supplementarySourceIds.includes(sourceId)) return;
     if (supplementarySourceIds.length >= 2) {
-      setError("最多选择 3 张图：1 张主图和 2 张补充图");
+      setError("最多选择 3 张参考图");
       return;
     }
     abortRef.current?.abort();
@@ -808,33 +824,30 @@ export function ReferenceLayoutPanel() {
     setError(null);
   }
 
-  function setPrimarySource(sourceId: string) {
-    if (!sourceId || sourceId === selectedSourceId) return;
+  function selectPreviewSource(sourceId: string) {
+    if (!sourceId || sourceId === previewSourceId) return;
     if (useDirectorStore.getState().referenceCameraPreview) {
       previewReferenceCamera(null);
       setViewMode("director");
     }
-    const nextIds = [...supplementarySourceIds.filter((id) => id !== sourceId), selectedSourceId];
-    abortRef.current?.abort();
-    requestIdRef.current += 1;
-    setGenerating(false);
-    setStage(null);
-    setSelectedSourceId(sourceId);
-    setSupplementarySourceIds(nextIds);
-    updateRetainedPanelState(scopeId, { selectedSourceId: sourceId, supplementarySourceIds: nextIds, appliedBatchId: null });
-    setAppliedBatchId(null);
-    setError(null);
+    setPreviewSourceId(sourceId);
   }
 
   function removeReferenceSource(sourceId: string) {
-    if (sourceId === selectedImage?.sourceId) return;
     abortRef.current?.abort();
     requestIdRef.current += 1;
     setGenerating(false);
     setStage(null);
-    const nextIds = supplementarySourceIds.filter((id) => id !== sourceId);
-    setSupplementarySourceIds(nextIds);
-    updateRetainedPanelState(scopeId, { supplementarySourceIds: nextIds });
+    const selectedIds = [selectedReferenceBaseId, ...supplementarySourceIds].filter(Boolean);
+    if (!selectedIds.includes(sourceId)) return;
+    const nextSelection = selectedIds.filter((id) => id !== sourceId);
+    if (!nextSelection.length) return;
+    const nextBaseId = nextSelection[0] ?? "";
+    const nextExtras = nextSelection.slice(1);
+    setSelectedSourceId(nextBaseId);
+    setSupplementarySourceIds(nextExtras);
+    updateRetainedPanelState(scopeId, { selectedSourceId: nextBaseId, supplementarySourceIds: nextExtras });
+    if (previewSourceId === sourceId) setPreviewSourceId(nextSelection[0] ?? images.find((image) => image.sourceId !== sourceId)?.sourceId ?? "");
     setError(null);
   }
 
@@ -857,7 +870,7 @@ export function ReferenceLayoutPanel() {
           if (files.length) handleImageFiles(files);
         }}
       >
-        <p className="reference-layout-help">最多选择 3 张同一空间参考图，一次融合识别；第一张主图决定坐标，补充图只提供关系与遮挡证据。支持拖入或 Ctrl+V 粘贴。</p>
+        <p className="reference-layout-help">最多选择 3 张同一空间参考图，系统会综合识别并自动处理各视角坐标。每张图地位相同。支持拖入或 Ctrl+V 粘贴。</p>
         {selectedImage ? (
           <div className="reference-layout-source-preview">
             <button
@@ -883,7 +896,7 @@ export function ReferenceLayoutPanel() {
             <select
               aria-label="选择粗布景参考图"
               value={selectedImage?.sourceId ?? ""}
-              onChange={(event) => setPrimarySource(event.currentTarget.value)}
+              onChange={(event) => selectPreviewSource(event.currentTarget.value)}
             >
               {images.map((image) => <option key={`${image.origin}:${image.sourceId}`} value={image.sourceId}>{image.fileName}</option>)}
             </select>
@@ -907,33 +920,33 @@ export function ReferenceLayoutPanel() {
           />
         </div>
         {selectedImage ? (
-          <div className="reference-layout-multi-image-selection" aria-label="本次融合识别图片顺序">
-            <p className="reference-layout-anchor-hint">本次请求：图1主图 · 共 {selectedReferenceImages.length}/3 张</p>
+          <div className="reference-layout-multi-image-selection" aria-label="本次综合识别参考图">
+            <p className="reference-layout-anchor-hint">本次综合识别：共 {selectedReferenceImages.length}/3 张</p>
             {selectedReferenceImages.map((image, index) => (
               <div className="reference-layout-source-row" key={`selected-ref-${image.sourceId}`}>
-                <span>{index === 0 ? "图1 主图" : `图${index + 1} 补充图`}：{image.fileName}</span>
-                {index > 0 ? <button className="reference-layout-secondary-button" type="button" onClick={() => removeReferenceSource(image.sourceId)}>移除</button> : null}
+                <span>视图 {index + 1}：{image.fileName}</span>
+                <button className="reference-layout-secondary-button" type="button" onClick={() => removeReferenceSource(image.sourceId)}>移除</button>
               </div>
             ))}
-            {selectedReferenceImages.length < 3 && images.some((image) => image.sourceId !== selectedImage.sourceId && !supplementarySourceIds.includes(image.sourceId)) ? (
+            {selectedReferenceImages.length < 3 && images.some((image) => image.sourceId !== selectedReferenceBaseId && !supplementarySourceIds.includes(image.sourceId)) ? (
               <div className="reference-layout-source-row">
-                <select aria-label="选择补充参考图" value={supplementCandidateId} onChange={(event) => setSupplementCandidateId(event.currentTarget.value)}>
-                  <option value="">选择补充图…</option>
-                  {images.filter((image) => image.sourceId !== selectedImage.sourceId && !supplementarySourceIds.includes(image.sourceId)).map((image) => (
+                <select aria-label="添加识别参考图" value={supplementCandidateId} onChange={(event) => setSupplementCandidateId(event.currentTarget.value)}>
+                  <option value="">选择参考图…</option>
+                  {images.filter((image) => image.sourceId !== selectedReferenceBaseId && !supplementarySourceIds.includes(image.sourceId)).map((image) => (
                     <option key={`candidate-${image.sourceId}`} value={image.sourceId}>{image.fileName}</option>
                   ))}
                 </select>
-                <button className="reference-layout-secondary-button" type="button" disabled={!supplementCandidateId} onClick={() => { addSupplementarySource(supplementCandidateId); setSupplementCandidateId(""); }}>添加补充图</button>
+                <button className="reference-layout-secondary-button" type="button" disabled={!supplementCandidateId} onClick={() => { addSupplementarySource(supplementCandidateId); setSupplementCandidateId(""); }}>添加视图</button>
               </div>
             ) : null}
-            {images.filter((image) => image.sourceId !== selectedImage.sourceId).map((image) => (
-              <button key={`make-primary-${image.sourceId}`} className="reference-layout-secondary-button" type="button" onClick={() => setPrimarySource(image.sourceId)}>设为主图：{image.fileName}</button>
+            {images.filter((image) => image.sourceId !== selectedReferenceBaseId && !supplementarySourceIds.includes(image.sourceId)).map((image) => (
+              supplementarySourceIds.includes(image.sourceId) ? null : <button key={`include-${image.sourceId}`} className="reference-layout-secondary-button" type="button" onClick={() => addSupplementarySource(image.sourceId)}>加入识别：{image.fileName}</button>
             ))}
           </div>
         ) : null}
 
         <div className="reference-layout-action-row">
-          <button className="inspector-action-button" disabled={!selectedImage || generating} type="button" onClick={() => void generateLayout()}>
+          <button className="inspector-action-button" disabled={!selectedReferenceImages.length || generating} type="button" onClick={() => void generateLayout()}>
             {generating ? <LoaderCircle className="is-spinning" aria-hidden="true" size={15} /> : draft ? <RefreshCw aria-hidden="true" size={15} /> : <Sparkles aria-hidden="true" size={15} />}
             {generating ? "正在识别..." : draft ? "重新生成" : "生成粗布景"}
           </button>
@@ -986,6 +999,12 @@ export function ReferenceLayoutPanel() {
             {projectionFitReviewMessage ? (
               <div className="reference-layout-diagnostic is-warning" role="alert" aria-label="参考机位残差待复核">
                 <p>{projectionFitReviewMessage}</p>
+              </div>
+            ) : null}
+            {draft.layoutResolution ? (
+              <div className={`reference-layout-diagnostic${draft.layoutResolution.unresolved.length ? " is-warning" : ""}`} role="status" aria-label="多视图定位状态">
+                <p>多视图识别：已识别 {draft.layoutResolution.recognizedCount} / 已定位 {draft.layoutResolution.locatedCount} / 待定位 {draft.layoutResolution.unresolved.length}</p>
+                {draft.layoutResolution.unresolved.map((entry) => <p key={entry.entityId}>{entry.name || "未命名物品"}（{entry.sourceFileName || selectedReferenceImages.find((image) => image.sourceId === entry.sourceId)?.fileName || "历史参考图"}）：{entry.reason}</p>)}
               </div>
             ) : null}
             {draftValidationWarnings.length ? (
@@ -1233,6 +1252,7 @@ export function ReferenceLayoutPanel() {
                     component={selectedComponent}
                     components={draft.components}
                     sourceImage={draftSourceImage}
+                    referenceImages={images}
                     sourceFingerprint={draftSourceFingerprint}
                     isCurrentTarget={isCurrentGeneratedAssetTarget}
                     onModelUnavailable={markGeneratedAssetUnavailable}
@@ -1250,6 +1270,12 @@ export function ReferenceLayoutPanel() {
             {characterCount > 0 ? (
               <p className="reference-layout-anchor-hint">将同时创建 {characterCount} 个角色占位（内置素体 + 姿态），可像普通角色一样编辑、排走位。</p>
             ) : null}
+          </div>
+        ) : null}
+        {!draft && layoutResolutionBatch?.layoutResolution ? (
+          <div className="reference-layout-diagnostic" role="status" aria-label="已应用布景的多视图定位状态">
+            <p>最近应用批次：已识别 {layoutResolutionBatch.layoutResolution.recognizedCount} / 已定位 {layoutResolutionBatch.layoutResolution.locatedCount} / 待定位 {layoutResolutionBatch.layoutResolution.unresolved.length}</p>
+            {layoutResolutionBatch.layoutResolution.unresolved.map((entry) => <p key={entry.entityId}>{entry.name || "未命名物品"}（{entry.sourceFileName || selectedReferenceImages.find((image) => image.sourceId === entry.sourceId)?.fileName || "历史参考图"}）：{entry.reason}</p>)}
           </div>
         ) : null}
 

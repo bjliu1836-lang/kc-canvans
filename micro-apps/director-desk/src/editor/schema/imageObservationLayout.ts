@@ -12,7 +12,8 @@ import {
   type LayoutDraftSource,
   type LayoutSpaceType,
 } from "./layoutDraft";
-import { resolveLayoutSemanticProfile } from "./layoutSemanticProfiles";
+import { isLayoutSemanticCategoryCompatible, resolveLayoutSemanticProfile } from "./layoutSemanticProfiles";
+import type { DerivedGroundPlacement } from "./multiViewObservation";
 import {
   calibrateGroundCamera,
   estimateGroundContactCenter,
@@ -140,6 +141,69 @@ export interface ImageObservationLayoutOptions {
   draftId?: string;
   createdAt?: string;
   imageAspectRatio?: number;
+  sourceGroupKey?: string;
+  layoutResolution?: LayoutDraft["layoutResolution"];
+  uncertainEntityIds?: string[];
+  groundEvidenceSourceIds?: Record<string, string[]>;
+  relationReviewEntityIds?: string[];
+  geometryReviewEntityIds?: string[];
+  derivedGroundPlacements?: DerivedGroundPlacement[];
+}
+
+export function buildDerivedGroundPlacementComponent(derived: DerivedGroundPlacement, calibration: CalibratedGroundCamera, aspect: number) {
+  const profile = resolveLayoutSemanticProfile(derived.semanticType, derived.name);
+  const category = profile?.category ?? derived.category;
+  const defaults: Record<DirectorLayoutCategory, [number, number, number]> = {
+    ground: [2, 0.03, 1.5], wall: [4, 2.7, 0.12], door: [0.9, 2.05, 0.08], window: [1.4, 1.5, 0.08],
+    table: [1.2, 0.75, 0.7], chair: [0.48, 0.9, 0.48], sofa: [2, 0.8, 0.9], cabinet: [0.9, 1.2, 0.4], pillar: [0.6, 2.7, 0.6], prop: [0.5, 0.6, 0.5],
+  };
+  const prior = SEMANTIC_SIZE[profile?.canonicalType ?? derived.semanticType] ?? defaults[category];
+  const projectedParts = derived.groundFootprints.map((footprint) => {
+    const projectLoop = (loop: readonly (readonly [number, number])[]) => loop.map((point) => projectImagePointToGround(point, calibration, aspect));
+    return { outer: projectLoop(footprint.outer), holes: (footprint.holes ?? []).map(projectLoop), confidence: footprint.confidence };
+  });
+  const usableParts = projectedParts.filter((part) => part.outer.every((point): point is [number, number, number] => Boolean(point))
+    && part.holes.every((loop) => loop.every((point): point is [number, number, number] => Boolean(point))));
+  const safetyBound = calibration.cameraHeightMeters * 16;
+  let position: [number, number, number] | undefined;
+  let size: [number, number, number] = [...prior];
+  let normalizedFootprint: LayoutDraftComponent["groundFootprint"];
+  if (usableParts.length && usableParts.length === projectedParts.length) {
+    const worldPoints = usableParts.flatMap((part) => part.outer as [number, number, number][]);
+    const minX = Math.min(...worldPoints.map((point) => point[0])), maxX = Math.max(...worldPoints.map((point) => point[0]));
+    const minZ = Math.min(...worldPoints.map((point) => point[2])), maxZ = Math.max(...worldPoints.map((point) => point[2]));
+    const width = maxX - minX, depth = maxZ - minZ;
+    if (width >= 0.05 && depth >= 0.05 && width <= safetyBound && depth <= safetyBound
+      && worldPoints.every((point) => Number.isFinite(point[0]) && Number.isFinite(point[2]) && Math.abs(point[0]) <= safetyBound && Math.abs(point[2]) <= safetyBound)) {
+      position = [(minX + maxX) / 2, 0, (minZ + maxZ) / 2];
+      size = [width, prior[1], depth];
+      normalizedFootprint = usableParts.map((part) => ({
+        outer: (part.outer as [number, number, number][]).map(([x, , z]) => [(x - minX) / width, (z - minZ) / depth] as [number, number]),
+        ...(part.holes.length ? { holes: part.holes.map((loop) => (loop as [number, number, number][]).map(([x, , z]) => [(x - minX) / width, (z - minZ) / depth] as [number, number])) } : {}),
+        confidence: part.confidence,
+      }));
+    }
+  }
+  if (!position) {
+    const contacts = derived.groundContacts.map((contact) => ({ point: contact.point, kind: contact.kind, visibility: contact.visibility, confidence: contact.confidence }));
+    const center = estimateGroundContactCenter(contacts, calibration, aspect);
+    if (center && !center.inferredCenter && center.position.every((value) => Number.isFinite(value) && Math.abs(value) <= safetyBound)) position = center.position;
+  }
+  const bboxValid = derived.sourceBbox.length === 4 && derived.sourceBbox.every((value) => Number.isFinite(value) && value >= 0 && value <= 1)
+    && derived.sourceBbox[2] > derived.sourceBbox[0] && derived.sourceBbox[3] > derived.sourceBbox[1];
+  if (!position || !bboxValid || !size.every((value) => Number.isFinite(value) && value > 0 && value <= safetyBound)
+    || !position.every((value) => Number.isFinite(value) && Math.abs(value) <= safetyBound)) {
+    return { reason: "已配准地面证据无法安全投影到当前参考机位，暂不定位。" } as const;
+  }
+  return { component: {
+    id: derived.entityId, name: derived.name, category, primitive: category === "pillar" ? "cylinder" : "box",
+    position, size, rotationYDegrees: 0, confidence: derived.confidence, uncertain: true, visible: true,
+    semanticType: derived.semanticType,
+    ...(normalizedFootprint ? { groundFootprint: normalizedFootprint } : {}),
+    sourceImageEvidence: { bbox: [...derived.sourceBbox] as [number, number, number, number], confidence: derived.confidence, visibility: "visible" as const, sourceId: derived.sourceId, sourceIds: [...new Set(derived.sourceIds)].slice(0, 3) },
+    derivedGroundEvidence: { sourceId: derived.sourceId, sourceIds: [...new Set(derived.sourceIds)].slice(0, 3) },
+    notes: `由${derived.sourceFileName ?? "参考图"}的已配准地面${normalizedFootprint ? "占地轮廓" : "直接接触点"}派生到最终参考机位坐标；高度采用${profile?.canonicalType ?? derived.semanticType}语义先验，位置和尺寸仍需人工复核。`,
+  } satisfies LayoutDraftComponent } as const;
 }
 
 export class ImageObservationValidationError extends Error {
@@ -390,7 +454,7 @@ function parseObservation(input: unknown): ImageObservation {
       throw new ImageObservationValidationError(`item ${index + 1} category 无效`);
     }
     if (!semanticType && category === undefined) throw new ImageObservationValidationError(`item ${index + 1} 缺少 category/semanticType`);
-    if (base.raw.contactWallSide !== undefined && !["image_left", "image_right", "image_back", "unknown", "none"].includes(String(base.raw.contactWallSide))) {
+    if (base.raw.contactWallSide !== undefined && base.raw.contactWallSide !== null && !["image_left", "image_right", "image_back", "unknown", "none"].includes(String(base.raw.contactWallSide))) {
       throw new ImageObservationValidationError(`item ${index + 1} contactWallSide 无效`);
     }
     if (base.raw.bodyExtendsToward !== undefined && !["image_left", "image_right", "image_up", "image_down", "unknown"].includes(String(base.raw.bodyExtendsToward))) {
@@ -577,7 +641,23 @@ function semanticCategoryConflict(item: ImageObservationItem, category: Director
   // compatibility while treating other category/identity conflicts as review.
   const profile = resolveLayoutSemanticProfile(item.semanticType, item.semanticType ? undefined : item.name);
   if (profile?.canonicalType.toLowerCase() === "curtain" && category === "prop") return false;
-  return Boolean(profile && profile.category !== category);
+  return Boolean(profile && !isLayoutSemanticCategoryCompatible(profile, category));
+}
+
+function normalizeKnownItemGeometryCategory(item: ImageObservationItem) {
+  const semanticType = item.semanticType?.trim();
+  const profile = semanticType ? resolveLayoutSemanticProfile(semanticType) : undefined;
+  const requestedCategory = categoryFor(item);
+  if (!profile || !semanticCategoryConflict(item, requestedCategory)) {
+    return { item: { ...item, category: requestedCategory }, conflict: undefined as { source: DirectorLayoutCategory; effective: DirectorLayoutCategory } | undefined };
+  }
+  // A known identity owns its canonical geometry. Keep the provider observation
+  // untouched elsewhere, but use one effective category for all draft geometry,
+  // support resolution and fitting.
+  return {
+    item: { ...item, category: profile.category },
+    conflict: { source: requestedCategory, effective: profile.category },
+  };
 }
 
 function effectivePlacement(item: ImageObservationItem): ImageItemPlacement {
@@ -2537,9 +2617,18 @@ export function imageObservationToLayoutDraft(
   source: LayoutDraftSource,
   options: ImageObservationLayoutOptions = {},
 ): LayoutDraft {
-  const observation = parseObservation(input);
+  const parsedObservation = parseObservation(input);
   if (typeof options.imageAspectRatio === "number" && Number.isFinite(options.imageAspectRatio)
-    && options.imageAspectRatio >= 0.1 && options.imageAspectRatio <= 10) observation.imageAspectRatio = options.imageAspectRatio;
+    && options.imageAspectRatio >= 0.1 && options.imageAspectRatio <= 10) parsedObservation.imageAspectRatio = options.imageAspectRatio;
+  const categoryConflicts = new Map<string, { source: DirectorLayoutCategory; effective: DirectorLayoutCategory }>();
+  const observation: ImageObservation = {
+    ...parsedObservation,
+    items: parsedObservation.items.map((item) => {
+      const normalized = normalizeKnownItemGeometryCategory(item);
+      if (normalized.conflict) categoryConflicts.set(item.id, normalized.conflict);
+      return normalized.item;
+    }),
+  };
   const aspect = observation.imageAspectRatio ?? options.imageAspectRatio;
   const groundCamera = observation.geometryEvidence && aspect
     ? calibrateGroundCamera(observation.geometryEvidence, aspect)
@@ -2552,6 +2641,21 @@ export function imageObservationToLayoutDraft(
     surfacesBySide.set(surface.side, matches);
   }
   const itemById = new Map(observation.items.map((item) => [item.id, item]));
+  const isGroundCover = (item: ImageObservationItem | undefined) => Boolean(item && item.placement === "floor"
+    && /(?:^|[_ -])(rug|carpet|mat|floor_cover|地毯|地垫|地毡)(?:$|[_ -])/i.test(`${item.semanticType ?? ""} ${item.name}`));
+  // A floor placement and an object support are contradictory unless the
+  // referenced item is a ground plane or a ground-cover surface. Preserve the
+  // observation, but exclude that support edge from geometry and camera fitting.
+  const floorSupportConflictIds = new Set(observation.items.filter((item) => {
+    if (item.placement !== "floor" || !item.supportId) return false;
+    const target = itemById.get(item.supportId);
+    return Boolean(target && categoryFor(target) !== "ground" && !isGroundCover(target));
+  }).map((item) => item.id));
+  const effectiveSupportById = new Map(observation.items.map((item) => [
+    item.id,
+    floorSupportConflictIds.has(item.id) ? { ...item, supportId: undefined } : item,
+  ]));
+  const effectiveSupportId = (item: ImageObservationItem) => effectiveSupportById.get(item.id)?.supportId;
   const skippedParts = new Set(observation.items.filter((item) => {
     const parent = item.partOfId ? itemById.get(item.partOfId) : undefined;
     // partOfId is a geometry contract: the child's visible shape is already
@@ -2629,7 +2733,8 @@ export function imageObservationToLayoutDraft(
   const pendingItems = observation.items.filter((item) => !skippedParts.has(item.id));
   while (pendingItems.length) {
     const readyIndex = pendingItems.findIndex((item) => {
-      const supportId = item.supportId ? resolveReferenceId(item.supportId) : undefined;
+      const effectiveItem = effectiveSupportById.get(item.id) ?? item;
+      const supportId = effectiveItem.supportId ? resolveReferenceId(effectiveItem.supportId) : undefined;
       const supportReady = !supportId || generated.has(supportId) || !itemById.has(supportId) || supportChainHasCycle(item, itemById);
       const parentId = item.partOfId ? resolveReferenceId(item.partOfId) : undefined;
       const parentReady = !parentId || generated.has(parentId) || !itemById.has(parentId) || parentId === item.id;
@@ -2656,14 +2761,13 @@ export function imageObservationToLayoutDraft(
     const surface = sideSpecified ? (sideConflict ? undefined : sideSurface) : legacySurface;
     const surfaceConflict = sideConflict || Boolean(item.contactWallSide && sideMatches.length > 1);
     const supportCycle = supportChainHasCycle(item, itemById);
-    const resolvedSupportId = item.supportId ? resolveReferenceId(item.supportId) : undefined;
+    const resolvedSupportId = effectiveSupportId(item) ? resolveReferenceId(effectiveSupportId(item)!) : undefined;
     const support = resolvedSupportId && !supportCycle ? generated.get(resolvedSupportId) : undefined;
     const projectedFootprints = imageFootprintsToWorld(item, groundCamera, aspect ?? 1);
     let groundPosition: [number, number, number] | undefined;
     let footprintProjectionRejected: string | undefined;
     const supportItem = resolvedSupportId ? itemById.get(resolvedSupportId) : undefined;
-    const supportIsGroundCover = Boolean(supportItem && supportItem.placement === "floor"
-      && /(?:^|[_ -])(rug|carpet|mat|floor_cover|地毯|地垫|地毡)(?:$|[_ -])/i.test(`${supportItem.semanticType ?? ""} ${supportItem.name}`));
+    const supportIsGroundCover = isGroundCover(supportItem);
     const supportIsGroundPlane = !support || support.category === "ground" || supportIsGroundCover;
     if (supportIsGroundPlane && placement !== "wall_attached" && projectedFootprints.length) {
       const points = projectedFootprints.flatMap((part) => part.outer);
@@ -2689,7 +2793,7 @@ export function imageObservationToLayoutDraft(
         groundPosition = contact.position;
       } else if (contact) footprintProjectionRejected = "ground_contact_outside_camera_scale_safety_bound";
     }
-    const supportWasFolded = Boolean(item.supportId && resolvedSupportId !== item.supportId);
+    const supportWasFolded = Boolean(!floorSupportConflictIds.has(item.id) && item.supportId && resolvedSupportId !== item.supportId);
     const rearAnchor = rearAnchorByParent.get(item.id);
     // A placement says whether an item rests on the floor/support or mounts to a wall;
     // it does not erase a compatible observed wall contact. Only contradictory
@@ -2740,10 +2844,13 @@ export function imageObservationToLayoutDraft(
     const observedHeight = item.bbox[3] - item.bbox[1];
     const descriptor = itemDescriptor(item);
     const ambiguousWideProp = category === "prop" && observedWidth >= observedHeight * 1.8 && !isFlatDecorationSemantic(descriptor);
-    const incompatibleCategoryHint = Boolean(item.category === "window" && category === "prop") || semanticCategoryConflict(item, category);
+    const categoryConflict = categoryConflicts.get(item.id);
+    const legacyCategoryConflict = !categoryConflict && (Boolean(item.category === "window" && category === "prop") || semanticCategoryConflict(item, category));
+    const incompatibleCategoryHint = Boolean(categoryConflict || legacyCategoryConflict);
     const uncertain = resolved.uncertain
       || Boolean(item.supportId && !support)
       || supportWasFolded
+      || floorSupportConflictIds.has(item.id)
       || placement === "supported" && !support
       || Boolean(item.partOfId && (item.partOfId === item.id || !itemById.has(item.partOfId) || !skippedParts.has(item.id)))
       || Boolean(rearAnchor?.conflict)
@@ -2759,6 +2866,7 @@ export function imageObservationToLayoutDraft(
     const notes = [
       BOX_NOTE,
       surfaceConflict ? "新旧墙面关系冲突或未能唯一匹配可见墙，保留估算位置并待确认。" : "",
+      floorSupportConflictIds.has(item.id) ? `观察同时标记 floor placement 和非地面 supportId=${item.supportId}；保留落地估算，但忽略冲突承托边并待复核。` : "",
       resolved.supportAdjusted ? "子物件 footprint 超出支撑面，已在支撑物实际旋转后的 footprint 内约束中心位置。" : "",
       resolved.supportTooSmall ? "子物件 footprint 大于支撑面；未缩放并居中，标记待确认。" : "",
       rearAnchor ? `父子后侧部件证据：${itemById.get(rearAnchor.childId)?.name ?? "子部件"} 接触 ${rearAnchor.surface.side}；父普通接墙仅表示接触，不替代后侧方向。${rearAnchor.conflict ? "与父级显式后侧方向证据冲突，未据此锚定。" : "已用于父体 local -Z 朝向约束。"}` : "",
@@ -2770,7 +2878,8 @@ export function imageObservationToLayoutDraft(
       placement === "supported" && !support ? "观察为受托物件，但支撑对象缺失或不可用；保留估算位置并待确认。" : "",
       supportWasFolded && support ? "原支撑对象已归入父组件；暂以父组件整体包围盒承接关系，具体接触面待复核。" : "",
       placement === "unknown" ? "物件的落地、承托或墙面挂接方式不明确；保留估算位置并待确认。" : "",
-      incompatibleCategoryHint ? "基础几何类别与语义身份提示冲突；保留类别提供的几何含义，不用语义提示替换类别，待确认。" : "",
+      categoryConflict ? `识别类别 ${categoryConflict.source} 与已知身份 ${semanticType ?? item.name} 不一致；草稿按身份规范类别 ${categoryConflict.effective} 生成，原始观察保留并待复核。` : "",
+      legacyCategoryConflict ? "基础几何类别与语义身份提示冲突；保留类别提供的几何含义，待确认。" : "",
       item.partOfId && parent ? `图像子部件归入 ${parent.name}，不重复创建独立几何。` : "",
       item.partOfId && (!parent || !skippedParts.has(item.id)) ? "子部件未能确认已被父组件几何覆盖，保留独立几何并待确认。" : "",
       ambiguousWideProp ? "宽扁外观缺少明确形体语义（可能是屏幕、横幅或家具）；未按宽高比推断水平承载方向，尺寸待确认。" : "",
@@ -2782,7 +2891,7 @@ export function imageObservationToLayoutDraft(
       uncertain: uncertain || item.visibility !== "visible", visible: item.visibility !== "occluded",
       ...(semanticType ? { semanticType } : {}),
       ...(normalizedGroundFootprint ? { groundFootprint: normalizedGroundFootprint } : {}),
-      ...(incompatibleCategoryHint ? {
+      ...(legacyCategoryConflict ? {
         assembly: [{
           primitive: category === "pillar" ? "cylinder" as const : "box" as const,
           position: [0.5, 0.5, 0.5] as [number, number, number],
@@ -2806,10 +2915,12 @@ export function imageObservationToLayoutDraft(
       observations.push({ componentId: item.id, state: "ambiguous", confidence: Math.min(item.confidence, 0.5), evidence: "墙面锚点不可用，保留估算位置并待确认。" });
     }
     if (rearAnchor?.conflict) observations.push({ componentId: item.id, state: "ambiguous", confidence: Math.min(item.confidence, 0.5), evidence: "父级背面特征或延伸方向与已识别后侧子部件接墙证据冲突；未据此锚定，保留原观察待确认。" });
-    if (item.supportId && resolvedSupportId && generated.has(resolvedSupportId)) {
+    if (!floorSupportConflictIds.has(item.id) && item.supportId && resolvedSupportId && generated.has(resolvedSupportId)) {
       relations.push({ fromId: item.id, toId: resolvedSupportId, type: "supports", confidence: item.confidence });
-    } else if (item.supportId) {
+    } else if (item.supportId && !floorSupportConflictIds.has(item.id)) {
       observations.push({ componentId: item.id, state: "ambiguous", confidence: Math.min(item.confidence, 0.5), evidence: "支撑锚点不可用，保留待确认。" });
+    } else if (floorSupportConflictIds.has(item.id)) {
+      observations.push({ componentId: item.id, state: "ambiguous", confidence: Math.min(item.confidence, 0.5), evidence: "floor placement 与非地面承托关系冲突；未应用该承托关系，保留落地位置估算并待复核。" });
     }
   }
 
@@ -2932,8 +3043,9 @@ export function imageObservationToLayoutDraft(
       continue;
     }
     const proposedYaw = Math.atan2(dx, dz) * 180 / Math.PI; // Chair primitives use local +Z as their visible front.
-    const support = item.supportId ? componentsById.get(item.supportId) : undefined;
-    const supportItem = item.supportId ? itemById.get(item.supportId) : undefined;
+    const effectiveId = effectiveSupportId(item);
+    const support = effectiveId ? componentsById.get(effectiveId) : undefined;
+    const supportItem = effectiveId ? itemById.get(effectiveId) : undefined;
     const supportIsGroundCover = Boolean(supportItem && supportItem.placement === "floor"
       && /(?:^|[_ -])(rug|carpet|mat|floor_cover|地毯|地垫|地毡)(?:$|[_ -])/i.test(`${supportItem.semanticType ?? ""} ${supportItem.name}`));
     const supportFit = support && support.category !== "ground" && !supportIsGroundCover
@@ -2963,12 +3075,12 @@ export function imageObservationToLayoutDraft(
     appendFacingReview({ componentId: item.id, state: "ambiguous", confidence: Math.min(item.confidence, targetItem!.confidence), evidence: `椅子局部 +Z 前向对准可见目标 ${target.name}；位置未移动，朝向估算待复核。` });
   }
   const reliableCameraCategories: DirectorLayoutCategory[] = ["table", "chair", "sofa", "cabinet", "prop"];
-  const cameraObservationById = new Map(observation.items.map((item) => [item.id, item]));
+  const cameraObservationById = effectiveSupportById;
   const selectedCameraItems = observation.items
-    .filter((item) => item.confidence >= 0.75 && item.visibility === "visible" && !item.partOfId
+    .filter((item) => !floorSupportConflictIds.has(item.id) && item.confidence >= 0.75 && item.visibility === "visible" && !item.partOfId
       && reliableCameraCategories.includes(categoryFor(item))
       && effectivePlacement(item) !== "wall_attached"
-      && hasTrustedPlacementChain(item, cameraObservationById, generated, resolveReferenceId)
+      && hasTrustedPlacementChain(cameraObservationById.get(item.id) ?? item, cameraObservationById, generated, resolveReferenceId)
       && (item.bbox[2] - item.bbox[0]) * (item.bbox[3] - item.bbox[1]) >= 0.012)
     .sort((a, b) => ((b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1]) * b.confidence)
       - ((a.bbox[2] - a.bbox[0]) * (a.bbox[3] - a.bbox[1]) * a.confidence))
@@ -2980,7 +3092,8 @@ export function imageObservationToLayoutDraft(
     const wall = item.contactWallSide && item.contactWallSide !== "unknown" && item.contactWallSide !== "none"
       ? (surfacesBySide.get(item.contactWallSide) ?? []).find((candidate) => candidate.kind === "wall")
       : item.againstSurfaceId ? surfacesById.get(item.againstSurfaceId) : undefined;
-    const support = item.supportId ? generated.get(item.supportId) : undefined;
+    const supportId = effectiveSupportId(item);
+    const support = supportId ? generated.get(resolveReferenceId(supportId)) : undefined;
     return [{
       bbox: item.bbox, confidence: item.confidence, component,
       ...(wall?.kind === "wall" ? { surfaceSide: wall.side } : {}),
@@ -2989,7 +3102,7 @@ export function imageObservationToLayoutDraft(
       ...(item.occludesIds ? { occludesIds: item.occludesIds } : {}),
       ...(observation.geometryEvidence ? { geometryEvidence: observation.geometryEvidence } : {}),
       ...(groundCamera ? { groundCamera: groundCamera.camera } : {}),
-      onGround: effectivePlacement(item) !== "wall_attached" && (hasLowFlatSupportChain(item, cameraObservationById, generated, resolveReferenceId)
+      onGround: effectivePlacement(item) !== "wall_attached" && (hasLowFlatSupportChain(cameraObservationById.get(item.id) ?? item, cameraObservationById, generated, resolveReferenceId)
         || item.groundFootprints?.some((footprint) => footprint.visibility === "visible" && footprint.confidence >= 0.55) === true),
     }];
   });
@@ -3257,16 +3370,88 @@ export function imageObservationToLayoutDraft(
     const item = evidenceById.get(component.id);
     if (!item) return component;
     const bbox = item.visibleBbox ?? item.bbox;
+    const identityUncertain = options.uncertainEntityIds?.includes(component.id) ?? false;
+    const relationUncertain = options.relationReviewEntityIds?.includes(component.id) ?? false;
+    const geometryUncertain = options.geometryReviewEntityIds?.includes(component.id) ?? false;
     return {
       ...component,
+      ...(identityUncertain || relationUncertain || geometryUncertain ? {
+        uncertain: true,
+        notes: [component.notes, identityUncertain ? "跨视图身份仍有不确定性，待人工确认。" : "", relationUncertain ? "多视图关系存在多个墙面锚点，未任意选择，待人工确认。" : "", geometryUncertain ? "跨视图地面证据存在冲突，已保留可用证据并标记待复核。" : ""].filter(Boolean).join(" ").slice(0, 240),
+      } : {}),
       sourceImageEvidence: {
         bbox: [...bbox] as [number, number, number, number],
         confidence: item.confidence,
         visibility: item.visibility === "partly_occluded" ? "partial" : item.visibility === "uncertain" ? "uncertain" : item.visibility,
         sourceId: source.sourceId,
+        ...(options.groundEvidenceSourceIds?.[component.id]?.length ? { sourceIds: [...new Set(options.groundEvidenceSourceIds[component.id])].slice(0, 3) } : {}),
         hasPartComponents: observation.items.some((candidate) => candidate.partOfId === item.id),
       },
     };
   });
+  if (options.uncertainEntityIds?.length) validated.characters = validated.characters.map((character) => options.uncertainEntityIds!.includes(character.id)
+    ? { ...character, uncertain: true }
+    : character);
+  const derivedLocatedIds = new Set<string>();
+  const derivedFailureReasons = new Map<string, string>();
+  const finalCameraForDerived = validated.referenceCamera;
+  const finalCameraQuality = finalCameraForDerived?.fitDiagnostics?.qualityStatus;
+  const finalCameraHeight = finalCameraForDerived?.position[1] ?? 0;
+  const derivedCameraIsTrusted = Boolean(groundCamera?.status === "calibrated" && aspect && finalCameraForDerived
+    && finalCameraForDerived.projection === "perspective" && finalCameraQuality === "accepted"
+    && Number.isFinite(finalCameraForDerived.fov) && finalCameraForDerived.fov > 1 && finalCameraForDerived.fov < 179
+    && Number.isFinite(finalCameraHeight) && finalCameraHeight >= 0.5 && finalCameraHeight <= 3
+    && Math.abs((finalCameraForDerived.imageAspectRatio ?? aspect) - aspect) < 1e-4);
+  if (derivedCameraIsTrusted && finalCameraForDerived && aspect) {
+    const projectionCalibration: CalibratedGroundCamera = {
+      camera: finalCameraForDerived,
+      confidence: finalCameraForDerived.confidence,
+      status: "calibrated",
+      evidenceAxes: groundCamera!.evidenceAxes,
+      focalLengthY: 0.5 / Math.tan(finalCameraForDerived.fov * Math.PI / 360),
+      cameraHeightMeters: finalCameraHeight,
+    };
+    for (const derived of options.derivedGroundPlacements ?? []) {
+      if (validated.components.some((component) => component.id === derived.entityId)) continue;
+      const result = buildDerivedGroundPlacementComponent(derived, projectionCalibration, aspect);
+      if (!result.component) {
+        derivedFailureReasons.set(derived.entityId, result.reason);
+        continue;
+      }
+      const component = result.component;
+      validated.components.push(component);
+      derivedLocatedIds.add(derived.entityId);
+      validated.observations = [...(validated.observations ?? []).slice(0, 11), { componentId: derived.entityId, state: "ambiguous", confidence: derived.confidence, evidence: "非解算frame独见对象仅按已验证地面证据落位，不生成跨frame bbox。" }];
+    }
+  } else if (options.layoutResolution) {
+    for (const derived of options.derivedGroundPlacements ?? []) derivedFailureReasons.set(derived.entityId, "最终参考机位缺少可信地面相机，已识别但暂不定位。");
+  }
+  if (derivedLocatedIds.size) {
+    const finalScene = [...validated.components, ...characterCollisionComponents(validated.characters, validated.components)];
+    const derivedCollisionPairs = fitCollisionPairs(finalScene, finalScene);
+    const derivedIds = derivedLocatedIds;
+    const collisionIds = new Set(derivedCollisionPairs.filter((pair) => pair.classification !== "allowed")
+      .flatMap((pair) => [pair.firstId, pair.secondId]).filter((id) => derivedIds.has(id)));
+    if (collisionIds.size) validated.components = validated.components.map((component) => collisionIds.has(component.id)
+      ? { ...component, uncertain: true, notes: [component.notes, "派生地面对象与场景组件存在包围盒候选冲突，待复核。"].filter(Boolean).join(" ").slice(0, 240) }
+      : component);
+    const counts = summarizeFitCollisions(derivedCollisionPairs);
+    if (validated.referenceCamera?.fitDiagnostics) validated.referenceCamera.fitDiagnostics = {
+      ...validated.referenceCamera.fitDiagnostics,
+      collisionPairs: derivedCollisionPairs,
+      physicalValidity: {
+        ...(validated.referenceCamera.fitDiagnostics.physicalValidity ?? { withinRoom: false, cameraOutsideGeometry: true, hardCollisionCount: 0 }),
+        hardCollisionCount: counts.hard, finalCollisionCounts: counts,
+      },
+      ...(collisionIds.size ? { qualityStatus: "needsReview" } : {}),
+    };
+  }
+  if (validated.layoutResolution) {
+    validated.layoutResolution.unresolved = validated.layoutResolution.unresolved.filter((entry) => !derivedLocatedIds.has(entry.entityId));
+    validated.layoutResolution.unresolved = validated.layoutResolution.unresolved.map((entry) => derivedFailureReasons.has(entry.entityId)
+      ? { ...entry, reason: derivedFailureReasons.get(entry.entityId)! }
+      : entry);
+    validated.layoutResolution.locatedCount = validated.layoutResolution.recognizedCount - validated.layoutResolution.unresolved.length;
+  }
   return validated;
 }

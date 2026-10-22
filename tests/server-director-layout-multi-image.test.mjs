@@ -18,13 +18,24 @@ async function freePort() {
 
 test('local Node director-layout route sends all selected images in one provider user message', async (t) => {
   const providerPayloads = [];
+  let truncateNext = false;
   const provider = http.createServer((request, response) => {
     const chunks = [];
     request.on('data', (chunk) => chunks.push(chunk));
     request.on('end', () => {
       providerPayloads.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
       response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ spaceType: 'open', surfaces: [], items: [] }) } }] }));
+      if (truncateNext) {
+        truncateNext = false;
+        response.end(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: JSON.stringify({
+          contractVersion: 'image-observations-v2', spaceType: 'open',
+          entities: [{ id: 'chair', kind: 'item', name: 'chair', semanticType: 'chair', category: 'chair', placement: 'floor', identityConfidence: 0.9, uncertain: false }],
+          views: [{ sourceId: 'view-a', entities: [{ entityId: 'chair', bbox: [0.1, 0.2, 0.5, 0.8], confidence: 0.9, visibility: 'visible', mainColor: '#555555' }] }],
+          relations: [],
+        }) } }] }));
+      } else {
+        response.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ spaceType: 'open', surfaces: [], items: [] }) } }] }));
+      }
     });
   });
   await new Promise((resolve) => provider.listen(0, '127.0.0.1', resolve));
@@ -38,6 +49,7 @@ test('local Node director-layout route sends all selected images in one provider
       AUTH_SECRET: 'multi-image-local-test-auth-secret',
       LOGIN_PASSWORD: 'multi-image-test-password',
       DIRECTOR_LAYOUT_API_KEY: 'test-layout-key',
+      MIMO_API_KEY: 'test-layout-key',
       MIMO_BASE_URL: `http://127.0.0.1:${providerPort}`,
       MIMO_TEXT_ENDPOINT: '/chat/completions',
       MIMO_VISION_MODEL_ID: 'test-vision-model',
@@ -77,6 +89,35 @@ test('local Node director-layout route sends all selected images in one provider
   });
   assert.equal(response.status, 200);
   const payload = providerPayloads[0];
+  assert.deepEqual(payload.response_format, { type: 'json_object' });
   assert.equal(payload.messages.filter((message) => message.role === 'user').length, 1);
   assert.deepEqual(payload.messages[1].content.filter((part) => part.type === 'image_url').map((part) => part.image_url.url), images.map((image) => image.url));
+
+  const reviewResponse = await fetch(`${baseUrl}/api/director-layout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      outputFormat: 'image-observations-v1',
+      observationStage: 'spatial-review',
+      images,
+      baseObservations: { surfaces: [], items: [] },
+      reviewContext: { conflictPairIds: [], missingEvidence: ['non-convex-contact-boundary'] },
+    }),
+  });
+  assert.equal(reviewResponse.status, 200);
+  assert.equal(providerPayloads.length, 2);
+  for (const stagePayload of providerPayloads) {
+    assert.deepEqual(stagePayload.response_format, { type: 'json_object' });
+    assert.equal(stagePayload.messages.filter((message) => message.role === 'user').length, 1);
+    assert.deepEqual(stagePayload.messages[1].content.filter((part) => part.type === 'image_url').map((part) => part.image_url.url), images.map((image) => image.url));
+  }
+
+  truncateNext = true;
+  const truncated = await fetch(`${baseUrl}/api/director-layout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ outputFormat: 'image-observations-v2', images: [{ id: 'view-a', sourceId: 'view-a', url: 'data:image/png;base64,AA==' }] }),
+  });
+  assert.equal(truncated.status, 422);
+  assert.equal((await truncated.json()).error, 'DIRECTOR_LAYOUT_MODEL_OUTPUT_TRUNCATED');
 });

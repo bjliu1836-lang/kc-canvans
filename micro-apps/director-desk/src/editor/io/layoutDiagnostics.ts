@@ -92,7 +92,7 @@ function writeRecords(records: LayoutDiagnosticRecord[]) {
   }
 }
 
-const CANDIDATE_KEYS = ["spaceType", "observations", "relations", "components", "characters", "referenceCamera", "observationFormat", "visualObservations", "spatialReview"] as const;
+const CANDIDATE_KEYS = ["spaceType", "observations", "relations", "components", "characters", "referenceCamera", "observationFormat", "visualObservations", "multiViewObservation", "sourceGroupKey", "frameSelection", "spatialReview"] as const;
 const COMPONENT_KEYS = ["id", "category", "primitive", "semanticType", "position", "size", "rotationYDegrees", "confidence", "visible", "assembly", "groundFootprint", "appearance"] as const;
 const CHARACTER_KEYS = ["id", "position", "height", "rotationYDegrees", "facingDirection", "supportComponentId", "confidence", "visible", "posture", "bodyType", "handGesture", "kneelVariant"] as const;
 const RELATION_KEYS = ["type", "fromId", "toId", "confidence"] as const;
@@ -116,9 +116,9 @@ function boundDiagnosticValue(value: unknown, depth = 0): unknown {
   if (typeof value === "string") return value.slice(0, 120);
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
   if (typeof value === "boolean" || value === null) return value;
-  if (Array.isArray(value)) return value.slice(0, 30).map((item) => boundDiagnosticValue(item, depth + 1));
+  if (Array.isArray(value)) return value.slice(0, 64).map((item) => boundDiagnosticValue(item, depth + 1));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 32)
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 48)
       .map(([key, item]) => [key.slice(0, 48), boundDiagnosticValue(item, depth + 1)])
       .filter(([, item]) => item !== undefined));
   }
@@ -130,6 +130,45 @@ function sanitizeCandidate(value: unknown): Record<string, unknown> | undefined 
   const candidate = pick(value, CANDIDATE_KEYS);
   if (!candidate) return undefined;
   if (typeof candidate.observationFormat === "string") candidate.observationFormat = candidate.observationFormat.slice(0, 48);
+  if (candidate.sourceGroupKey !== undefined) candidate.sourceGroupKey = typeof candidate.sourceGroupKey === "string" ? candidate.sourceGroupKey.slice(0, 1024) : undefined;
+  if (candidate.multiViewObservation && typeof candidate.multiViewObservation === "object" && !Array.isArray(candidate.multiViewObservation)) {
+    const contract = pick(candidate.multiViewObservation, ["contractVersion", "spaceType", "entities", "views", "relations"]);
+    if (contract) {
+      contract.entities = Array.isArray(contract.entities) ? contract.entities.slice(0, 48).map((item) => pick(item, ["id", "kind", "name", "surfaceKind", "semanticType", "category", "placement", "posture", "facingDirection", "kneelVariant", "handGesture", "identityConfidence", "uncertain"]) ?? {}) : [];
+      contract.views = Array.isArray(contract.views) ? contract.views.slice(0, 3).map((view) => {
+        const safeView = pick(view, ["sourceId", "entities", "groundLandmarks", "geometryEvidence"]) ?? {};
+        safeView.entities = Array.isArray(safeView.entities) ? safeView.entities.slice(0, 48).map((item) => {
+          const safeEntity = pick(item, ["entityId", "side", "bbox", "confidence", "visibility", "mainColor", "groundContacts", "groundFootprints", "occludesEntityIds", "facingDirection", "contactWallSide", "bodyExtendsToward", "rearFeature", "visibleBbox", "completeBbox"] ) ?? {};
+          if (Array.isArray(safeEntity.groundContacts)) safeEntity.groundContacts = safeEntity.groundContacts.slice(0, 6).map((contact) => pick(contact, ["point", "kind", "visibility", "confidence", "pointId", "planeId"]) ?? {});
+          if (Array.isArray(safeEntity.groundFootprints)) safeEntity.groundFootprints = safeEntity.groundFootprints.slice(0, 3).map((footprint) => ({
+            ...pick(footprint, ["visibility", "confidence", "planeId"]),
+            outer: Array.isArray(footprint?.outer) ? footprint.outer.slice(0, 16) : [],
+            ...(Array.isArray(footprint?.holes) ? { holes: footprint.holes.slice(0, 2).map((hole: unknown) => Array.isArray(hole) ? hole.slice(0, 12) : []) } : {}),
+          }));
+          safeEntity.rearFeature = pick(safeEntity.rearFeature, ["name", "bbox"]);
+          return safeEntity;
+        }) : [];
+        safeView.groundLandmarks = Array.isArray(safeView.groundLandmarks) ? safeView.groundLandmarks.slice(0, 8).map((point) => pick(point, ["pointId", "planeId", "point", "confidence", "visibility"]) ?? {}) : [];
+        if (safeView.geometryEvidence && typeof safeView.geometryEvidence === "object") {
+          const evidence = pick(safeView.geometryEvidence, ["axes"]) ?? {};
+          evidence.axes = Array.isArray(evidence.axes) ? evidence.axes.slice(0, 3).map((axis) => {
+            const boundedAxis = pick(axis, ["axis", "segments"]) ?? {};
+            boundedAxis.segments = Array.isArray(boundedAxis.segments) ? boundedAxis.segments.slice(0, 8).map((segment) => pick(segment, ["start", "end", "confidence"])) : [];
+            return boundedAxis;
+          }) : [];
+          safeView.geometryEvidence = evidence;
+        }
+        return safeView;
+      }) : [];
+      contract.relations = Array.isArray(contract.relations) ? contract.relations.slice(0, 180).map((relation) => pick(relation, ["type", "from", "to", "confidence"]) ?? {}) : [];
+      candidate.multiViewObservation = contract;
+    } else delete candidate.multiViewObservation;
+  } else delete candidate.multiViewObservation;
+  if (candidate.frameSelection && typeof candidate.frameSelection === "object" && !Array.isArray(candidate.frameSelection)) {
+    const frame = pick(candidate.frameSelection, ["sourceId", "aspectRatio", "registrations"]);
+    if (frame) frame.registrations = Array.isArray(frame.registrations) ? frame.registrations.slice(0, 3).map((registration) => pick(registration, ["sourceId", "registered", "planeId", "inlierPointIds", "medianNormalizedCoordinateResidual", "reason"]) ?? {}) : [];
+    candidate.frameSelection = frame;
+  } else delete candidate.frameSelection;
   const visualObservations = pick(candidate.visualObservations, ["spaceType", "surfaces", "items", "people", "geometryEvidence"]);
   if (visualObservations?.geometryEvidence && typeof visualObservations.geometryEvidence === "object") {
     const evidence = pick(visualObservations.geometryEvidence, ["axes"]);

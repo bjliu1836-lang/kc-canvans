@@ -132,6 +132,7 @@ export function DraftComponentAssetGenerator({
   component,
   components,
   sourceImage,
+  referenceImages,
   sourceFingerprint,
   isCurrentTarget,
   onModelUnavailable,
@@ -143,6 +144,7 @@ export function DraftComponentAssetGenerator({
   component: LayoutDraftComponent;
   components: readonly LayoutDraftComponent[];
   sourceImage: ReferenceLayoutImage | null;
+  referenceImages: readonly ReferenceLayoutImage[];
   sourceFingerprint: string;
   isCurrentTarget: (draftId: string, sourceId: string, sourceFingerprint: string, componentId: string) => boolean;
   onModelUnavailable: (draftId: string, componentId: string, assetRefId: string) => void;
@@ -150,7 +152,11 @@ export function DraftComponentAssetGenerator({
   onStateChange: (draftId: string, sourceId: string, componentId: string, state: "generating" | "ready" | "failed" | undefined) => void;
 }) {
   const addImportedAsset = useDirectorStore((state) => state.addImportedAsset);
-  const key = useMemo(() => sessionKey(scopeId, draft.id, draft.sourceId, sourceFingerprint, component.id), [scopeId, draft.id, draft.sourceId, sourceFingerprint, component.id]);
+  const evidenceSourceId = component.sourceImageEvidence?.sourceId ?? draft.sourceId;
+  const assetSourceImage = referenceImages.find((image) => image.sourceId === evidenceSourceId)
+    ?? (sourceImage?.sourceId === evidenceSourceId ? sourceImage : null);
+  const assetSourceFingerprint = getReferenceImageFingerprint(assetSourceImage?.url);
+  const key = useMemo(() => sessionKey(scopeId, draft.id, evidenceSourceId, assetSourceFingerprint, component.id), [scopeId, draft.id, evidenceSourceId, assetSourceFingerprint, component.id]);
   const [accessKey, setAccessKey] = useState(() => sessionStorage.getItem(IMAGE_TO_3D_ACCESS_KEY_STORAGE) || "");
   const [accessKeyDraft, setAccessKeyDraft] = useState(accessKey);
   const [session, setSession] = useState<StoredComponentJob | null>(() => readStoredJob(key));
@@ -164,7 +170,9 @@ export function DraftComponentAssetGenerator({
   const [error, setError] = useState("");
   const stateChangeRef = useRef(onStateChange);
   stateChangeRef.current = onStateChange;
-  const eligibility = getDraftComponentAssetEligibility(component, components, sourceImage?.sourceId);
+  const eligibility = !assetSourceImage && !customImage && component.sourceImageEvidence
+    ? "找不到该对象裁剪证据对应的参考视图；请重新选择图片或上传单物体图。"
+    : getDraftComponentAssetEligibility(component, components, evidenceSourceId);
   const hasUsableGeneratedAsset = Boolean(component.generatedAssetRefId && !component.generatedAssetUnavailable);
   const previewUrl = session ? imageTo3dAssetUrl(session.credentials) : "";
 
@@ -179,8 +187,8 @@ export function DraftComponentAssetGenerator({
         if (!live) return;
         missingRetries = 0;
         setJob(next);
-        if (next.state === "completed") stateChangeRef.current(draft.id, draft.sourceId, component.id, "ready");
-        else if (next.state === "failed" || next.state === "unknown" || next.state === "cancelled") stateChangeRef.current(draft.id, draft.sourceId, component.id, "failed");
+        if (next.state === "completed") stateChangeRef.current(draft.id, evidenceSourceId, component.id, "ready");
+        else if (next.state === "failed" || next.state === "unknown" || next.state === "cancelled") stateChangeRef.current(draft.id, evidenceSourceId, component.id, "failed");
         if (ACTIVE_STATES.has(next.state)) timer = setTimeout(poll, 2500);
       } catch (reason) {
         if (!live) return;
@@ -197,7 +205,7 @@ export function DraftComponentAssetGenerator({
       live = false;
       if (timer) clearTimeout(timer);
     };
-  }, [session?.credentials.id, creatingJobId, draft.id, draft.sourceId, component.id]);
+  }, [session?.credentials.id, creatingJobId, draft.id, evidenceSourceId, component.id]);
 
   function saveAccessKey() {
     const value = accessKeyDraft.trim();
@@ -220,29 +228,29 @@ export function DraftComponentAssetGenerator({
       setError("已有任务仍待确认；系统不会自动重复提交。请等待状态更新后再操作。");
       return;
     }
-    if (!customImage && (!sourceImage || !component.sourceImageEvidence || !cropConfirmed)) {
+    if (!customImage && (!assetSourceImage || !component.sourceImageEvidence || !cropConfirmed)) {
       setError("请先确认对象裁剪范围，或上传该物件的单独参考图");
       return;
     }
     setBusy(true);
     setError("");
     try {
-      const file = customImage ?? await cropToFile(sourceImage!.url, crop, sourceImage!.fileName);
+      const file = customImage ?? await cropToFile(assetSourceImage!.url, crop, assetSourceImage!.fileName);
       if (!/^image\/(?:png|jpeg|webp)$/.test(file.type)) throw new Error("仅支持PNG、JPG或WEBP图片");
       if (file.size > 10 * 1024 * 1024) throw new Error("图片超过10 MB，请缩小裁剪范围");
       const nextSession: StoredComponentJob = {
-        draftId: draft.id, sourceId: draft.sourceId, sourceFingerprint, componentId: component.id,
+        draftId: draft.id, sourceId: evidenceSourceId, sourceFingerprint: assetSourceFingerprint, componentId: component.id,
         credentials: createImageTo3dJobCredentials(), inputName: file.name,
       };
       sessionStorage.setItem(key, JSON.stringify(nextSession));
       setSession(nextSession);
       setCreatingJobId(nextSession.credentials.id);
       setJob(null);
-      onStateChange(draft.id, draft.sourceId, component.id, "generating");
+      onStateChange(draft.id, evidenceSourceId, component.id, "generating");
       const created = await createImageTo3dJob(file, accessKey, nextSession.credentials);
       setJob(created);
     } catch (reason) {
-      onStateChange(draft.id, draft.sourceId, component.id, "failed");
+      onStateChange(draft.id, evidenceSourceId, component.id, "failed");
       setError(reason instanceof Error ? reason.message : "无法启动生成任务");
     } finally {
       setCreatingJobId(null);
@@ -252,7 +260,7 @@ export function DraftComponentAssetGenerator({
 
   async function adoptResult() {
     if (!session || job?.state !== "completed" || busy) return;
-    if (session.sourceFingerprint !== sourceFingerprint) {
+    if (session.sourceFingerprint !== assetSourceFingerprint) {
       setError("参考图已变化；旧生成结果没有绑定到当前物件。请重新生成。");
       return;
     }
@@ -264,14 +272,14 @@ export function DraftComponentAssetGenerator({
       const file = new File([await response.blob()], component.name + "-generated.glb", { type: "model/gltf-binary" });
       const imported = await readLocalModelFile(file);
       const current = useLayoutDraftPreviewStore.getState().draft;
-      if (!current || current.id !== draft.id || current.sourceId !== draft.sourceId || !current.components.some((entry) => entry.id === component.id) || !isCurrentTarget(draft.id, draft.sourceId, sourceFingerprint, component.id)) {
+      if (!current || current.id !== draft.id || current.sourceGroupKey !== draft.sourceGroupKey || current.components.find((entry) => entry.id === component.id)?.sourceImageEvidence?.sourceId !== evidenceSourceId || !isCurrentTarget(draft.id, evidenceSourceId, assetSourceFingerprint, component.id)) {
         throw new Error("草稿已变化，模型没有绑定到其他物件；请重新选择对象");
       }
       const before = new Set(useDirectorStore.getState().project.assets.map((asset) => asset.id));
       addImportedAsset({ kind: "prop", ...imported, addToScene: false });
       const asset = useDirectorStore.getState().project.assets.find((item) => !before.has(item.id) && item.fileName === imported.fileName);
       if (!asset) throw new Error("模型已下载，但无法登记到模型库");
-      if (!onBindAsset(draft.id, draft.sourceId, sourceFingerprint, component.id, asset.id)) throw new Error("草稿或参考图已变化，模型没有绑定到其他物件");
+      if (!onBindAsset(draft.id, evidenceSourceId, assetSourceFingerprint, component.id, asset.id)) throw new Error("草稿或参考图已变化，模型没有绑定到其他物件");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "模型导入失败");
     } finally {
@@ -287,7 +295,7 @@ export function DraftComponentAssetGenerator({
       {!hasUsableGeneratedAsset ? (
         <>
           <p className="reference-layout-anchor-hint">从识别框开始，可拖动调整；若物件被遮挡或裁剪不准，请上传该物件的单独图片。不会把整张房间图直接提交生成。</p>
-          {sourceImage && component.sourceImageEvidence ? (
+          {assetSourceImage && component.sourceImageEvidence ? (
           <div
               className="reference-layout-object-crop"
               role="img"
@@ -305,13 +313,13 @@ export function DraftComponentAssetGenerator({
                 setCrop([Math.min(dragStart[0], next[0]), Math.min(dragStart[1], next[1]), Math.abs(next[0] - dragStart[0]), Math.abs(next[1] - dragStart[1])]);
               }}
               onPointerUp={() => setDragStart(null)}
-              style={{ aspectRatio: String(sourceImage.aspectRatio ?? 1.5) }}
+              style={{ aspectRatio: String(assetSourceImage.aspectRatio ?? 1.5) }}
             >
-              <img src={sourceImage.url} alt="参考图对象范围" draggable={false} />
+              <img src={assetSourceImage.url} alt="参考图对象范围" draggable={false} />
               <span style={{ left: (crop[0] * 100) + "%", top: (crop[1] * 100) + "%", width: (crop[2] * 100) + "%", height: (crop[3] * 100) + "%" }} />
             </div>
           ) : <p className="reference-layout-diagnostic is-warning">原图没有可用对象框；请上传单物体图片。</p>}
-          {sourceImage && component.sourceImageEvidence ? (
+          {assetSourceImage && component.sourceImageEvidence ? (
             <button type="button" onClick={() => { setCropConfirmed(true); setCustomImage(null); setError(""); }}>确认当前裁剪范围</button>
           ) : null}
           <label>改用单物体图片<input aria-label="改用单物体图片" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { setCustomImage(event.currentTarget.files?.[0] ?? null); setError(""); }} /></label>

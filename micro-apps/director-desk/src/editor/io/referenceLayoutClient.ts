@@ -1,15 +1,41 @@
 import { validateLayoutDraftCandidate, type LayoutDraft, type LayoutDraftSource } from "../schema/layoutDraft";
 import { imageObservationToLayoutDraft, ImageObservationValidationError, normalizeImageObservation } from "../schema/imageObservationLayout";
 import type { ImageObservation } from "../schema/imageObservationLayout";
+import { assertMultiViewContract, multiViewToCanonicalObservation, registerGroundViews, selectCanonicalFrame, type DerivedGroundPlacement } from "../schema/multiViewObservation";
 import { createLayoutGenerationId, recordLayoutGenerationFailed, recordLayoutGenerationStarted, recordNormalizedLayoutDraft } from "./layoutDiagnostics";
 
 const AUTH_TOKEN_KEY = "KC_CANVAS_AUTH_TOKEN";
 const INVALID_LAYOUT_MESSAGE = "图片模型未能返回可用的布景结构，请重试或更换参考图";
-const IMAGE_OBSERVATION_FORMAT = "image-observations-v1";
+const IMAGE_OBSERVATION_FORMAT = "image-observations-v2";
+function stableImageFingerprint(url: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < url.length; index += 1) { hash ^= url.charCodeAt(index); hash = Math.imul(hash, 16777619); }
+  return `${url.length.toString(36)}-${(hash >>> 0).toString(36)}`;
+}
+function readImageAspectRatio(url: string): Promise<number | undefined> {
+  return new Promise((resolve) => {
+    const image = new Image();
+    let settled = false;
+    const finish = (ratio?: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(ratio);
+    };
+    const timeout = setTimeout(() => finish(undefined), 5000);
+    image.crossOrigin = "anonymous";
+    image.onload = () => finish(image.naturalWidth > 0 && image.naturalHeight > 0 ? image.naturalWidth / image.naturalHeight : undefined);
+    image.onerror = () => finish(undefined);
+    image.src = url;
+  });
+}
 const SPATIAL_REVIEW_ITEM_FIELDS = [
   "groundFootprints", "groundContacts", "occludesIds", "supportId", "partOfId", "placement",
   "contactWallSide", "againstSurfaceId", "rearFeature", "bodyExtendsToward", "visibleBbox", "completeBbox",
 ] as const;
+const SPATIAL_REVIEW_CLEARABLE_RELATION_FIELDS = new Set([
+  "supportId", "partOfId", "againstSurfaceId", "contactWallSide",
+]);
 
 function mergeSpatialReview(base: ImageObservation, value: unknown): ImageObservation {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("空间复核结果无效");
@@ -24,7 +50,12 @@ function mergeSpatialReview(base: ImageObservation, value: unknown): ImageObserv
     const next: Record<string, unknown> = { ...current };
     for (const key of Object.keys(item)) {
       if (key !== "id" && !(SPATIAL_REVIEW_ITEM_FIELDS as readonly string[]).includes(key)) throw new Error("空间复核修改了对象身份");
-      if (key !== "id") next[key] = item[key];
+      if (key === "id") continue;
+      if (item[key] === null && SPATIAL_REVIEW_CLEARABLE_RELATION_FIELDS.has(key)) {
+        delete next[key];
+      } else {
+        next[key] = item[key];
+      }
     }
     byId.set(item.id, next as unknown as typeof current);
   }
@@ -122,7 +153,7 @@ function readableLayoutError(status: number, data: Record<string, unknown>) {
   if (code === "DIRECTOR_LAYOUT_IMAGE_REQUIRED") return "参考图无效，请重新选择图片";
   if (code === "DIRECTOR_LAYOUT_TOO_MANY_IMAGES") return "一次最多选择 3 张参考图";
   if (code === "DIRECTOR_LAYOUT_IMAGES_TOO_LARGE" || code === "DIRECTOR_LAYOUT_REQUEST_TOO_LARGE") return "所选参考图合计过大，请压缩图片后重试（最多 16 MB）";
-  if (code === "DIRECTOR_LAYOUT_IMAGES_AMBIGUOUS" || code === "DIRECTOR_LAYOUT_IMAGES_INVALID") return "参考图列表无效，请重新选择主图和补充图";
+  if (code === "DIRECTOR_LAYOUT_IMAGES_AMBIGUOUS" || code === "DIRECTOR_LAYOUT_IMAGES_INVALID") return "参考图列表无效，请重新选择图片";
   if (code === "DIRECTOR_LAYOUT_INVALID_MODEL_JSON" || code === "DIRECTOR_LAYOUT_MODEL_JSON_INVALID" || code === "DIRECTOR_LAYOUT_MODEL_SCHEMA_INVALID") {
     const issue = readableLayoutIssue(data);
     return issue ? `${INVALID_LAYOUT_MESSAGE}（${issue}）` : INVALID_LAYOUT_MESSAGE;
@@ -139,7 +170,7 @@ export async function requestReferenceLayout(
   const images = Array.isArray(imageInput) ? [...imageInput] : [imageInput as ReferenceLayoutImage];
   if (!images.length || images.length > 3) throw new Error("请选择 1 到 3 张参考图");
   const primaryImage = images[0];
-  const requestImages: Array<ReferenceLayoutImage & { requestUrl: string }> = [];
+  const requestImages: Array<ReferenceLayoutImage & { requestUrl: string; requestAspectRatio?: number }> = [];
   let aggregateInlineLength = 0;
   for (const image of images) {
     let requestUrl = image.url;
@@ -159,7 +190,8 @@ export async function requestReferenceLayout(
       throw new Error("参考图格式无效，请重新选择 PNG、JPG 或 WebP 图片");
     }
     if (requestUrl.startsWith("data:image/")) aggregateInlineLength += requestUrl.length;
-    requestImages.push({ ...image, requestUrl });
+    const requestAspectRatio = image.aspectRatio ?? await readImageAspectRatio(requestUrl);
+    requestImages.push({ ...image, requestUrl, ...(requestAspectRatio ? { requestAspectRatio } : {}) });
   }
   if (aggregateInlineLength > 16 * 1024 * 1024 + 512) {
     throw new Error("所选参考图合计过大，请压缩图片后重试（最多 16 MB）");
@@ -180,7 +212,6 @@ export async function requestReferenceLayout(
         images: requestImages.map((image, index) => ({
           id: image.sourceId,
           sourceId: image.sourceId,
-          role: index === 0 ? "primary" : "supplementary",
           url: image.requestUrl,
           fileName: image.fileName,
         })),
@@ -213,10 +244,13 @@ export async function requestReferenceLayout(
   }
   try {
     const legacyResponse = data.observationFormat === undefined && data.draft !== undefined;
-    if (data.observationFormat !== undefined && data.observationFormat !== IMAGE_OBSERVATION_FORMAT) {
+    if (images.length > 1 && (legacyResponse || data.observationFormat !== IMAGE_OBSERVATION_FORMAT)) {
+      throw new Error("多张参考图需要完整的 image-observations-v2 多视图结果，不能安全解释旧版单图坐标");
+    }
+    if (data.observationFormat !== undefined && data.observationFormat !== IMAGE_OBSERVATION_FORMAT && data.observationFormat !== "image-observations-v1") {
       throw new Error("图片模型返回了不支持的图像观察格式");
     }
-    if (!legacyResponse && data.observationFormat !== IMAGE_OBSERVATION_FORMAT) {
+    if (!legacyResponse && data.observationFormat !== IMAGE_OBSERVATION_FORMAT && data.observationFormat !== "image-observations-v1") {
       throw new Error("图片模型未返回可用的图像观察结构");
     }
     if (legacyResponse) {
@@ -227,9 +261,50 @@ export async function requestReferenceLayout(
       recordNormalizedLayoutDraft(draft, generationId, data.draft);
       return draft;
     }
-    const observation = normalizeImageObservation(data.visualObservations);
+    const multiViewContract = data.observationFormat === IMAGE_OBSERVATION_FORMAT
+      ? assertMultiViewContract(data.visualObservations, images.map((image) => image.sourceId))
+      : null;
+    let finalMultiViewContract = multiViewContract;
+    const aspectRatios = Object.fromEntries(requestImages.map((image) => [image.sourceId, image.requestAspectRatio]));
+    let canonicalFrame = multiViewContract ? selectCanonicalFrame(multiViewContract, aspectRatios) : null;
+    let canonicalImage = canonicalFrame
+      ? { ...(images.find((image) => image.sourceId === canonicalFrame!.sourceId) ?? images[0]), aspectRatio: requestImages.find((image) => image.sourceId === canonicalFrame!.sourceId)?.requestAspectRatio }
+      : images[0];
+    const sourceGroupKey = images.map((image) => `${image.sourceId}:${stableImageFingerprint(image.url)}`).sort().join("|");
+    const getResolution = (contract: NonNullable<typeof multiViewContract>, frame: NonNullable<typeof canonicalFrame>) => {
+      const physicalEntities = contract.entities.filter((entity) => entity.kind !== "surface");
+      const visibleInCanonical = new Set(frame.entities.map((entry) => entry.entityId));
+      const unresolved = physicalEntities.filter((entity) => !visibleInCanonical.has(entity.id)).map((entity) => ({
+        entityId: entity.id,
+        name: entity.name,
+        sourceId: contract.views.find((view) => view.entities.some((entry) => entry.entityId === entity.id))?.sourceId ?? frame.sourceId,
+        sourceFileName: images.find((image) => image.sourceId === (contract.views.find((view) => view.entities.some((entry) => entry.entityId === entity.id))?.sourceId ?? frame.sourceId))?.fileName ?? "历史参考图",
+        reason: "该参考视图尚未通过可靠地面配准，暂不生成位置。",
+      }));
+      return { recognizedCount: physicalEntities.length, locatedCount: physicalEntities.length - unresolved.length, unresolved };
+    };
+    const convertedObservation = multiViewContract ? multiViewToCanonicalObservation(multiViewContract, canonicalFrame!) as ImageObservation & {
+      groundEvidenceSourceIds?: Record<string, string[]>; multiViewRelationReviewEntityIds?: string[]; multiViewGeometryReviewEntityIds?: string[]; derivedGroundPlacements?: DerivedGroundPlacement[];
+    } : null;
+    const groundEvidenceSourceIds = convertedObservation?.groundEvidenceSourceIds;
+    const relationReviewEntityIds = convertedObservation?.multiViewRelationReviewEntityIds ?? [];
+    const geometryReviewEntityIds = convertedObservation?.multiViewGeometryReviewEntityIds ?? [];
+    const derivedGroundPlacements = (convertedObservation?.derivedGroundPlacements ?? []).map((placement) => ({
+      ...placement,
+      sourceFileName: images.find((image) => image.sourceId === placement.sourceId)?.fileName ?? "参考图",
+    }));
+    const observation = normalizeImageObservation(convertedObservation ?? data.visualObservations);
     let finalObservation = observation;
-    let draft = imageObservationToLayoutDraft(observation, primaryImage, { imageAspectRatio: primaryImage.aspectRatio });
+    let resolution = multiViewContract ? getResolution(multiViewContract, canonicalFrame!) : undefined;
+    const uncertainEntityIds = multiViewContract?.entities.filter((entity) => entity.uncertain).map((entity) => entity.id) ?? [];
+    let draft = imageObservationToLayoutDraft(observation, canonicalImage, {
+      ...(canonicalImage.aspectRatio ? { imageAspectRatio: canonicalImage.aspectRatio } : {}),
+      ...(multiViewContract ? { sourceGroupKey, layoutResolution: resolution, uncertainEntityIds, relationReviewEntityIds, geometryReviewEntityIds, groundEvidenceSourceIds, derivedGroundPlacements } : {}),
+    });
+    if (resolution?.unresolved.length && draft.referenceCamera?.fitDiagnostics) draft.referenceCamera = {
+      ...draft.referenceCamera,
+      fitDiagnostics: { ...draft.referenceCamera.fitDiagnostics, qualityStatus: "needsReview" },
+    };
     let spatialReviewMetadata: Record<string, unknown> | undefined;
     if (!signal?.aborted && shouldRequestSpatialReview(observation, draft)) {
       const reviewContext = spatialReviewContext(observation, draft);
@@ -241,16 +316,16 @@ export async function requestReferenceLayout(
             ...(token ? { Authorization: "Bearer " + token } : {}),
           },
           body: JSON.stringify({
-            outputFormat: IMAGE_OBSERVATION_FORMAT,
+            outputFormat: multiViewContract ? IMAGE_OBSERVATION_FORMAT : "image-observations-v1",
             observationStage: "spatial-review",
             images: requestImages.map((image, index) => ({
               id: image.sourceId,
+              ...(!multiViewContract ? { role: index === 0 ? "primary" : "supplementary" } : {}),
               sourceId: image.sourceId,
-              role: index === 0 ? "primary" : "supplementary",
               url: image.requestUrl,
               fileName: image.fileName,
             })),
-            baseObservations: observation,
+            baseObservations: multiViewContract ?? observation,
             reviewContext,
           }),
           signal,
@@ -265,9 +340,44 @@ export async function requestReferenceLayout(
           ...(reviewData.usage && typeof reviewData.usage === "object" ? { usage: reviewData.usage } : {}),
           ...(typeof reviewData.error === "string" ? { error: reviewData.error } : {}),
         };
-        if (reviewResponse.ok && reviewData.observationFormat === IMAGE_OBSERVATION_FORMAT) {
+        if (reviewResponse.ok && reviewData.observationFormat === IMAGE_OBSERVATION_FORMAT && multiViewContract) {
+          const reviewedContract = assertMultiViewContract(reviewData.spatialReviewPatch, images.map((image) => image.sourceId));
+          finalMultiViewContract = reviewedContract;
+          canonicalFrame = selectCanonicalFrame(reviewedContract, aspectRatios);
+          canonicalImage = {
+            ...(images.find((image) => image.sourceId === canonicalFrame!.sourceId) ?? images[0]),
+            aspectRatio: requestImages.find((image) => image.sourceId === canonicalFrame!.sourceId)?.requestAspectRatio,
+          };
+          const convertedReviewedObservation = multiViewToCanonicalObservation(reviewedContract, canonicalFrame) as ImageObservation & {
+            groundEvidenceSourceIds?: Record<string, string[]>; multiViewRelationReviewEntityIds?: string[]; multiViewGeometryReviewEntityIds?: string[]; derivedGroundPlacements?: DerivedGroundPlacement[];
+          };
+          const reviewedObservation = normalizeImageObservation(convertedReviewedObservation);
+          resolution = getResolution(reviewedContract, canonicalFrame);
+          const reviewedDerivedGroundPlacements = (convertedReviewedObservation.derivedGroundPlacements ?? []).map((placement) => ({
+            ...placement,
+            sourceFileName: images.find((image) => image.sourceId === placement.sourceId)?.fileName ?? "参考图",
+          }));
+          const reviewedUncertainIds = reviewedContract.entities.filter((entity) => entity.uncertain).map((entity) => entity.id);
+          const reviewedDraft = imageObservationToLayoutDraft(reviewedObservation, canonicalImage, {
+            ...(canonicalImage.aspectRatio ? { imageAspectRatio: canonicalImage.aspectRatio } : {}),
+            sourceGroupKey,
+            layoutResolution: resolution,
+            uncertainEntityIds: reviewedUncertainIds,
+            relationReviewEntityIds: convertedReviewedObservation.multiViewRelationReviewEntityIds ?? [],
+            geometryReviewEntityIds: convertedReviewedObservation.multiViewGeometryReviewEntityIds ?? [],
+            groundEvidenceSourceIds: convertedReviewedObservation.groundEvidenceSourceIds,
+            derivedGroundPlacements: reviewedDerivedGroundPlacements,
+          });
+          finalObservation = reviewedObservation;
+          draft = reviewedDraft;
+          spatialReviewMetadata.accepted = true;
+          spatialReviewMetadata.qualityStatus = reviewedDraft.referenceCamera?.fitDiagnostics?.qualityStatus ?? "unavailable";
+          spatialReviewMetadata.rejectionReason = reviewedDraft.referenceCamera?.fitDiagnostics?.rejectionReason ?? null;
+        } else if (reviewResponse.ok && reviewData.observationFormat === "image-observations-v1" && !multiViewContract) {
           const reviewedObservation = mergeSpatialReview(observation, reviewData.spatialReviewPatch);
-          const reviewedDraft = imageObservationToLayoutDraft(reviewedObservation, primaryImage, { imageAspectRatio: primaryImage.aspectRatio });
+          const reviewedDraft = imageObservationToLayoutDraft(reviewedObservation, canonicalImage, {
+            ...(canonicalImage.aspectRatio ? { imageAspectRatio: canonicalImage.aspectRatio } : {}),
+          });
           finalObservation = reviewedObservation;
           draft = reviewedDraft;
           spatialReviewMetadata.accepted = true;
@@ -283,10 +393,23 @@ export async function requestReferenceLayout(
         };
       }
     }
+    if (draft.layoutResolution?.unresolved.length && draft.referenceCamera?.fitDiagnostics) draft.referenceCamera = {
+      ...draft.referenceCamera,
+      fitDiagnostics: { ...draft.referenceCamera.fitDiagnostics, qualityStatus: "needsReview" },
+    };
     const normalizedDraft = { ...draft, diagnosticGenerationId: generationId };
     recordNormalizedLayoutDraft(normalizedDraft, generationId, {
       observationFormat: data.observationFormat,
       visualObservations: finalObservation,
+      ...(finalMultiViewContract && canonicalFrame ? {
+        multiViewObservation: finalMultiViewContract,
+        sourceGroupKey,
+        frameSelection: { sourceId: canonicalFrame.sourceId, aspectRatio: aspectRatios[canonicalFrame.sourceId] ?? null, registrations: registerGroundViews(finalMultiViewContract, canonicalFrame).map((registration) => ({
+          sourceId: registration.sourceId,
+          registered: registration.registered,
+          ...(registration.registered ? { planeId: registration.planeId, inlierPointIds: registration.inlierPointIds, medianNormalizedCoordinateResidual: registration.medianNormalizedCoordinateResidual } : { reason: registration.reason }),
+        })) },
+      } : {}),
       ...(spatialReviewMetadata ? { spatialReview: spatialReviewMetadata } : {}),
     });
     return normalizedDraft;

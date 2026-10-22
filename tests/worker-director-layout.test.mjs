@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import { onRequest } from '../functions/api/[[path]].js';
-import { DIRECTOR_LAYOUT_OBSERVATION_FORMAT, DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT, DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS, directorLayoutSpatialReviewPatch, mergeDirectorLayoutSpatialReview, parseDirectorLayoutObservation, parseDirectorLayoutSpatialReview, summarizeDirectorLayoutObservationOutput } from '../functions/shared/director-layout-observations.js';
+import { DIRECTOR_LAYOUT_OBSERVATION_FORMAT, DIRECTOR_LAYOUT_OBSERVATION_FORMAT_V2, DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT, DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS, directorLayoutSpatialReviewPatch, mergeDirectorLayoutSpatialReview, parseDirectorLayoutObservation, parseDirectorLayoutSpatialReview, summarizeDirectorLayoutObservationOutput } from '../functions/shared/director-layout-observations.js';
 
 const origin = 'https://worker.test';
 const baseEnv = {
@@ -83,6 +83,7 @@ test('director-layout observation mode uses one model call and returns only boun
   assert.equal(response.status, 200);
   assert.equal(calls, 1);
   assert.equal(providerPayload.messages[0].role, 'system');
+  assert.deepEqual(providerPayload.response_format, { type: 'json_object' });
   const providerImages = providerPayload.messages[1].content.filter((part) => part.type === 'image_url');
   assert.deepEqual(providerImages.map((part) => part.image_url.url), [
     'data:image/png;base64,AA==', 'data:image/jpeg;base64,AQ==', 'data:image/webp;base64,Ag==',
@@ -129,11 +130,69 @@ test('director-layout observation mode uses one model call and returns only boun
   assert.equal(data.providerFinishReason, 'stop');
 });
 
+test('director-layout rejects valid-looking JSON when the provider says the V2 output was truncated', async (t) => {
+  const token = await login();
+  const validV2 = {
+    contractVersion: 'image-observations-v2', spaceType: 'open',
+    entities: [{ id: 'chair', kind: 'item', name: 'chair', semanticType: 'chair', category: 'chair', placement: 'floor', identityConfidence: 0.9, uncertain: false }],
+    views: [{ sourceId: 'view-a', entities: [{ entityId: 'chair', bbox: [0.1, 0.2, 0.5, 0.8], confidence: 0.9, visibility: 'visible', mainColor: '#555555' }] }],
+    relations: [],
+  };
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return Response.json({ choices: [{ finish_reason: 'length', message: { content: JSON.stringify(validV2) } }] });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const response = await call('/api/director-layout', {
+    method: 'POST', token, env: layoutEnv,
+    body: { outputFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT_V2, images: [{ id: 'view-a', sourceId: 'view-a', url: 'data:image/png;base64,AA==' }] },
+  });
+  assert.equal(calls, 1);
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error, 'DIRECTOR_LAYOUT_MODEL_OUTPUT_TRUNCATED');
+});
+
 test('image observation parser rejects unbounded arrays and malformed boxes', () => {
   assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({ surfaces: [], items: Array(31).fill({}) })), /结构无效/);
   assert.throws(() => parseDirectorLayoutObservation(JSON.stringify({
     surfaces: [], items: [{ id: 'bad', name: '物件', category: 'prop', bbox: [-1, 0, 0.2, 0.3], confidence: 0.8, visibility: 'visible' }],
   })), /对象无效/);
+});
+
+test('observation route rejects a closed-root JSON prefix followed by an out-of-root items field', async (t) => {
+  const token = await login();
+  let providerPayload;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    providerPayload = JSON.parse(String(options?.body));
+    return Response.json({
+      model: 'deepseek-flash',
+      choices: [{ finish_reason: 'stop', message: { content: '{"spaceType":"enclosed","geometryEvidence":{},"surfaces":[]},"items":[]}' } }],
+      usage: { total_tokens: 20 },
+    });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const response = await call('/api/director-layout', {
+    method: 'POST', token,
+    env: layoutEnv,
+    body: {
+      outputFormat: DIRECTOR_LAYOUT_OBSERVATION_FORMAT,
+      images: [
+        { id: 'room-main', sourceId: 'room-main', role: 'primary', url: 'data:image/png;base64,AA==' },
+        { id: 'room-side', sourceId: 'room-side', role: 'supplementary', url: 'data:image/jpeg;base64,AQ==' },
+      ],
+    },
+  });
+  assert.equal(response.status, 422);
+  assert.deepEqual(providerPayload.response_format, { type: 'json_object' });
+  const data = await response.json();
+  assert.equal(data.error, 'DIRECTOR_LAYOUT_MODEL_JSON_INVALID');
+  assert.equal(data.visualObservations, undefined);
+  assert.equal(data.providerOutputShape, undefined);
+  assert.ok(data.outputShape?.outputBytes > 0);
 });
 
 test('spatial review uses one bounded DeepSeek thinking call and only returns spatial patches for known identities', async (t) => {
@@ -173,6 +232,7 @@ test('spatial review uses one bounded DeepSeek thinking call and only returns sp
   assert.equal(response.status, 200);
   assert.equal(calls, 1);
   assert.equal(providerPayload.max_completion_tokens, DIRECTOR_LAYOUT_SPATIAL_REVIEW_MAX_COMPLETION_TOKENS);
+  assert.deepEqual(providerPayload.response_format, { type: 'json_object' });
   assert.deepEqual(providerPayload.thinking, { type: 'enabled' });
   assert.equal(providerPayload.reasoning_effort, 'max');
   assert.deepEqual(providerPayload.messages[1].content.filter((part) => part.type === 'image_url').map((part) => part.image_url.url), [
@@ -214,10 +274,44 @@ test('spatial review merges valid support references when base observations omit
   assert.equal(merged.items.find((item) => item.id === 'pillow').supportId, 'sofa');
 });
 
+test('relationship null clears one bounded scalar while omission preserves it and initial null means no relation', () => {
+  const base = {
+    surfaces: [{ id: 'wall', kind: 'wall', side: 'image_back', bbox: [0, 0, 1, 0.2], confidence: 0.9, visibility: 'visible' }],
+    items: [
+      { id: 'table', name: '桌', category: 'table', bbox: [0.2, 0.4, 0.6, 0.8], confidence: 0.9, visibility: 'visible', supportId: 'wall', partOfId: 'cabinet', againstSurfaceId: 'wall', contactWallSide: 'image_back' },
+      { id: 'cabinet', name: '柜', category: 'cabinet', bbox: [0.1, 0.2, 0.7, 0.9], confidence: 0.9, visibility: 'visible' },
+    ],
+  };
+  const initial = parseDirectorLayoutObservation(JSON.stringify({
+    ...base,
+    items: [{ ...base.items[0], supportId: null, partOfId: null, againstSurfaceId: null, contactWallSide: null }, base.items[1]],
+  }));
+  for (const field of ['supportId', 'partOfId', 'againstSurfaceId', 'contactWallSide']) {
+    assert.equal(Object.hasOwn(initial.items[0], field), false, `${field} null should normalize to no relation on initial observations`);
+  }
+
+  const omitted = mergeDirectorLayoutSpatialReview(base, { items: [{ id: 'table' }] });
+  assert.equal(omitted.items[0].supportId, 'wall');
+  assert.equal(omitted.items[0].partOfId, 'cabinet');
+  assert.equal(omitted.items[0].againstSurfaceId, 'wall');
+  assert.equal(omitted.items[0].contactWallSide, 'image_back');
+
+  const review = { surfaces: base.surfaces, items: [{ ...base.items[0], supportId: null, partOfId: null, againstSurfaceId: null, contactWallSide: null }, base.items[1]] };
+  const patch = directorLayoutSpatialReviewPatch(base, review);
+  assert.deepEqual(patch.items[0], { id: 'table', supportId: null, partOfId: null, againstSurfaceId: null, contactWallSide: null });
+  const cleared = mergeDirectorLayoutSpatialReview(base, patch);
+  for (const field of ['supportId', 'partOfId', 'againstSurfaceId', 'contactWallSide']) {
+    assert.equal(Object.hasOwn(cleared.items[0], field), false, `${field} should be cleared by explicit review null`);
+  }
+  assert.match(DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, /supportId、partOfId、againstSurfaceId、contactWallSide 输出 null 清除/);
+  assert.match(DIRECTOR_LAYOUT_OBSERVATION_SYSTEM_PROMPT, /首次识别时没有已有空间关系需要清除；该阶段关系字段的 null 与省略都表示未提供关系/);
+  assert.doesNotMatch(DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, /不要用 null 表达需要清除已有关系/);
+});
+
 test('spatial review requires complete identity lists, supports explicit array clearing, and only normalizes epsilon noise', () => {
   const base = { surfaces: [], items: [{ id: 'sofa', name: '沙发', category: 'sofa', bbox: [0.1, 0.2, 0.6, 0.8], confidence: 0.9, visibility: 'visible', groundFootprints: [{ outer: [[0.1, 0.7], [0.6, 0.7], [0.6, 0.9], [0.1, 0.9]], visibility: 'visible', confidence: 0.9 }] }] };
   assert.match(DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, /必须原样保留全部已知 surfaces\/items\/people 对象集合/);
-  assert.match(DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, /用空数组清除 groundFootprints/);
+  assert.match(DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, /数组 groundFootprints、groundContacts、occludesIds 仍用空数组清除/);
   assert.doesNotMatch(DIRECTOR_LAYOUT_SPATIAL_REVIEW_SYSTEM_PROMPT, /可只输出已知id的子集/);
   assert.deepEqual(directorLayoutSpatialReviewPatch(base, { surfaces: [], items: [{ ...base.items[0], groundFootprints: [] }] }).items, [{ id: 'sofa', groundFootprints: [] }]);
   assert.throws(() => directorLayoutSpatialReviewPatch(base, { surfaces: [], items: [] }), /IDENTITY_CHANGED/);

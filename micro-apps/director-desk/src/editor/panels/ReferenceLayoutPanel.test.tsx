@@ -35,6 +35,58 @@ const fixtureDraft = {
   }],
 };
 
+function v2ObservationResponse(init?: RequestInit) {
+  const request = JSON.parse(String(init?.body ?? "{}")) as { images?: Array<{ sourceId?: string }> };
+  const sourceIds = request.images?.map((image) => image.sourceId).filter((sourceId): sourceId is string => Boolean(sourceId)) ?? [];
+  const contract = {
+    contractVersion: "image-observations-v2",
+    spaceType: "unknown",
+    entities: [{
+      id: "sofa_01",
+      kind: "item",
+      name: "沙发（估计）",
+      semanticType: "sofa",
+      category: "sofa",
+      placement: "unknown",
+      identityConfidence: 0.82,
+      uncertain: true,
+    }],
+    views: sourceIds.map((sourceId) => ({
+      sourceId,
+      entities: [{
+        entityId: "sofa_01",
+        bbox: [0.2, 0.25, 0.7, 0.8],
+        confidence: 0.82,
+        visibility: "visible",
+        mainColor: "#806050",
+      }],
+    })),
+    relations: [],
+  };
+  return {
+    observationFormat: "image-observations-v2",
+    visualObservations: contract,
+    spatialReviewPatch: contract,
+  };
+}
+
+async function includeFirstAvailableReference(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: /^加入识别：/ }));
+}
+
+let panelTestSessionId = 0;
+
+function renderReferenceLayoutPanel(openSession = true) {
+  const rendered = render(<ReferenceLayoutPanel />);
+  if (openSession) {
+    panelTestSessionId += 1;
+    act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_SESSION_OPENED_EVENT, {
+      detail: { instanceId: `reference-layout-test-${panelTestSessionId}` },
+    })));
+  }
+  return rendered;
+}
+
 beforeEach(() => {
   localStorage.clear();
   useDirectorStore.setState({
@@ -52,6 +104,14 @@ beforeEach(() => {
     selectedCharacterId: null,
     hoveredCharacterId: null,
   });
+  class FailedImage {
+    onload: ((event: Event) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+    naturalWidth = 0;
+    naturalHeight = 0;
+    set src(_value: string) { queueMicrotask(() => this.onerror?.(new Event("error"))); }
+  }
+  vi.stubGlobal("Image", FailedImage);
   vi.stubGlobal("fetch", vi.fn(async () => ({
     ok: true,
     status: 200,
@@ -64,11 +124,49 @@ it("changes the private source fingerprint when the same reference node receives
   expect(getReferenceImageFingerprint(null)).toBe("missing");
 });
 
-it("selects a primary plus ordered supplementary images and sends one fused request", async () => {
+it("shows saved unresolved multi-view layout metadata when no source group is selected", () => {
+  const state = useDirectorStore.getState();
+  useDirectorStore.setState({
+    ...state,
+    project: {
+      ...state.project,
+      layoutBatches: [{
+        id: "saved-multiview-batch",
+        draftId: "saved-multiview-draft",
+        sourceId: "frame-source",
+        sourceFileName: "front.png",
+        sourceGroupKey: "source-a|source-b",
+        createdAt: new Date(0).toISOString(),
+        scale: { mode: "estimated", confidence: 0.45 },
+        objectIds: [],
+        layoutResolution: {
+          recognizedCount: 2,
+          locatedCount: 1,
+          unresolved: [{
+            entityId: "chair",
+            name: "椅子",
+            sourceId: "side-source",
+            sourceFileName: "side.png",
+            reason: "地面证据未配准，暂不生成位置。",
+          }],
+        },
+      }],
+    },
+  });
+
+  renderReferenceLayoutPanel();
+
+  const status = screen.getByRole("status", { name: "已应用布景的多视图定位状态" });
+  expect(status).toHaveTextContent("已识别 2 / 已定位 1 / 待定位 1");
+  expect(status).toHaveTextContent("椅子（side.png）：地面证据未配准，暂不生成位置。");
+  expect(screen.queryByRole("button", { name: "替换此生成批次" })).not.toBeInTheDocument();
+});
+
+it("selects equal-status reference views and sends one role-free V2 observation request", async () => {
   const user = userEvent.setup();
-  const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ draft: fixtureDraft }), { status: 200 }));
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify(v2ObservationResponse(init)), { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: { instanceId: "multi_image_panel", images: [
@@ -79,41 +177,30 @@ it("selects a primary plus ordered supplementary images and sends one fused requ
     }));
   });
   await screen.findByAltText("当前粗布景参考图");
-  await user.selectOptions(screen.getByRole("combobox", { name: "选择补充参考图" }), "side");
-  await user.click(screen.getByRole("button", { name: "添加补充图" }));
-  await user.selectOptions(screen.getByRole("combobox", { name: "选择补充参考图" }), "detail");
-  await user.click(screen.getByRole("button", { name: "添加补充图" }));
-  expect(screen.getByText("本次请求：图1主图 · 共 3/3 张")).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "设为主图：细节图.png" }));
-  expect(screen.getByText("图1 主图：细节图.png")).toBeInTheDocument();
-  expect(screen.getByText("本次请求：图1主图 · 共 3/3 张")).toBeInTheDocument();
-  expect(screen.getByText("图2 补充图：侧视图.png")).toBeInTheDocument();
-  expect(screen.getByText("图3 补充图：主图.png")).toBeInTheDocument();
-  const formerPrimaryRow = screen.getByText("图3 补充图：主图.png").parentElement;
-  expect(formerPrimaryRow).not.toBeNull();
-  await user.click(within(formerPrimaryRow as HTMLElement).getByRole("button", { name: "移除" }));
-  expect(screen.getByText("本次请求：图1主图 · 共 2/3 张")).toBeInTheDocument();
+  await user.selectOptions(screen.getByRole("combobox", { name: "添加识别参考图" }), "side");
+  await user.click(screen.getByRole("button", { name: "添加视图" }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "添加识别参考图" }), "detail");
+  await user.click(screen.getByRole("button", { name: "添加视图" }));
+  expect(screen.getByText("本次综合识别：共 3/3 张")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /设为主图|设为参考图/ })).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "生成粗布景" }));
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-  const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { images: Array<{ sourceId: string; role: string }>; image?: unknown };
-  expect(body.images.map(({ sourceId, role }) => [sourceId, role])).toEqual([
-    ["detail", "primary"],
-    ["side", "supplementary"],
-  ]);
+  await screen.findByRole("heading", { name: "待应用布景" });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { outputFormat: string; images: Array<{ sourceId: string; role?: string }>; image?: unknown };
+  expect(body.outputFormat).toBe("image-observations-v2");
+  expect(body.images.map(({ sourceId }) => sourceId).sort()).toEqual(["detail", "main", "side"]);
+  expect(body.images.every((image) => !Object.prototype.hasOwnProperty.call(image, "role"))).toBe(true);
   expect(body.image).toBeUndefined();
-  await user.click(screen.getByRole("button", { name: "设为主图：侧视图.png" }));
-  await waitFor(() => expect(screen.queryByRole("heading", { name: "待应用布景" })).not.toBeInTheDocument());
-  expect(screen.getByText("参考图组合已变化，旧草稿已清除，请重新识别")).toBeInTheDocument();
 });
 
 it("does not cancel an active request when an unselected connected-image candidate changes", async () => {
   const user = userEvent.setup();
-  let resolveFetch: ((response: Response) => void) | null = null;
+  const resolveFetches: Array<(response: Response) => void> = [];
   const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => new Promise<Response>((resolve) => {
-    resolveFetch = resolve;
+    resolveFetches.push(resolve);
   }));
   vi.stubGlobal("fetch", fetchMock);
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   const makeImages = (candidateUrl: string) => [
     { edgeId: "edge_main", sourceNodeId: "candidate_main", imageUrl: "data:image/png;base64,AA==", fileName: "main.png" },
     { edgeId: "edge_side", sourceNodeId: "candidate_side", imageUrl: "data:image/png;base64,AQ==", fileName: "side.png" },
@@ -122,8 +209,8 @@ it("does not cancel an active request when an unselected connected-image candida
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
     detail: { instanceId: "unused_candidate_change", images: makeImages("data:image/png;base64,Ag==") },
   })));
-  await user.selectOptions(await screen.findByRole("combobox", { name: "选择补充参考图" }), "candidate_side");
-  await user.click(screen.getByRole("button", { name: "添加补充图" }));
+  await user.selectOptions(await screen.findByRole("combobox", { name: "添加识别参考图" }), "candidate_side");
+  await user.click(screen.getByRole("button", { name: "添加视图" }));
   await user.click(screen.getByRole("button", { name: "生成粗布景" }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   const signal = fetchMock.mock.calls[0]?.[1]?.signal as AbortSignal;
@@ -134,29 +221,36 @@ it("does not cancel an active request when an unselected connected-image candida
 
   expect(signal.aborted).toBe(false);
   await act(async () => {
-    resolveFetch?.(new Response(JSON.stringify({ draft: fixtureDraft }), { status: 200 }));
+    const request = fetchMock.mock.calls[0]?.[1];
+    resolveFetches.shift()?.(new Response(JSON.stringify(v2ObservationResponse(request)), { status: 200 }));
+  });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  await act(async () => {
+    const request = fetchMock.mock.calls[1]?.[1];
+    resolveFetches.shift()?.(new Response(JSON.stringify(v2ObservationResponse(request)), { status: 200 }));
   });
   expect(await screen.findByRole("heading", { name: "待应用布景" })).toBeInTheDocument();
-  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
 it("clears the old draft and reference camera when a supplementary image is removed", async () => {
   const user = userEvent.setup();
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
     detail: { instanceId: "remove_supplement_camera", images: [
       { edgeId: "edge_main", sourceNodeId: "remove_main", imageUrl: "data:image/png;base64,AA==", fileName: "main.png" },
       { edgeId: "edge_side", sourceNodeId: "remove_side", imageUrl: "data:image/png;base64,AQ==", fileName: "side.png" },
     ] },
   })));
-  await user.selectOptions(await screen.findByRole("combobox", { name: "选择补充参考图" }), "remove_side");
-  await user.click(screen.getByRole("button", { name: "添加补充图" }));
+  await user.selectOptions(await screen.findByRole("combobox", { name: "添加识别参考图" }), "remove_side");
+  await user.click(screen.getByRole("button", { name: "添加视图" }));
+  vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify(v2ObservationResponse(init)), { status: 200 })));
   await user.click(screen.getByRole("button", { name: "生成粗布景" }));
   await screen.findByRole("heading", { name: "待应用布景" });
   await user.click(screen.getByTitle("按同一推断机位查看可编辑草稿"));
   expect(useDirectorStore.getState().referenceCameraPreview).not.toBeNull();
 
-  const supplementRow = screen.getByText("图2 补充图：side.png").parentElement;
+  const supplementRow = screen.getByText("视图 2：side.png").parentElement;
   expect(supplementRow).not.toBeNull();
   await user.click(within(supplementRow as HTMLElement).getByRole("button", { name: "移除" }));
 
@@ -167,7 +261,7 @@ it("clears the old draft and reference camera when a supplementary image is remo
 
 it("clears the old draft and reference camera when a selected supplementary URL changes", async () => {
   const user = userEvent.setup();
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   const baseImages = [
     { edgeId: "edge_main", sourceNodeId: "update_main", imageUrl: "data:image/png;base64,AA==", fileName: "main.png" },
     { edgeId: "edge_side", sourceNodeId: "update_side", imageUrl: "data:image/png;base64,AQ==", fileName: "side.png" },
@@ -175,8 +269,9 @@ it("clears the old draft and reference camera when a selected supplementary URL 
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
     detail: { instanceId: "update_supplement_camera", images: baseImages },
   })));
-  await user.selectOptions(await screen.findByRole("combobox", { name: "选择补充参考图" }), "update_side");
-  await user.click(screen.getByRole("button", { name: "添加补充图" }));
+  await user.selectOptions(await screen.findByRole("combobox", { name: "添加识别参考图" }), "update_side");
+  await user.click(screen.getByRole("button", { name: "添加视图" }));
+  vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify(v2ObservationResponse(init)), { status: 200 })));
   await user.click(screen.getByRole("button", { name: "生成粗布景" }));
   await screen.findByRole("heading", { name: "待应用布景" });
   await user.click(screen.getByTitle("按同一推断机位查看可编辑草稿"));
@@ -197,7 +292,7 @@ it("edits a controlled layout fixture in preview and commits it as one generated
   const user = userEvent.setup();
   const windowKeydown = vi.fn();
   window.addEventListener("keydown", windowKeydown);
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
 
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
@@ -252,7 +347,7 @@ it("shows and updates the effective appearance facing in the selected rotation f
     ? { ...component, appearance: { frontDirectionDegrees: 90 } }
     : component);
   vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ draft: { ...fixtureDraft, components } }) })));
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
     detail: { instanceId: "effective-facing", images: [{ edgeId: "facing", sourceNodeId: "facing", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "room.png" }] },
   })));
@@ -272,7 +367,7 @@ it("shows safe, user-facing explanations for spatial validation warnings", async
     status: 200,
     json: async () => ({ draft: { ...fixtureDraft, relations: [{ fromId: "wall_01", toId: "wall_01", type: "unknown", confidence: 0.9 }] } }),
   })));
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
     detail: { instanceId: "desk_warnings", images: [{ edgeId: "edge_warning", sourceNodeId: "image_warning", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "房间.png" }] },
   })));
@@ -291,7 +386,7 @@ it("keeps the inferred reference framing when applying from reference-camera pre
       referenceCamera: { projection: "perspective", position: [0, 2.1, 10], target: [0, 1.2, -2.8], fov: 48, confidence: 0.35, source: "model" },
     } }),
   })));
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: {
@@ -355,7 +450,7 @@ it("uses user-facing estimated-framing copy without exposing internal projection
       },
     } }),
   })));
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
     detail: { instanceId: "desk_estimated_copy", images: [{ edgeId: "edge_estimated_copy", sourceNodeId: "image_estimated_copy", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "寺庙.png" }] },
   })));
@@ -389,7 +484,7 @@ it("shows dominant per-object residuals when reference-camera fitting fails its 
       },
     } }),
   })));
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
     detail: { instanceId: "desk_residual_review", images: [{ edgeId: "edge_residual_review", sourceNodeId: "image_residual_review", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "reference.png" }] },
   })));
@@ -406,7 +501,7 @@ it("clears a reference preview when the source image or Director Desk instance c
     status: 200,
     json: async () => ({ draft: fixtureDraft }),
   })));
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
     detail: { instanceId: "desk_switch", images: [
       { edgeId: "edge_a", sourceNodeId: "image_a", imageUrl: "data:image/png;base64,AA==", fileName: "a.png" },
@@ -419,10 +514,9 @@ it("clears a reference preview when the source image or Director Desk instance c
   fireEvent.change(screen.getByRole("combobox", { name: "选择粗布景参考图" }), { target: { value: "image_b" } });
   expect(useDirectorStore.getState().referenceCameraPreview).toBeNull();
   expect(useDirectorStore.getState().viewMode).toBe("director");
-  await waitFor(() => expect(screen.queryByRole("heading", { name: "待应用布景" })).not.toBeInTheDocument());
-  expect(screen.getByText("参考图组合已变化，旧草稿已清除，请重新识别")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "待应用布景" })).toBeInTheDocument();
 
-  await user.click(screen.getByRole("button", { name: "生成粗布景" }));
+  await user.click(screen.getByRole("button", { name: "重新生成" }));
   await user.click(screen.getByTitle("按同一推断机位查看可编辑草稿"));
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_SESSION_OPENED_EVENT, { detail: { instanceId: "desk_next" } })));
   expect(useDirectorStore.getState().referenceCameraPreview).toBeNull();
@@ -437,7 +531,7 @@ it("clears reference preview on panel unmount", async () => {
     status: 200,
     json: async () => ({ draft: fixtureDraft }),
   })));
-  const { unmount } = render(<ReferenceLayoutPanel />);
+  const { unmount } = renderReferenceLayoutPanel();
   act(() => window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
     detail: { instanceId: "desk_unmount", images: [{ edgeId: "edge_unmount", sourceNodeId: "image_unmount", imageUrl: "data:image/png;base64,AA==", fileName: "unmount.png" }] },
   })));
@@ -477,7 +571,7 @@ it("requires measured scale values for pillar and prop while preserving legacy c
       },
     }),
   })));
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "temple.png" }] },
@@ -503,7 +597,7 @@ it("cancels an in-flight request without writing a draft or project objects", as
     options?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
   })));
   const user = userEvent.setup();
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "https://example.com/room.png", fileName: "room.png" }] },
@@ -521,7 +615,7 @@ it("cancels an in-flight request without writing a draft or project objects", as
 
 it("keeps or drops every uncertain component with the batch actions", async () => {
   const user = userEvent.setup();
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "room.png" }] },
@@ -554,7 +648,7 @@ it("keeps or drops every uncertain component with the batch actions", async () =
 
 it("scales the applied batch around its center from the adjust section", async () => {
   const user = userEvent.setup();
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "客厅参考图.png" }] },
@@ -592,7 +686,7 @@ it("scales the applied batch around its center from the adjust section", async (
 
 it("shows neutral category markers, hovers rows, focuses the viewport and snaps a floating component", async () => {
   const user = userEvent.setup();
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "room.png" }] },
@@ -657,7 +751,7 @@ it("shows the character section, edits a placeholder, and applies characters as 
     }),
   })));
   const user = userEvent.setup();
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "room.png" }] },
@@ -724,7 +818,7 @@ it("shows the character section, edits a placeholder, and applies characters as 
 });
 
 it("accepts a pasted screenshot or dropped file as the local reference image", async () => {
-  const { container } = render(<ReferenceLayoutPanel />);
+  const { container } = renderReferenceLayoutPanel();
   const pastedFile = new File([new Uint8Array([137, 80, 78, 71])], "pasted.png", { type: "image/png" });
   fireEvent.paste(document, { clipboardData: { files: [pastedFile] } });
 
@@ -741,7 +835,7 @@ it("accepts a pasted screenshot or dropped file as the local reference image", a
 
 it("opens the selected reference thumbnail with keyboard and closes the large viewer safely", async () => {
   const user = userEvent.setup();
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: {
@@ -797,7 +891,7 @@ it("lets a generated kneeling character switch between explicit kneel variants",
     }),
   })));
   const user = userEvent.setup();
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "temple.png" }] },
@@ -817,7 +911,7 @@ it("lets a generated kneeling character switch between explicit kneel variants",
 
 it("keeps a successful draft when the scene panel unmounts and discards it only from the explicit action", async () => {
   const user = userEvent.setup();
-  const view = render(<ReferenceLayoutPanel />);
+  const view = renderReferenceLayoutPanel();
   act(() => {
     window.dispatchEvent(new CustomEvent(DIRECTOR_DESK_REFERENCE_IMAGES_EVENT, {
       detail: { images: [{ edgeId: "e", sourceNodeId: "n", imageUrl: "data:image/png;base64,aGVsbG8=", fileName: "room.png" }] },
@@ -831,7 +925,7 @@ it("keeps a successful draft when the scene panel unmounts and discards it only 
   view.unmount();
   expect(useLayoutDraftPreviewStore.getState().draft).toEqual(generatedDraft);
 
-  render(<ReferenceLayoutPanel />);
+  renderReferenceLayoutPanel(false);
   expect(screen.getByRole("heading", { name: "待应用布景" })).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "丢弃草稿" }));
   expect(useLayoutDraftPreviewStore.getState().draft).toBeNull();

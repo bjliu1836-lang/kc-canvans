@@ -6,7 +6,7 @@ import type {
   DirectorObject,
   GeometryPrimitiveType,
 } from "./directorProject";
-import { resolveLayoutSemanticProfile } from "./layoutSemanticProfiles";
+import { isLayoutSemanticCategoryCompatible, resolveLayoutSemanticProfile } from "./layoutSemanticProfiles";
 import { deriveObservedAssemblyPrisms, getDefaultLayoutCategoryAssembly, getLayoutAssemblyUnitBoundsTransform } from "../canvas/layoutGeometryBounds";
 import { MANNEQUIN_POSE_PRESETS } from "../presets/mannequinPosePresets";
 import {
@@ -218,8 +218,11 @@ export interface LayoutDraftComponent {
     confidence: number;
     visibility: "visible" | "partial" | "occluded" | "uncertain";
     sourceId?: string;
+    sourceIds?: string[];
     hasPartComponents?: boolean;
   };
+  /** Multi-view ground evidence for a derived placement without a fabricated source bbox. */
+  derivedGroundEvidence?: { sourceId: string; sourceIds: string[] };
   /** Local asset registered from the confirmed single-object result; never a provider URL or capability. */
   generatedAssetRefId?: string;
   generatedAssetNeedsReview?: boolean;
@@ -240,6 +243,13 @@ export interface LayoutDraft {
   diagnosticGenerationId?: string;
   sourceId: string;
   sourceFileName: string;
+  /** Stable, order-independent identity of the complete selected input image group. */
+  sourceGroupKey?: string;
+  layoutResolution?: {
+    recognizedCount: number;
+    locatedCount: number;
+    unresolved: Array<{ entityId: string; name?: string; sourceId: string; sourceFileName?: string; reason: string }>;
+  };
   createdAt: string;
   scale: {
     mode: "estimated" | "anchored";
@@ -327,6 +337,27 @@ function isFiniteTuple3(value: unknown): value is [number, number, number] {
 function boundedString(value: unknown, fallback: string, maxLength = 80) {
   const text = typeof value === "string" ? value.trim() : "";
   return (text || fallback).slice(0, maxLength);
+}
+
+function normalizeLayoutResolution(raw: unknown): LayoutDraft["layoutResolution"] | undefined {
+  if (!isRecord(raw) || !Number.isInteger(raw.recognizedCount) || !Number.isInteger(raw.locatedCount)
+    || (raw.recognizedCount as number) < 0 || (raw.recognizedCount as number) > 38
+    || (raw.locatedCount as number) < 0 || (raw.locatedCount as number) > (raw.recognizedCount as number)
+    || !Array.isArray(raw.unresolved) || raw.unresolved.length > (raw.recognizedCount as number)
+    || (raw.locatedCount as number) + raw.unresolved.length !== raw.recognizedCount) return undefined;
+  const unresolved: NonNullable<LayoutDraft["layoutResolution"]>["unresolved"] = [];
+  for (const item of raw.unresolved) {
+    if (!isRecord(item) || typeof item.entityId !== "string" || !item.entityId.trim() || item.entityId.length > 48
+      || typeof item.sourceId !== "string" || !item.sourceId.trim() || item.sourceId.length > 128
+      || typeof item.reason !== "string" || !item.reason.trim() || item.reason.length > 200
+      || (item.name !== undefined && (typeof item.name !== "string" || item.name.length > 80))
+      || (item.sourceFileName !== undefined && (typeof item.sourceFileName !== "string" || item.sourceFileName.length > 160))) return undefined;
+    unresolved.push({ entityId: item.entityId, sourceId: item.sourceId, reason: item.reason,
+      ...(typeof item.name === "string" ? { name: item.name } : {}),
+      ...(typeof item.sourceFileName === "string" ? { sourceFileName: item.sourceFileName } : {}),
+    });
+  }
+  return { recognizedCount: raw.recognizedCount as number, locatedCount: raw.locatedCount as number, unresolved };
 }
 
 function normalizeLayoutAppearance(raw: unknown, fallbackDirection: number): LayoutDraftComponent["appearance"] {
@@ -1517,7 +1548,7 @@ function resolveLayoutSupportGraph(
 export function validateLayoutDraftCandidate(
   candidate: unknown,
   source: LayoutDraftSource,
-  options: { draftId?: string; createdAt?: string; imageAspectRatio?: number } = {}
+  options: { draftId?: string; createdAt?: string; imageAspectRatio?: number; sourceGroupKey?: string; layoutResolution?: LayoutDraft["layoutResolution"] } = {}
 ): LayoutDraft {
   let parsed: unknown;
   try {
@@ -1568,9 +1599,10 @@ export function validateLayoutDraftCandidate(
     const groundFootprint = normalizeGroundFootprint(raw.groundFootprint);
     const semanticProfile = resolveLayoutSemanticProfile(semanticType, semanticType ? undefined : boundedString(raw.name, "", 80));
     // Legacy draft producers used "prop" as a broad bucket while relying on
-    // semanticType for detailed assemblies. Observation conversion handles
-    // explicit category conflicts by supplying a bounded neutral assembly.
-    const semanticCategoryConflict = Boolean(semanticProfile && semanticProfile.category !== category && category !== "prop");
+    // semanticType for detailed assemblies. Image observations resolve known
+    // identities to an effective geometry category before draft normalization;
+    // manual and historical drafts retain their persisted category and assembly.
+    const semanticCategoryConflict = Boolean(semanticProfile && category !== "prop" && !isLayoutSemanticCategoryCompatible(semanticProfile, category as DirectorLayoutCategory));
     const assembly = normalizedAssembly
       ?? (semanticCategoryConflict ? undefined : buildSemanticLayoutAssembly(semanticProfile?.canonicalType ?? semanticType));
     const renderAssembly = assembly ?? getDefaultLayoutCategoryAssembly(String(category), boundedString(raw.name, "", 80), primitive === "cylinder" ? "cylinder" : "box");
@@ -1579,6 +1611,7 @@ export function validateLayoutDraftCandidate(
       ? boundedString(raw.supportComponentId, "", 48).replace(/[^a-zA-Z0-9_-]/g, "_") || undefined
       : undefined;
     const sourceEvidence = isRecord(raw.sourceImageEvidence) ? raw.sourceImageEvidence : undefined;
+    const derivedEvidence = isRecord(raw.derivedGroundEvidence) ? raw.derivedGroundEvidence : undefined;
     const sourceBbox = sourceEvidence && Array.isArray(sourceEvidence.bbox)
       && sourceEvidence.bbox.length === 4
       && sourceEvidence.bbox.every((value) => typeof value === "number" && Number.isFinite(value))
@@ -1649,8 +1682,14 @@ export function validateLayoutDraftCandidate(
           confidence: Math.max(0, Math.min(1, sourceEvidenceConfidence)),
           visibility: sourceEvidenceVisibility as "visible" | "partial" | "occluded" | "uncertain",
           ...(typeof sourceEvidence?.sourceId === "string" && sourceEvidence.sourceId.length <= 128 ? { sourceId: sourceEvidence.sourceId } : {}),
+          ...(Array.isArray(sourceEvidence?.sourceIds) ? { sourceIds: sourceEvidence.sourceIds.filter((id): id is string => typeof id === "string" && id.length <= 128).slice(0, 3) } : {}),
           ...(sourceEvidence?.hasPartComponents === true ? { hasPartComponents: true } : {}),
         } }
+        : {}),
+      ...(typeof derivedEvidence?.sourceId === "string" && derivedEvidence.sourceId.length <= 128
+        ? { derivedGroundEvidence: { sourceId: derivedEvidence.sourceId, sourceIds: Array.isArray(derivedEvidence.sourceIds)
+          ? [...new Set(derivedEvidence.sourceIds.filter((id): id is string => typeof id === "string" && id.length <= 128))].slice(0, 3)
+          : [derivedEvidence.sourceId] } }
         : {}),
       ...(generatedAssetRefId ? { generatedAssetRefId, generatedAssetNeedsReview: raw.generatedAssetNeedsReview !== false } : {}),
       ...(generatedAssetState && !generatedAssetRefId ? { generatedAssetState } : {}),
@@ -1705,6 +1744,8 @@ export function validateLayoutDraftCandidate(
     id: options.draftId ?? `draft_${Date.now().toString(36)}`,
     sourceId: boundedString(source.sourceId, "local-reference", 128),
     sourceFileName: boundedString(source.fileName, "参考图", 160),
+    ...(typeof options.sourceGroupKey === "string" ? { sourceGroupKey: options.sourceGroupKey } : {}),
+    ...(normalizeLayoutResolution(options.layoutResolution) ? { layoutResolution: normalizeLayoutResolution(options.layoutResolution) } : {}),
     createdAt: options.createdAt ?? new Date().toISOString(),
     scale: {
       mode: "estimated",
@@ -1880,6 +1921,9 @@ export function buildLayoutBatch(
         batchId,
         draftId: draft.id,
         sourceId: draft.sourceId,
+        ...(draft.sourceGroupKey ? { sourceGroupKey: draft.sourceGroupKey } : {}),
+        ...(component.sourceImageEvidence?.sourceId ?? component.derivedGroundEvidence?.sourceId ? { evidenceSourceId: component.sourceImageEvidence?.sourceId ?? component.derivedGroundEvidence?.sourceId } : {}),
+        ...(component.sourceImageEvidence?.sourceIds?.length || component.derivedGroundEvidence?.sourceIds.length ? { groundEvidenceSourceIds: [...(component.sourceImageEvidence?.sourceIds ?? component.derivedGroundEvidence?.sourceIds ?? [])] } : {}),
         sourceFileName: draft.sourceFileName,
         componentId: component.id,
         category: component.category,
@@ -1945,6 +1989,8 @@ export function buildLayoutBatch(
       scale: { ...draft.scale },
       objectIds: allObjects.map((object) => object.id),
       referenceCamera: { ...getLayoutDraftReferenceCamera(draft) },
+      ...(draft.sourceGroupKey ? { sourceGroupKey: draft.sourceGroupKey } : {}),
+      ...(draft.layoutResolution ? { layoutResolution: JSON.parse(JSON.stringify(draft.layoutResolution)) } : {}),
     },
   };
 }
