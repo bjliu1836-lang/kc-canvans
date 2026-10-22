@@ -2,7 +2,7 @@
 
 ## 统一多视图合同改造（2026-10-21）
 
-状态：实现与本地验证完成；本轮依用户明确授权提交并推送至 `origin/main`，不部署。独立记录本轮统一多视图改造；人工基线与原始工作区状态位于本文指定artifact目录。禁止真实 provider 请求及 HF/GPU 调用。
+状态：实现与本地验证完成；功能提交 `6263ad3c09a9ec0cd612e000dba0af0a1389f4fe` 已推送至 `origin/main`，推送后fetch确认远端与本地HEAD一致；未部署。独立记录本轮统一多视图改造；人工基线与原始工作区状态位于本文指定artifact目录。禁止真实 provider 请求及 HF/GPU 调用。
 
 ### 执行清单
 
@@ -44,5 +44,6 @@
 - 浏览器Smoke使用5175真实入口和真实UI点击上传/生成/应用，API由离线mock响应；mock让第二图独见椅子因缺少可靠注册保留为待定位。1600×1000同机位截图对比新批次逐ID位置/尺寸/Y旋转/可见性，2/2匹配；刷新后通过现有`useDirectorStore.openSceneInspector`打开场景检查器，已恢复批次“已识别2/已定位1/待定位1”及`椅子（browser-view-side.png）`原因。开场景检查器这一步为程序调用；空白canvas点击已尝试但未切换面板。页面资源404仅是`/favicon.ico`。完整结果与边界见`artifacts/unified-multiview-layout-contract-2026-10-21/browser-smoke-v2.json`、`browser-preview.png`、`browser-applied.png`、`browser-applied-reloaded.png`及`logs/browser-smoke-final-2026-10-22.txt`。
 - 标准root `npm run build`在隔离的精确源码副本中成功，避免覆盖主工作区已dirty的`public/director-desk`；摘要与warning见`logs/isolated-root-build-2026-10-22.txt`。root build输出仅有大chunk警告。原入口5175监听PID 28968保持不变。全部改动通过`git diff --check`。
 - 真实VLM调用未进行；浏览器mock和fixture只验证合同链路、未定位提示、持久化数据与应用变换一致性，不能证明真实多图身份判别精度或完整空间还原。mesh实际交叉与整房视觉质量未测；应用比较只断言新批次position/size/Y rotation/visible，不代表原场景全对象完全一致。地面融合仅在显式对应点满足安全门限时运行；未注册的独见实体必须保持待定位。
+- Git交付：功能提交 `6263ad3c09a9ec0cd612e000dba0af0a1389f4fe` 推送到 `https://github.com/bjliu1836-lang/kc-canvans.git` 的 `main`；没有force push。提交只含本任务白名单23个文件，精确清单、排除项及验证链接记录在未提交artifact `logs/staged-scope-manifest-2026-10-22.json`。提交后主工作区保留原有package-lock、public生成物、directorStore测试、SOP和其他历史dirty，未加入提交；5175进程PID 28968保持运行。
 
 \n
