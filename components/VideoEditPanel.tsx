@@ -476,16 +476,19 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     event.stopPropagation();
     if (!duration) return;
     if (segmentMode) {
-      // 选区内部按下 = 仅移动播放头（scrub），永不重画选区；选区外才允许拖拽新建
+      // 选区内部按下 = 仅移动播放头（scrub）；选区外只记录起点，画区间全程不带动播放头
       const time = clientXToTime(event.clientX);
       const inCommittedRange = Boolean(segmentRange && time >= segmentRange.startSeconds && time <= segmentRange.endSeconds);
       setIsTimelineDragging(true);
       event.currentTarget.setPointerCapture(event.pointerId);
-      if (!inCommittedRange) {
+      if (inCommittedRange) {
+        seekTo(time, false);
+      } else {
+        videoRef.current?.pause();
+        setIsPlaying(false);
         // 超过位移阈值才算"拖拽选段"，否则视为单击定位播放头（保留已固定选区）
         pendingSelectRef.current = { anchorTime: time, clientX: event.clientX };
       }
-      seekTo(time, false);
       return;
     }
     if (!confirmSeek()) return;
@@ -505,9 +508,13 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
         if (Math.abs(event.clientX - pending.clientX) < 4) return;
         setSegmentDraft({ anchorTime: pending.anchorTime, currentTime: time, kind: 'select' });
         pendingSelectRef.current = null;
-      } else {
-        setSegmentDraft(previous => (previous ? { ...previous, currentTime: time } : previous));
+        return;
       }
+      if (segmentDraft) {
+        setSegmentDraft(previous => (previous ? { ...previous, currentTime: time } : previous));
+        return;
+      }
+      // 只有选区内部 scrub 才移动播放头
       seekTo(time, false);
       return;
     }
@@ -516,8 +523,14 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
 
   const handleTimelinePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
     if (segmentMode && isTimelineDragging) {
-      if (segmentDraft) finalizeSegmentDraft();
+      const pending = pendingSelectRef.current;
       pendingSelectRef.current = null;
+      if (segmentDraft) {
+        finalizeSegmentDraft();
+      } else if (pending) {
+        // 纯单击（未超过拖拽阈值）：定位播放头；画区间结束则不动播放头
+        seekTo(clientXToTime(event.clientX), false);
+      }
     }
     setIsTimelineDragging(false);
     updateTimelineHover(event);
@@ -534,7 +547,6 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     setSegmentDraft({ anchorTime: fixed, currentTime: time, kind: 'trim' });
     setIsTimelineDragging(true);
     event.currentTarget.setPointerCapture(event.pointerId);
-    seekTo(time, false);
   };
 
   const handleTrimPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -543,7 +555,6 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     event.stopPropagation();
     const time = Math.max(0, Math.min(duration, clientXToTime(event.clientX)));
     setSegmentDraft(previous => (previous ? { ...previous, currentTime: time } : previous));
-    seekTo(time, false);
   };
 
   const handleTrimPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
