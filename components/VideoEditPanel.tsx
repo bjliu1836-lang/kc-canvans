@@ -124,6 +124,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const rectBaseRef = useRef<ImageData | null>(null);
   const rectMaskBaseRef = useRef<ImageData | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const pendingSelectRef = useRef<{ anchorTime: number; clientX: number } | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
@@ -482,8 +483,9 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     event.stopPropagation();
     if (!duration) return;
     if (segmentMode) {
+      // 先按住不动：超过位移阈值才算"拖拽选段"，否则视为单击定位播放头（保留已固定选区）
       const time = clientXToTime(event.clientX);
-      setSegmentDraft({ anchorTime: time, currentTime: time });
+      pendingSelectRef.current = { anchorTime: time, clientX: event.clientX };
       setIsTimelineDragging(true);
       event.currentTarget.setPointerCapture(event.pointerId);
       seekTo(time, false);
@@ -501,7 +503,14 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     if (!isTimelineDragging) return;
     if (segmentMode) {
       const time = clientXToTime(event.clientX);
-      setSegmentDraft(previous => (previous ? { ...previous, currentTime: time } : previous));
+      const pending = pendingSelectRef.current;
+      if (pending) {
+        if (Math.abs(event.clientX - pending.clientX) < 4) return;
+        setSegmentDraft({ anchorTime: pending.anchorTime, currentTime: time });
+        pendingSelectRef.current = null;
+      } else {
+        setSegmentDraft(previous => (previous ? { ...previous, currentTime: time } : previous));
+      }
       seekTo(time, false);
       return;
     }
@@ -509,9 +518,42 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   };
 
   const handleTimelinePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (segmentMode && isTimelineDragging) finalizeSegmentDraft();
+    if (segmentMode && isTimelineDragging) {
+      if (segmentDraft) finalizeSegmentDraft();
+      pendingSelectRef.current = null;
+    }
     setIsTimelineDragging(false);
     updateTimelineHover(event);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  const handleTrimPointerDown = (edge: 'start' | 'end') => (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!segmentRange || !duration) return;
+    pendingSelectRef.current = null;
+    const fixed = edge === 'start' ? segmentRange.endSeconds : segmentRange.startSeconds;
+    const time = Math.max(0, Math.min(duration, clientXToTime(event.clientX)));
+    setSegmentDraft({ anchorTime: fixed, currentTime: time });
+    setIsTimelineDragging(true);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    seekTo(time, false);
+  };
+
+  const handleTrimPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!segmentDraft) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const time = Math.max(0, Math.min(duration, clientXToTime(event.clientX)));
+    setSegmentDraft(previous => (previous ? { ...previous, currentTime: time } : previous));
+    seekTo(time, false);
+  };
+
+  const handleTrimPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (segmentDraft) finalizeSegmentDraft();
+    setIsTimelineDragging(false);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
@@ -869,21 +911,21 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
             {segmentMode && (
               <div className="mt-1 flex items-center justify-between gap-3 text-[11px]">
                 <span className={isDark ? 'text-[#B9BAFF]' : 'text-[#4446CE]'}>
-                  片段编辑中：在时间轴上拖拽选取要重生成的区间
+                  拖拽空白选取区间 · 拖动两端手柄微调头尾 · 单击定位播放头
                   {duration > 20 && <span className={isDark ? 'ml-2 text-amber-400' : 'ml-2 text-amber-600'}>视频超过 20 秒，区间重生成稳定性可能下降</span>}
                 </span>
                 <span className={`shrink-0 tabular-nums ${mutedText}`}>
                   {segmentDraft
                     ? `${formatTimelineTime(Math.min(segmentDraft.anchorTime, segmentDraft.currentTime))} → ${formatTimelineTime(Math.max(segmentDraft.anchorTime, segmentDraft.currentTime))}`
                     : segmentRange
-                      ? `已选 ${segmentRange.startSeconds}-${segmentRange.endSeconds} 秒 · 重新拖拽可修改`
+                      ? `已选 ${segmentRange.startSeconds}-${segmentRange.endSeconds} 秒`
                       : '尚未选取'}
                 </span>
               </div>
             )}
             <div
               ref={timelineRef}
-              className="relative mt-1 h-[72px] cursor-none touch-none select-none"
+              className="relative mt-1 h-[64px] cursor-none touch-none select-none"
               onPointerDown={handleTimelinePointerDown}
               onPointerEnter={updateTimelineHover}
               onPointerMove={handleTimelinePointerMove}
@@ -891,14 +933,16 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
               onPointerCancel={handleTimelinePointerUp}
               onPointerLeave={() => setTimelineHover(null)}
             >
-              <div className="absolute inset-x-0 top-0 flex justify-between">
+              <div className="absolute inset-x-0 top-0 flex h-2 items-end justify-between">
                 {timelineTicks.map(tick => (
-                  <div key={tick.key} className={`h-3 w-px ${isDark ? 'bg-zinc-500' : 'bg-zinc-400/70'}`} />
+                  <div key={tick.key} className={`h-1.5 w-px ${isDark ? 'bg-zinc-500' : 'bg-zinc-400/70'}`} />
                 ))}
               </div>
-              <div className="absolute inset-x-0 top-2 flex justify-between">
-                {Array.from({ length: Math.max(20, timelineTickCount * 8) }).map((_, index) => (
-                  <div key={index} className={`h-1.5 w-px ${isDark ? 'bg-zinc-700' : 'bg-zinc-300/80'}`} />
+              <div className={`absolute inset-x-0 top-3 bottom-0 flex items-stretch overflow-hidden rounded-md ${isDark ? 'bg-zinc-800' : 'bg-zinc-200'}`}>
+                {timelineThumbnails.length > 0 ? timelineThumbnails.map(thumbnail => (
+                  <img key={`${thumbnail.time}-${thumbnail.url}`} src={thumbnail.url} className="h-full min-w-0 flex-1 object-cover" alt="" draggable={false} />
+                )) : Array.from({ length: 12 }).map((_, index) => (
+                  <div key={index} className={`h-full flex-1 ${isDark ? 'bg-zinc-800' : 'bg-zinc-200'}`} />
                 ))}
               </div>
               {(segmentDraft || segmentRange) && duration > 0 && (() => {
@@ -910,27 +954,51 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                   : segmentRange!.endSeconds;
                 const leftPct = Math.max(0, Math.min(100, startSec / duration * 100));
                 const widthPct = Math.max(0.5, Math.min(100 - leftPct, (endSec - startSec) / duration * 100));
+                const showHandles = segmentMode && !segmentDraft;
+                const handleClass = `pointer-events-auto absolute inset-y-0 z-20 flex w-[10px] cursor-ew-resize items-center justify-center ${isDark ? 'bg-[#8F91F4] hover:bg-[#B9BAFF]' : 'bg-[#4446CE] hover:bg-[#5b5de0]'}`;
+                const handleGrip = (
+                  <span className="flex items-center gap-[2px]">
+                    <span className={`h-4 w-px ${isDark ? 'bg-zinc-900/70' : 'bg-white/80'}`} />
+                    <span className={`h-4 w-px ${isDark ? 'bg-zinc-900/70' : 'bg-white/80'}`} />
+                  </span>
+                );
                 return (
                   <div
-                    className={`pointer-events-none absolute top-0 z-10 h-[66px] rounded-md border ${segmentDraft ? 'border-dashed' : ''} ${isDark ? 'border-[#8F91F4] bg-[#4446CE]/30' : 'border-[#4446CE] bg-[#4446CE]/20'}`}
+                    className={`pointer-events-none absolute top-3 bottom-0 z-10 ${segmentDraft ? 'border border-dashed' : 'border-2'} ${isDark ? 'border-[#8F91F4] bg-[#4446CE]/25' : 'border-[#4446CE] bg-[#4446CE]/15'}`}
                     style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-                  />
+                  >
+                    {showHandles && (
+                      <div
+                        className={`${handleClass} -left-[5px] rounded-l-[3px]`}
+                        title="拖动调整片段起点"
+                        onPointerDown={handleTrimPointerDown('start')}
+                        onPointerMove={handleTrimPointerMove}
+                        onPointerUp={handleTrimPointerUp}
+                        onPointerCancel={handleTrimPointerUp}
+                      >
+                        {handleGrip}
+                      </div>
+                    )}
+                    {showHandles && (
+                      <div
+                        className={`${handleClass} -right-[5px] rounded-r-[3px]`}
+                        title="拖动调整片段终点"
+                        onPointerDown={handleTrimPointerDown('end')}
+                        onPointerMove={handleTrimPointerMove}
+                        onPointerUp={handleTrimPointerUp}
+                        onPointerCancel={handleTrimPointerUp}
+                      >
+                        {handleGrip}
+                      </div>
+                    )}
+                  </div>
                 );
               })()}
               <div
-                className={`absolute top-0 z-20 h-[66px] w-0.5 rounded-full ${isDark ? 'bg-white' : 'bg-black'}`}
+                className={`absolute top-0 bottom-0 z-30 w-0.5 rounded-full ${isDark ? 'bg-white' : 'bg-black'}`}
                 style={{ left: `calc(${timelineProgress}% - 1px)` }}
               >
-                <span className={`absolute -left-[3px] -top-1 h-2.5 w-2.5 rounded-full ${isDark ? 'bg-white' : 'bg-black'}`} />
-              </div>
-              <div className="absolute inset-x-0 bottom-0 flex h-10 items-center gap-1 overflow-hidden rounded-lg">
-                {timelineThumbnails.length > 0 ? timelineThumbnails.map(thumbnail => (
-                  <div key={`${thumbnail.time}-${thumbnail.url}`} className={`h-10 flex-1 overflow-hidden rounded-md ring-1 ${isDark ? 'bg-zinc-800 ring-zinc-700' : 'bg-zinc-200 ring-white'}`}>
-                    <img src={thumbnail.url} className="h-full w-full object-cover" alt="" draggable={false} />
-                  </div>
-                )) : Array.from({ length: 12 }).map((_, index) => (
-                  <div key={index} className={`h-10 flex-1 rounded-md ${isDark ? 'bg-zinc-800' : 'bg-zinc-200'}`} />
-                ))}
+                <span className={`absolute -left-[3px] -top-0.5 h-2.5 w-2.5 rounded-full ${isDark ? 'bg-white' : 'bg-black'}`} />
               </div>
               {timelineHover && (
                 <svg
