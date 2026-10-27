@@ -414,14 +414,21 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     if (!segmentRange || segmentChipAdded) return;
     const id = `video-edit-segment-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const { startSeconds, endSeconds } = segmentRange;
-    // 只插入片段变量 chip，不改提示词文本；发送时 chip 在 offset 处序列化为 "X-Y 秒" 规范时间区间
+    // 模板骨架保留，仅把时间轴位置留空由变量 chip 占位：
+    // 渲染为「编辑任务：把@视频1 中[片段 4-6秒]的 [原内容] 改为 [新内容]，其余内容不要变化，…」
+    // 发送时 chip 在该 offset 处展开为「4-6 秒」纯文字，拼成完整模板
+    const templatePrefix = '编辑任务：把@视频1 中';
+    const templateSuffix = '的 [原内容] 改为 [新内容]，其余内容不要变化，保持原有光照、构图、运镜、人物身份与音频不变。';
+    const baseOffset = prompt ? prompt.length + 1 : 0;
+    const template = `${templatePrefix}${templateSuffix}`;
+    setPrompt(previous => (previous ? `${previous}\n${template}` : template));
     setReferences(previous => [...previous, {
       id,
       sourceNodeId: id,
       type: 'video',
       url: videoSrc,
       title: `片段 ${startSeconds}-${endSeconds}秒`,
-      offset: prompt.length,
+      offset: baseOffset + templatePrefix.length,
     }]);
     setSegmentChipId(id);
     setError('');
@@ -1087,7 +1094,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
               onReferencesChange={setReferences}
               inputMedia={promptInputMedia}
               mode="omni"
-              placeholder="描述要做的修改，例如：消除画面右侧的路人、将桌上的水杯替换为一束红玫瑰；用「片段编辑」选取时段后点「添加片段」，时间区间会作为变量插入提示词"
+              placeholder="描述要做的修改，例如：消除画面右侧的路人、将桌上的水杯替换为一束红玫瑰；用「片段编辑」选取时段后点「添加片段」，自动生成编辑指令模板，时间区间以变量插入"
               isDark={isDark}
               allowExpand={true}
               referenceHint="关键帧与片段变量会随提示词一起发送；可输入 @ 再次引用已添加的变量"
