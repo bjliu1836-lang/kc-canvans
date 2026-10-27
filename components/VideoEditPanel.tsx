@@ -145,7 +145,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const [isSending, setIsSending] = useState(false);
   const [segmentMode, setSegmentMode] = useState(false);
   const [segmentRange, setSegmentRange] = useState<VideoEditTimeRange | null>(null);
-  const [segmentDraft, setSegmentDraft] = useState<{ anchorTime: number; currentTime: number } | null>(null);
+  const [segmentDraft, setSegmentDraft] = useState<{ anchorTime: number; currentTime: number; kind: 'select' | 'trim' } | null>(null);
   const [segmentChipId, setSegmentChipId] = useState<string | null>(null);
 
   const mutedText = isDark ? 'text-zinc-400' : 'text-gray-500';
@@ -483,11 +483,15 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     event.stopPropagation();
     if (!duration) return;
     if (segmentMode) {
-      // 先按住不动：超过位移阈值才算"拖拽选段"，否则视为单击定位播放头（保留已固定选区）
+      // 选区内部按下 = 仅移动播放头（scrub），永不重画选区；选区外才允许拖拽新建
       const time = clientXToTime(event.clientX);
-      pendingSelectRef.current = { anchorTime: time, clientX: event.clientX };
+      const inCommittedRange = Boolean(segmentRange && time >= segmentRange.startSeconds && time <= segmentRange.endSeconds);
       setIsTimelineDragging(true);
       event.currentTarget.setPointerCapture(event.pointerId);
+      if (!inCommittedRange) {
+        // 超过位移阈值才算"拖拽选段"，否则视为单击定位播放头（保留已固定选区）
+        pendingSelectRef.current = { anchorTime: time, clientX: event.clientX };
+      }
       seekTo(time, false);
       return;
     }
@@ -506,7 +510,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
       const pending = pendingSelectRef.current;
       if (pending) {
         if (Math.abs(event.clientX - pending.clientX) < 4) return;
-        setSegmentDraft({ anchorTime: pending.anchorTime, currentTime: time });
+        setSegmentDraft({ anchorTime: pending.anchorTime, currentTime: time, kind: 'select' });
         pendingSelectRef.current = null;
       } else {
         setSegmentDraft(previous => (previous ? { ...previous, currentTime: time } : previous));
@@ -534,7 +538,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     pendingSelectRef.current = null;
     const fixed = edge === 'start' ? segmentRange.endSeconds : segmentRange.startSeconds;
     const time = Math.max(0, Math.min(duration, clientXToTime(event.clientX)));
-    setSegmentDraft({ anchorTime: fixed, currentTime: time });
+    setSegmentDraft({ anchorTime: fixed, currentTime: time, kind: 'trim' });
     setIsTimelineDragging(true);
     event.currentTarget.setPointerCapture(event.pointerId);
     seekTo(time, false);
@@ -911,7 +915,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
             {segmentMode && (
               <div className="mt-1 flex items-center justify-between gap-3 text-[11px]">
                 <span className={isDark ? 'text-[#B9BAFF]' : 'text-[#4446CE]'}>
-                  拖拽空白选取区间 · 拖动两端手柄微调头尾 · 单击定位播放头
+                  选区外拖拽新建区间 · 拖动两端手柄微调头尾 · 单击定位播放头
                   {duration > 20 && <span className={isDark ? 'ml-2 text-amber-400' : 'ml-2 text-amber-600'}>视频超过 20 秒，区间重生成稳定性可能下降</span>}
                 </span>
                 <span className={`shrink-0 tabular-nums ${mutedText}`}>
@@ -955,42 +959,36 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                 const leftPct = Math.max(0, Math.min(100, startSec / duration * 100));
                 const widthPct = Math.max(0.5, Math.min(100 - leftPct, (endSec - startSec) / duration * 100));
                 const showHandles = segmentMode && !segmentDraft;
-                const handleClass = `pointer-events-auto absolute inset-y-0 z-20 flex w-[10px] cursor-ew-resize items-center justify-center ${isDark ? 'bg-[#8F91F4] hover:bg-[#B9BAFF]' : 'bg-[#4446CE] hover:bg-[#5b5de0]'}`;
-                const handleGrip = (
-                  <span className="flex items-center gap-[2px]">
-                    <span className={`h-4 w-px ${isDark ? 'bg-zinc-900/70' : 'bg-white/80'}`} />
-                    <span className={`h-4 w-px ${isDark ? 'bg-zinc-900/70' : 'bg-white/80'}`} />
-                  </span>
+                const isSketching = segmentDraft?.kind === 'select';
+                const renderTrimHandle = (edge: 'start' | 'end') => (
+                  <div
+                    className={`pointer-events-auto absolute inset-y-0 z-20 flex w-4 cursor-ew-resize items-center justify-center ${edge === 'start' ? '-left-[8px]' : '-right-[8px]'}`}
+                    title={edge === 'start' ? '拖动调整片段起点' : '拖动调整片段终点'}
+                    onPointerDown={handleTrimPointerDown(edge)}
+                    onPointerMove={handleTrimPointerMove}
+                    onPointerUp={handleTrimPointerUp}
+                    onPointerCancel={handleTrimPointerUp}
+                  >
+                    <span className={`flex h-full w-[10px] items-center justify-center ${edge === 'start' ? 'rounded-l-[3px]' : 'rounded-r-[3px]'} ${isDark ? 'bg-[#6E70E8] hover:bg-[#8F91F4]' : 'bg-[#3B3DB8] hover:bg-[#4446CE]'}`}>
+                      <span className="flex items-center gap-[2px]">
+                        <span className="h-4 w-px bg-white/85" />
+                        <span className="h-4 w-px bg-white/85" />
+                      </span>
+                    </span>
+                  </div>
                 );
                 return (
                   <div
-                    className={`pointer-events-none absolute top-3 bottom-0 z-10 ${segmentDraft ? 'border border-dashed' : 'border-2'} ${isDark ? 'border-[#8F91F4] bg-[#4446CE]/25' : 'border-[#4446CE] bg-[#4446CE]/15'}`}
+                    className={`pointer-events-none absolute top-3 bottom-0 z-10 ${isSketching ? 'border border-dashed' : 'border-2'} ${isDark ? 'border-[#6E70E8] bg-[#4446CE]/40' : 'border-[#3B3DB8] bg-[#4446CE]/25'}`}
                     style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
                   >
-                    {showHandles && (
-                      <div
-                        className={`${handleClass} -left-[5px] rounded-l-[3px]`}
-                        title="拖动调整片段起点"
-                        onPointerDown={handleTrimPointerDown('start')}
-                        onPointerMove={handleTrimPointerMove}
-                        onPointerUp={handleTrimPointerUp}
-                        onPointerCancel={handleTrimPointerUp}
-                      >
-                        {handleGrip}
-                      </div>
+                    {widthPct >= 8 && (
+                      <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white">
+                        {(endSec - startSec).toFixed(1)}s
+                      </span>
                     )}
-                    {showHandles && (
-                      <div
-                        className={`${handleClass} -right-[5px] rounded-r-[3px]`}
-                        title="拖动调整片段终点"
-                        onPointerDown={handleTrimPointerDown('end')}
-                        onPointerMove={handleTrimPointerMove}
-                        onPointerUp={handleTrimPointerUp}
-                        onPointerCancel={handleTrimPointerUp}
-                      >
-                        {handleGrip}
-                      </div>
-                    )}
+                    {showHandles && renderTrimHandle('start')}
+                    {showHandles && renderTrimHandle('end')}
                   </div>
                 );
               })()}
