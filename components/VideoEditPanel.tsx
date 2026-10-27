@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { InputMedia, VideoEditAnchor, VideoEditRequest, VideoPromptReference } from '../types';
+import type { InputMedia, VideoEditAnchor, VideoEditRequest, VideoEditTimeRange, VideoPromptReference } from '../types';
 import { Icons } from './Icons';
 import { VideoReferencePromptEditor } from './Nodes/Shared/VideoReferencePromptEditor';
 
@@ -142,6 +142,10 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const [references, setReferences] = useState<VideoPromptReference[]>([]);
   const [error, setError] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [segmentMode, setSegmentMode] = useState(false);
+  const [segmentRange, setSegmentRange] = useState<VideoEditTimeRange | null>(null);
+  const [segmentDraft, setSegmentDraft] = useState<{ anchorTime: number; currentTime: number } | null>(null);
+  const [segmentChipId, setSegmentChipId] = useState<string | null>(null);
 
   const mutedText = isDark ? 'text-zinc-400' : 'text-gray-500';
   const panelBg = isDark ? 'bg-[#17181b] text-zinc-100' : 'bg-white text-gray-900';
@@ -167,6 +171,10 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     setReferences([]);
     setError('');
     setIsSending(false);
+    setSegmentMode(false);
+    setSegmentRange(null);
+    setSegmentDraft(null);
+    setSegmentChipId(null);
     historyRef.current = [];
     redoRef.current = [];
     const canvas = overlayRef.current;
@@ -351,6 +359,80 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     setCurrentTime(next);
   }, [confirmSeek, duration]);
 
+  const clientXToTime = useCallback((clientX: number) => {
+    const timeline = timelineRef.current;
+    if (!timeline || !duration) return 0;
+    const rect = timeline.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return ratio * duration;
+  }, [duration]);
+
+  const toggleSegmentMode = () => {
+    if (segmentMode) {
+      setSegmentMode(false);
+      setSegmentDraft(null);
+      return;
+    }
+    if (hasDrawing) {
+      const confirmed = window.confirm('进入片段编辑将清空当前未添加的标注。是否继续？');
+      if (!confirmed) return;
+      clearUncommittedDrawing();
+    }
+    videoRef.current?.pause();
+    setIsPlaying(false);
+    setBrushHover(null);
+    setSegmentMode(true);
+    setError('');
+  };
+
+  const finalizeSegmentDraft = useCallback(() => {
+    if (!segmentDraft || !duration) {
+      setSegmentDraft(null);
+      return;
+    }
+    const rawStart = Math.min(segmentDraft.anchorTime, segmentDraft.currentTime);
+    const rawEnd = Math.max(segmentDraft.anchorTime, segmentDraft.currentTime);
+    let start = Math.floor(rawStart);
+    let end = Math.max(Math.ceil(rawEnd), start + 1);
+    end = Math.min(end, Math.max(1, Math.ceil(duration)));
+    start = Math.min(start, end - 1);
+    const next: VideoEditTimeRange = { startSeconds: start, endSeconds: end };
+    // 单段语义：重选直接替换。若片段变量已加入提示词，同步更新 chip 标题并尽力替换模板里的时间戳。
+    if (segmentChipId && references.some(reference => reference.id === segmentChipId)) {
+      if (segmentRange) {
+        const oldToken = `${segmentRange.startSeconds}-${segmentRange.endSeconds} 秒`;
+        const newToken = `${next.startSeconds}-${next.endSeconds} 秒`;
+        setPrompt(previous => (previous.includes(oldToken) ? previous.replace(oldToken, newToken) : previous));
+      }
+      setReferences(previous => previous.map(reference => (
+        reference.id === segmentChipId
+          ? { ...reference, title: `片段 ${next.startSeconds}-${next.endSeconds}秒` }
+          : reference
+      )));
+    }
+    setSegmentRange(next);
+    setSegmentDraft(null);
+  }, [duration, references, segmentChipId, segmentDraft, segmentRange]);
+
+  const addSegmentToPrompt = () => {
+    if (!segmentRange || segmentChipAdded) return;
+    const id = `video-edit-segment-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const { startSeconds, endSeconds } = segmentRange;
+    const template = `编辑任务：把@视频1 中 ${startSeconds}-${endSeconds} 秒的 [原内容] 改为 [新内容]，其余内容不要变化，保持原有光照、构图、运镜、人物身份与音频不变。`;
+    const chipOffset = prompt ? prompt.length + 1 : 0;
+    setPrompt(previous => (previous ? `${previous}\n${template}` : template));
+    setReferences(previous => [...previous, {
+      id,
+      sourceNodeId: id,
+      type: 'video',
+      url: videoSrc,
+      title: `片段 ${startSeconds}-${endSeconds}秒`,
+      offset: chipOffset,
+    }]);
+    setSegmentChipId(id);
+    setError('');
+  };
+
   const handleLoadedMetadata = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -381,11 +463,8 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   };
 
   const updateTimeline = (clientX: number) => {
-    const timeline = timelineRef.current;
-    if (!timeline || !duration) return;
-    const rect = timeline.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    seekTo(ratio * duration, false);
+    if (!duration) return;
+    seekTo(clientXToTime(clientX), false);
   };
 
   const updateTimelineHover = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -401,6 +480,15 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const handleTimelinePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
+    if (!duration) return;
+    if (segmentMode) {
+      const time = clientXToTime(event.clientX);
+      setSegmentDraft({ anchorTime: time, currentTime: time });
+      setIsTimelineDragging(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      seekTo(time, false);
+      return;
+    }
     if (!confirmSeek()) return;
     setIsTimelineDragging(true);
     updateTimelineHover(event);
@@ -410,10 +498,18 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
 
   const handleTimelinePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     updateTimelineHover(event);
-    if (isTimelineDragging) updateTimeline(event.clientX);
+    if (!isTimelineDragging) return;
+    if (segmentMode) {
+      const time = clientXToTime(event.clientX);
+      setSegmentDraft(previous => (previous ? { ...previous, currentTime: time } : previous));
+      seekTo(time, false);
+      return;
+    }
+    updateTimeline(event.clientX);
   };
 
   const handleTimelinePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (segmentMode && isTimelineDragging) finalizeSegmentDraft();
     setIsTimelineDragging(false);
     updateTimelineHover(event);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
@@ -625,15 +721,33 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     title: `关键帧 ${anchor.timecode}`,
   })), [anchors]);
 
+  const segmentMedia = useMemo<InputMedia[]>(() => references
+    .filter(reference => reference.type === 'video' && reference.id.startsWith('video-edit-segment-'))
+    .map(reference => ({
+      id: reference.id,
+      sourceNodeId: reference.id,
+      type: 'video',
+      url: reference.url,
+      title: reference.title,
+    })), [references]);
+
+  const promptInputMedia = useMemo(() => [...anchorMedia, ...segmentMedia], [anchorMedia, segmentMedia]);
+
+  const segmentChipAdded = Boolean(segmentChipId && references.some(reference => reference.id === segmentChipId));
+
   const submit = () => {
     const selectedIds = new Set(references.map(reference => reference.id));
     const selectedAnchors = anchors.filter(anchor => selectedIds.has(anchor.id));
-    if (!prompt.trim() || selectedAnchors.length === 0 || isSending) return;
+    const selectedSegment = segmentRange && segmentChipId && selectedIds.has(segmentChipId)
+      ? segmentRange
+      : undefined;
+    if (!prompt.trim() || (selectedAnchors.length === 0 && !selectedSegment) || isSending) return;
     const request: VideoEditRequest = {
       sourceVideoUrl: videoSrc,
       prompt: prompt.trim(),
-      scope: 'track_same_subject_full_clip',
+      scope: selectedSegment ? 'regenerate_time_range' : 'track_same_subject_full_clip',
       anchors: selectedAnchors,
+      timeRange: selectedSegment,
     };
     setIsSending(true);
     onSubmit(request);
@@ -644,9 +758,10 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const toolButton = (value: EditTool, icon: React.ReactNode, label: string) => (
     <button
       type="button"
-      className={`flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors ${tool === value ? 'bg-[#4446CE] text-white' : isDark ? 'text-zinc-300 hover:bg-zinc-800' : 'text-gray-600 hover:bg-gray-100'}`}
+      disabled={segmentMode}
+      className={`flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${tool === value && !segmentMode ? 'bg-[#4446CE] text-white' : isDark ? 'text-zinc-300 hover:bg-zinc-800' : 'text-gray-600 hover:bg-gray-100'}`}
       onClick={() => { setTool(value); if (value === 'rect') setBrushHover(null); }}
-      title={label}
+      title={segmentMode ? '片段编辑模式下不可用' : label}
     >
       {icon}<span>{label}</span>
     </button>
@@ -705,7 +820,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
               />
               <canvas
                 ref={overlayRef}
-                className={`absolute inset-0 h-full w-full ${tool === 'rect' ? 'cursor-crosshair' : 'cursor-none'}`}
+                className={`absolute inset-0 h-full w-full ${segmentMode ? 'pointer-events-none' : tool === 'rect' ? 'cursor-crosshair' : 'cursor-none'}`}
                 onPointerDown={handleDrawPointerDown}
                 onPointerEnter={updateBrushHover}
                 onPointerMove={handleDrawPointerMove}
@@ -713,7 +828,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                 onPointerCancel={handleDrawPointerUp}
                 onPointerLeave={() => setBrushHover(null)}
               />
-              {brushHover && (tool === 'brush' || tool === 'eraser') && (
+              {brushHover && !segmentMode && (tool === 'brush' || tool === 'eraser') && (
                 <div
                   className="pointer-events-none absolute z-30"
                   style={{ left: brushHover.x, top: brushHover.y }}
@@ -751,6 +866,21 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
             <div className={`flex justify-between text-[10px] font-medium tabular-nums ${mutedText}`}>
               {timelineTicks.map(tick => <span key={tick.key}>{tick.label}</span>)}
             </div>
+            {segmentMode && (
+              <div className="mt-1 flex items-center justify-between gap-3 text-[11px]">
+                <span className={isDark ? 'text-[#B9BAFF]' : 'text-[#4446CE]'}>
+                  片段编辑中：在时间轴上拖拽选取要重生成的区间
+                  {duration > 20 && <span className={isDark ? 'ml-2 text-amber-400' : 'ml-2 text-amber-600'}>视频超过 20 秒，区间重生成稳定性可能下降</span>}
+                </span>
+                <span className={`shrink-0 tabular-nums ${mutedText}`}>
+                  {segmentDraft
+                    ? `${formatTimelineTime(Math.min(segmentDraft.anchorTime, segmentDraft.currentTime))} → ${formatTimelineTime(Math.max(segmentDraft.anchorTime, segmentDraft.currentTime))}`
+                    : segmentRange
+                      ? `已选 ${segmentRange.startSeconds}-${segmentRange.endSeconds} 秒 · 重新拖拽可修改`
+                      : '尚未选取'}
+                </span>
+              </div>
+            )}
             <div
               ref={timelineRef}
               className="relative mt-1 h-[72px] cursor-none touch-none select-none"
@@ -771,6 +901,22 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                   <div key={index} className={`h-1.5 w-px ${isDark ? 'bg-zinc-700' : 'bg-zinc-300/80'}`} />
                 ))}
               </div>
+              {(segmentDraft || segmentRange) && duration > 0 && (() => {
+                const startSec = segmentDraft
+                  ? Math.min(segmentDraft.anchorTime, segmentDraft.currentTime)
+                  : segmentRange!.startSeconds;
+                const endSec = segmentDraft
+                  ? Math.max(segmentDraft.anchorTime, segmentDraft.currentTime)
+                  : segmentRange!.endSeconds;
+                const leftPct = Math.max(0, Math.min(100, startSec / duration * 100));
+                const widthPct = Math.max(0.5, Math.min(100 - leftPct, (endSec - startSec) / duration * 100));
+                return (
+                  <div
+                    className={`pointer-events-none absolute top-0 z-10 h-[66px] rounded-md border ${segmentDraft ? 'border-dashed' : ''} ${isDark ? 'border-[#8F91F4] bg-[#4446CE]/30' : 'border-[#4446CE] bg-[#4446CE]/20'}`}
+                    style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                  />
+                );
+              })()}
               <div
                 className={`absolute top-0 z-20 h-[66px] w-0.5 rounded-full ${isDark ? 'bg-white' : 'bg-black'}`}
                 style={{ left: `calc(${timelineProgress}% - 1px)` }}
@@ -809,19 +955,28 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
           </div>
 
           <div className={`mt-3 flex flex-wrap items-center gap-1.5 rounded-xl border p-2 ${isDark ? 'border-zinc-800 bg-[#202124]' : 'border-gray-200 bg-gray-50'} ${border}`}>
+            <button
+              type="button"
+              className={`flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors ${segmentMode ? 'bg-[#4446CE] text-white' : isDark ? 'text-zinc-300 hover:bg-zinc-800' : 'text-gray-600 hover:bg-gray-100'}`}
+              onClick={toggleSegmentMode}
+              title={segmentMode ? '退出片段编辑' : '在时间轴上拖拽选取要重生成的片段'}
+            >
+              <Icons.Scissors size={14} /><span>片段编辑</span>
+            </button>
+            <div className={`mx-1 h-5 w-px ${isDark ? 'bg-zinc-700' : 'bg-gray-200'}`} />
             {toolButton('brush', <Icons.Edit3 size={14} />, '画笔')}
             {toolButton('rect', <Icons.Box size={14} />, '框选')}
             {toolButton('eraser', <Icons.Eraser size={14} />, '橡皮擦')}
             <div className={`mx-1 h-5 w-px ${isDark ? 'bg-zinc-700' : 'bg-gray-200'}`} />
-            <label className={`flex items-center gap-2 px-1 text-[11px] ${mutedText}`} title="画笔大小">
+            <label className={`flex items-center gap-2 px-1 text-[11px] ${mutedText} ${segmentMode ? 'opacity-40' : ''}`} title="画笔大小">
               大小
-              <input type="range" min="8" max="80" value={brushSize} onChange={event => setBrushSize(Number(event.target.value))} className="w-20 accent-[#4446CE]" />
+              <input type="range" min="8" max="80" value={brushSize} disabled={segmentMode} onChange={event => setBrushSize(Number(event.target.value))} className="w-20 accent-[#4446CE]" />
               <span className="w-5 tabular-nums">{brushSize}</span>
             </label>
             <div className="ml-auto flex items-center gap-1">
-              <button type="button" disabled={!historyRef.current.length} className={`flex h-8 w-8 items-center justify-center rounded-lg disabled:opacity-30 ${mutedText} hover:bg-white/10`} onClick={undo} title="撤销"><Icons.RotateCcw size={15} /></button>
-              <button type="button" disabled={!redoRef.current.length} className={`flex h-8 w-8 items-center justify-center rounded-lg disabled:opacity-30 ${mutedText} hover:bg-white/10`} onClick={redo} title="重做"><Icons.RefreshCw size={15} /></button>
-              <button type="button" disabled={!hasDrawing} className={`h-8 rounded-lg px-2 text-xs disabled:opacity-30 ${mutedText} hover:bg-white/10`} onClick={clearSelection}>清空</button>
+              <button type="button" disabled={segmentMode || !historyRef.current.length} className={`flex h-8 w-8 items-center justify-center rounded-lg disabled:opacity-30 ${mutedText} hover:bg-white/10`} onClick={undo} title="撤销"><Icons.RotateCcw size={15} /></button>
+              <button type="button" disabled={segmentMode || !redoRef.current.length} className={`flex h-8 w-8 items-center justify-center rounded-lg disabled:opacity-30 ${mutedText} hover:bg-white/10`} onClick={redo} title="重做"><Icons.RefreshCw size={15} /></button>
+              <button type="button" disabled={segmentMode || !hasDrawing} className={`h-8 rounded-lg px-2 text-xs disabled:opacity-30 ${mutedText} hover:bg-white/10`} onClick={clearSelection}>清空</button>
             </div>
           </div>
 
@@ -830,20 +985,36 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
               <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold">修改指令</span>
                 <span className={`text-[11px] ${mutedText}`}>已添加 {anchors.length} 个关键帧</span>
+                {segmentRange && (
+                  <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${isDark ? 'bg-[#4446CE]/20 text-[#B9BAFF]' : 'bg-[#F0F1FF] text-[#4446CE]'}`}>
+                    片段 {segmentRange.startSeconds}-{segmentRange.endSeconds} 秒
+                  </span>
+                )}
               </div>
-              <button type="button" disabled={!hasDrawing || !videoSize.width || !videoSize.height || !duration} className="flex h-8 items-center gap-1.5 rounded-lg bg-[#4446CE] px-3 text-xs font-semibold text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40" onClick={createAnchor} title="把当前标注帧加入提示词"><Icons.Plus size={14} />添加当前帧</button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={!segmentRange || segmentChipAdded}
+                  className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition-opacity disabled:cursor-not-allowed disabled:opacity-40 ${segmentRange && !segmentChipAdded ? 'bg-[#4446CE] text-white' : isDark ? 'bg-zinc-700 text-zinc-200' : 'bg-gray-200 text-gray-700'}`}
+                  onClick={addSegmentToPrompt}
+                  title={segmentChipAdded ? '片段已加入提示词，在时间轴上重选即可更新区间' : '把选中片段按模板加入提示词'}
+                >
+                  <Icons.Scissors size={14} />{segmentChipAdded ? '片段已添加' : '添加片段'}
+                </button>
+                <button type="button" disabled={segmentMode || !hasDrawing || !videoSize.width || !videoSize.height || !duration} className="flex h-8 items-center gap-1.5 rounded-lg bg-[#4446CE] px-3 text-xs font-semibold text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40" onClick={createAnchor} title="把当前标注帧加入提示词"><Icons.Plus size={14} />添加当前帧</button>
+              </div>
             </div>
             <VideoReferencePromptEditor
               value={prompt}
               onChange={setPrompt}
               references={references}
               onReferencesChange={setReferences}
-              inputMedia={anchorMedia}
-              mode="image"
-              placeholder="描述要对选中区域做的修改，例如：消除画面右侧的路人、将桌上的水杯替换为一束红玫瑰"
+              inputMedia={promptInputMedia}
+              mode="omni"
+              placeholder="描述要做的修改，例如：消除画面右侧的路人、将桌上的水杯替换为一束红玫瑰；或用「片段编辑」选取时段后添加片段，自动生成带时间戳的编辑指令"
               isDark={isDark}
               allowExpand={true}
-              referenceHint="关键帧变量会随提示词一起发送；可输入 @ 再次引用已添加的关键帧"
+              referenceHint="关键帧与片段变量会随提示词一起发送；可输入 @ 再次引用已添加的变量"
               expandedTitle="编辑视频修改指令"
               showReferenceHint={false}
               bottomRightAction={(

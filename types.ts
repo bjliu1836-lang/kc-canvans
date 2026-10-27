@@ -82,11 +82,17 @@ export interface VideoEditAnchor {
   annotatedFrameDataUrl: string;
 }
 
+export interface VideoEditTimeRange {
+  startSeconds: number;
+  endSeconds: number;
+}
+
 export interface VideoEditRequest {
   sourceVideoUrl: string;
   prompt: string;
-  scope: 'track_same_subject_full_clip';
+  scope: 'track_same_subject_full_clip' | 'regenerate_time_range';
   anchors: VideoEditAnchor[];
+  timeRange?: VideoEditTimeRange;
 }
 
 export interface ImageVersionSnapshot {
