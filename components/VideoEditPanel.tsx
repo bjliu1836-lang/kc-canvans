@@ -398,13 +398,8 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     end = Math.min(end, Math.max(1, Math.ceil(duration)));
     start = Math.min(start, end - 1);
     const next: VideoEditTimeRange = { startSeconds: start, endSeconds: end };
-    // 单段语义：重选直接替换。若片段变量已加入提示词，同步更新 chip 标题并尽力替换模板里的时间戳。
+    // 单段语义：重选直接替换。时间区间由片段 chip 承载（提示词文本中不出现手写时间戳），只需同步 chip 标题。
     if (segmentChipId && references.some(reference => reference.id === segmentChipId)) {
-      if (segmentRange) {
-        const oldToken = `${segmentRange.startSeconds}-${segmentRange.endSeconds} 秒`;
-        const newToken = `${next.startSeconds}-${next.endSeconds} 秒`;
-        setPrompt(previous => (previous.includes(oldToken) ? previous.replace(oldToken, newToken) : previous));
-      }
       setReferences(previous => previous.map(reference => (
         reference.id === segmentChipId
           ? { ...reference, title: `片段 ${next.startSeconds}-${next.endSeconds}秒` }
@@ -413,22 +408,20 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     }
     setSegmentRange(next);
     setSegmentDraft(null);
-  }, [duration, references, segmentChipId, segmentDraft, segmentRange]);
+  }, [duration, references, segmentChipId, segmentDraft]);
 
   const addSegmentToPrompt = () => {
     if (!segmentRange || segmentChipAdded) return;
     const id = `video-edit-segment-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const { startSeconds, endSeconds } = segmentRange;
-    const template = `编辑任务：把@视频1 中 ${startSeconds}-${endSeconds} 秒的 [原内容] 改为 [新内容]，其余内容不要变化，保持原有光照、构图、运镜、人物身份与音频不变。`;
-    const chipOffset = prompt ? prompt.length + 1 : 0;
-    setPrompt(previous => (previous ? `${previous}\n${template}` : template));
+    // 只插入片段变量 chip，不改提示词文本；发送时 chip 在 offset 处序列化为 "X-Y 秒" 规范时间区间
     setReferences(previous => [...previous, {
       id,
       sourceNodeId: id,
       type: 'video',
       url: videoSrc,
       title: `片段 ${startSeconds}-${endSeconds}秒`,
-      offset: chipOffset,
+      offset: prompt.length,
     }]);
     setSegmentChipId(id);
     setError('');
@@ -784,13 +777,19 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const submit = () => {
     const selectedIds = new Set(references.map(reference => reference.id));
     const selectedAnchors = anchors.filter(anchor => selectedIds.has(anchor.id));
-    const selectedSegment = segmentRange && segmentChipId && selectedIds.has(segmentChipId)
-      ? segmentRange
-      : undefined;
+    const segmentRef = segmentChipId ? references.find(reference => reference.id === segmentChipId) : undefined;
+    const selectedSegment = segmentRange && segmentRef ? segmentRange : undefined;
     if (!prompt.trim() || (selectedAnchors.length === 0 && !selectedSegment) || isSending) return;
+    // 片段 chip 在编辑器文本中不占字符；发送前在其 offset 处展开为规范时间区间文字（如 "4-6 秒"）
+    let serializedPrompt = prompt.trim();
+    if (selectedSegment && segmentRef) {
+      const token = `${selectedSegment.startSeconds}-${selectedSegment.endSeconds} 秒`;
+      const offset = Math.max(0, Math.min(prompt.length, segmentRef.offset ?? prompt.length));
+      serializedPrompt = `${prompt.slice(0, offset)}${token}${prompt.slice(offset)}`.trim();
+    }
     const request: VideoEditRequest = {
       sourceVideoUrl: videoSrc,
-      prompt: prompt.trim(),
+      prompt: serializedPrompt,
       scope: selectedSegment ? 'regenerate_time_range' : 'track_same_subject_full_clip',
       anchors: selectedAnchors,
       timeRange: selectedSegment,
@@ -1063,7 +1062,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                   disabled={!segmentRange || segmentChipAdded}
                   className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition-opacity disabled:cursor-not-allowed disabled:opacity-40 ${segmentRange && !segmentChipAdded ? 'bg-[#4446CE] text-white' : isDark ? 'bg-zinc-700 text-zinc-200' : 'bg-gray-200 text-gray-700'}`}
                   onClick={addSegmentToPrompt}
-                  title={segmentChipAdded ? '片段已加入提示词，在时间轴上重选即可更新区间' : '把选中片段按模板加入提示词'}
+                  title={segmentChipAdded ? '片段已加入提示词，在时间轴上重选即可更新区间' : '把选中片段作为变量插入提示词，发送时自动展开为规范时间区间'}
                 >
                   <Icons.Scissors size={14} />{segmentChipAdded ? '片段已添加' : '添加片段'}
                 </button>
@@ -1077,7 +1076,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
               onReferencesChange={setReferences}
               inputMedia={promptInputMedia}
               mode="omni"
-              placeholder="描述要做的修改，例如：消除画面右侧的路人、将桌上的水杯替换为一束红玫瑰；或用「片段编辑」选取时段后添加片段，自动生成带时间戳的编辑指令"
+              placeholder="描述要做的修改，例如：消除画面右侧的路人、将桌上的水杯替换为一束红玫瑰；用「片段编辑」选取时段后点「添加片段」，时间区间会作为变量插入提示词"
               isDark={isDark}
               allowExpand={true}
               referenceHint="关键帧与片段变量会随提示词一起发送；可输入 @ 再次引用已添加的变量"
