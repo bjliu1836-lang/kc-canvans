@@ -1483,7 +1483,18 @@ const serveStatic = (req, res) => {
     }
   }
   const ext = path.extname(filePath);
-  res.writeHead(200, { 'Content-Type': contentTypes[ext] || 'application/octet-stream' });
+  // HTML 入口禁止缓存：否则新构建后浏览器仍拿旧 index.html，继续加载上一版 assets。
+  // 带 hash 的 assets/ 可长缓存（文件名变了自然失效），其余静态资源给短缓存。
+  const relativePath = path.relative(distDir, filePath).split(path.sep).join('/');
+  const cacheControl = ext === '.html'
+    ? 'no-cache, must-revalidate'
+    : relativePath.startsWith('assets/')
+      ? 'public, max-age=31536000, immutable'
+      : 'public, max-age=300';
+  res.writeHead(200, {
+    'Content-Type': contentTypes[ext] || 'application/octet-stream',
+    'Cache-Control': cacheControl,
+  });
   fs.createReadStream(filePath).pipe(res);
 };
 
