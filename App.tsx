@@ -3531,7 +3531,7 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           sourceVideoUrl: request.sourceVideoUrl,
           prompt: request.prompt,
           scope: request.scope,
-          timeRange: request.timeRange,
+          timeRanges: request.timeRanges,
           anchors: request.anchors.map(anchor => ({
               timeSeconds: anchor.timeSeconds,
               timecode: anchor.timecode,
@@ -3542,7 +3542,8 @@ const handlePaste = useCallback(async (e: ClipboardEvent) => {
           })),
       });
 
-      const editBadge = request.timeRange ? '片段编辑·模拟' : '视频编辑·模拟';
+      const hasTimeRanges = Boolean(request.timeRanges && request.timeRanges.length > 0);
+      const editBadge = hasTimeRanges ? '片段编辑·模拟' : '视频编辑·模拟';
       const editNode = buildVideoEditNode(source, editBadge, `${editBadge.replace('·模拟', '')}_${source.title}`, {
           videoSrc: undefined,
           outputArtifacts: [],

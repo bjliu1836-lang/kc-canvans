@@ -15,9 +15,14 @@ interface VideoEditPanelProps {
 type EditTool = 'brush' | 'rect' | 'eraser';
 type HistoryEntry = { image: ImageData; mask: ImageData; hasDrawing: boolean };
 type TimelineThumbnail = { time: number; url: string };
+type SegmentEntry = { id: string; range: VideoEditTimeRange };
+type SegmentDraft = { anchorTime: number; currentTime: number; kind: 'select' | 'trim'; targetId?: string };
 
 const MAX_WORK_SIZE = 1280;
 const FRAME_STEP = 1 / 24;
+const MAX_SEGMENTS = 3;
+const SEGMENT_REF_PREFIX = 'video-edit-segment-';
+const SEGMENT_PROMPT_SUFFIX = '的 [原内容] 改为 [新内容]，其余内容不要变化，保持原有光照、构图、运镜、人物身份与音频不变。';
 
 const formatTimecode = (seconds: number) => {
   const safe = Math.max(0, seconds || 0);
@@ -144,9 +149,9 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   const [error, setError] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [segmentMode, setSegmentMode] = useState(false);
-  const [segmentRange, setSegmentRange] = useState<VideoEditTimeRange | null>(null);
-  const [segmentDraft, setSegmentDraft] = useState<{ anchorTime: number; currentTime: number; kind: 'select' | 'trim' } | null>(null);
-  const [segmentChipId, setSegmentChipId] = useState<string | null>(null);
+  const [segments, setSegments] = useState<SegmentEntry[]>([]);
+  const [pendingRange, setPendingRange] = useState<VideoEditTimeRange | null>(null);
+  const [segmentDraft, setSegmentDraft] = useState<SegmentDraft | null>(null);
 
   const mutedText = isDark ? 'text-zinc-400' : 'text-gray-500';
   const panelBg = isDark ? 'bg-[#17181b] text-zinc-100' : 'bg-white text-gray-900';
@@ -173,9 +178,9 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     setError('');
     setIsSending(false);
     setSegmentMode(false);
-    setSegmentRange(null);
+    setSegments([]);
+    setPendingRange(null);
     setSegmentDraft(null);
-    setSegmentChipId(null);
     historyRef.current = [];
     redoRef.current = [];
     const canvas = overlayRef.current;
@@ -398,29 +403,32 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     end = Math.min(end, Math.max(1, Math.ceil(duration)));
     start = Math.min(start, end - 1);
     const next: VideoEditTimeRange = { startSeconds: start, endSeconds: end };
-    // 单段语义：重选直接替换。时间区间由片段 chip 承载（提示词文本中不出现手写时间戳），只需同步 chip 标题。
-    if (segmentChipId && references.some(reference => reference.id === segmentChipId)) {
+    const targetId = segmentDraft.targetId;
+    if (segmentDraft.kind === 'trim' && targetId) {
+      // 调整已添加片段：更新其区间与 chip 标题（时间由 chip 承载，文本无需改写）
+      setSegments(previous => previous.map(entry => (
+        entry.id === targetId ? { ...entry, range: next } : entry
+      )));
       setReferences(previous => previous.map(reference => (
-        reference.id === segmentChipId
+        reference.id === targetId
           ? { ...reference, title: `片段 ${next.startSeconds}-${next.endSeconds}秒` }
           : reference
       )));
+    } else {
+      setPendingRange(next);
     }
-    setSegmentRange(next);
     setSegmentDraft(null);
-  }, [duration, references, segmentChipId, segmentDraft]);
+  }, [duration, segmentDraft]);
 
   const addSegmentToPrompt = () => {
-    if (!segmentRange || segmentChipAdded) return;
-    const id = `video-edit-segment-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const { startSeconds, endSeconds } = segmentRange;
-    // 模板骨架保留，仅把时间轴位置留空由变量 chip 占位：
-    // 渲染为「编辑任务：把@视频1 中[片段 4-6秒]的 [原内容] 改为 [新内容]，其余内容不要变化，…」
-    // 发送时 chip 在该 offset 处展开为「4-6 秒」纯文字，拼成完整模板
-    const templatePrefix = '编辑任务：把@视频1 中';
-    const templateSuffix = '的 [原内容] 改为 [新内容]，其余内容不要变化，保持原有光照、构图、运镜、人物身份与音频不变。';
+    if (!pendingRange || segments.length >= MAX_SEGMENTS) return;
+    const order = segments.length + 1;
+    const id = `${SEGMENT_REF_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const { startSeconds, endSeconds } = pendingRange;
+    // 每段追加一份完整编辑指令，时间轴位置由变量 chip 占位，发送时展开为「X-Y 秒」
+    const templatePrefix = `编辑任务 ${order}：把@视频1 中`;
+    const template = `${templatePrefix}${SEGMENT_PROMPT_SUFFIX}`;
     const baseOffset = prompt ? prompt.length + 1 : 0;
-    const template = `${templatePrefix}${templateSuffix}`;
     setPrompt(previous => (previous ? `${previous}\n${template}` : template));
     setReferences(previous => [...previous, {
       id,
@@ -430,8 +438,59 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
       title: `片段 ${startSeconds}-${endSeconds}秒`,
       offset: baseOffset + templatePrefix.length,
     }]);
-    setSegmentChipId(id);
+    setSegments(previous => [...previous, { id, range: pendingRange }]);
+    setPendingRange(null);
     setError('');
+  };
+
+  const removeSegmentFromPrompt = (segmentId: string, baseReferences: VideoPromptReference[] = references) => {
+    const segmentRef = baseReferences.find(reference => reference.id === segmentId);
+    let nextPrompt = prompt;
+    let nextReferences = baseReferences.filter(reference => reference.id !== segmentId);
+    if (segmentRef) {
+      // 定位 chip 所在行并整行移除（每段模板独占一行）
+      const offset = Math.max(0, Math.min(prompt.length, segmentRef.offset ?? prompt.length));
+      const lines = prompt.split('\n');
+      let cursor = 0;
+      let lineIndex = -1;
+      for (let index = 0; index < lines.length; index += 1) {
+        const lineEnd = cursor + lines[index].length;
+        if (offset >= cursor && offset <= lineEnd) {
+          lineIndex = index;
+          break;
+        }
+        cursor = lineEnd + 1;
+      }
+      if (lineIndex >= 0) {
+        let removeStart = 0;
+        for (let index = 0; index < lineIndex; index += 1) removeStart += lines[index].length + 1;
+        const removedLength = lines[lineIndex].length + (lineIndex < lines.length - 1 ? 1 : 0);
+        lines.splice(lineIndex, 1);
+        nextPrompt = lines.join('\n');
+        nextReferences = nextReferences.map(reference => {
+          const referenceOffset = reference.offset ?? 0;
+          return referenceOffset > removeStart
+            ? { ...reference, offset: Math.max(0, referenceOffset - removedLength) }
+            : reference;
+        });
+      }
+    }
+    setPrompt(nextPrompt);
+    setReferences(nextReferences);
+    setSegments(previous => previous.filter(entry => entry.id !== segmentId));
+  };
+
+  const handlePromptReferencesChange = (nextReferences: VideoPromptReference[]) => {
+    // 在编辑器内删掉片段 chip 时，连带移除该段完整描述，避免留下空模板
+    const removedSegment = references.find(reference => (
+      reference.id.startsWith(SEGMENT_REF_PREFIX)
+      && !nextReferences.some(candidate => candidate.id === reference.id)
+    ));
+    if (removedSegment) {
+      removeSegmentFromPrompt(removedSegment.id, [...nextReferences, removedSegment]);
+      return;
+    }
+    setReferences(nextReferences);
   };
 
   const handleLoadedMetadata = () => {
@@ -483,9 +542,12 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     event.stopPropagation();
     if (!duration) return;
     if (segmentMode) {
-      // 选区内部按下 = 仅移动播放头（scrub）；选区外只记录起点，画区间全程不带动播放头
+      // 任一已添加片段或待添加区间内部按下 = 仅移动播放头（scrub）；其余空白处才可拖拽新建
       const time = clientXToTime(event.clientX);
-      const inCommittedRange = Boolean(segmentRange && time >= segmentRange.startSeconds && time <= segmentRange.endSeconds);
+      const inCommittedRange = Boolean(
+        (pendingRange && time >= pendingRange.startSeconds && time <= pendingRange.endSeconds)
+        || segments.some(entry => time >= entry.range.startSeconds && time <= entry.range.endSeconds),
+      );
       setIsTimelineDragging(true);
       event.currentTarget.setPointerCapture(event.pointerId);
       if (inCommittedRange) {
@@ -544,14 +606,18 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
-  const handleTrimPointerDown = (edge: 'start' | 'end') => (event: React.PointerEvent<HTMLDivElement>) => {
+  const handleTrimPointerDown = (edge: 'start' | 'end', targetId?: string) => (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
-    if (!segmentRange || !duration) return;
+    if (!duration) return;
+    const target = targetId
+      ? segments.find(entry => entry.id === targetId)?.range
+      : pendingRange;
+    if (!target) return;
     pendingSelectRef.current = null;
-    const fixed = edge === 'start' ? segmentRange.endSeconds : segmentRange.startSeconds;
+    const fixed = edge === 'start' ? target.endSeconds : target.startSeconds;
     const time = Math.max(0, Math.min(duration, clientXToTime(event.clientX)));
-    setSegmentDraft({ anchorTime: fixed, currentTime: time, kind: 'trim' });
+    setSegmentDraft({ anchorTime: fixed, currentTime: time, kind: 'trim', targetId });
     setIsTimelineDragging(true);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
@@ -779,7 +845,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
   })), [anchors]);
 
   const segmentMedia = useMemo<InputMedia[]>(() => references
-    .filter(reference => reference.type === 'video' && reference.id.startsWith('video-edit-segment-'))
+    .filter(reference => reference.type === 'video' && reference.id.startsWith(SEGMENT_REF_PREFIX))
     .map(reference => ({
       id: reference.id,
       sourceNodeId: reference.id,
@@ -790,27 +856,35 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
 
   const promptInputMedia = useMemo(() => [...anchorMedia, ...segmentMedia], [anchorMedia, segmentMedia]);
 
-  const segmentChipAdded = Boolean(segmentChipId && references.some(reference => reference.id === segmentChipId));
+  const activeSegments = useMemo(() => segments
+    .map(entry => {
+      const reference = references.find(item => item.id === entry.id);
+      return reference ? { reference, range: entry.range } : null;
+    })
+    .filter((item): item is { reference: VideoPromptReference; range: VideoEditTimeRange } => item !== null),
+    [references, segments]);
+
+  const segmentLimitReached = segments.length >= MAX_SEGMENTS;
 
   const submit = () => {
     const selectedIds = new Set(references.map(reference => reference.id));
     const selectedAnchors = anchors.filter(anchor => selectedIds.has(anchor.id));
-    const segmentRef = segmentChipId ? references.find(reference => reference.id === segmentChipId) : undefined;
-    const selectedSegment = segmentRange && segmentRef ? segmentRange : undefined;
-    if (!prompt.trim() || (selectedAnchors.length === 0 && !selectedSegment) || isSending) return;
-    // 片段 chip 在编辑器文本中不占字符；发送前在其 offset 处展开为规范时间区间文字（如 "4-6 秒"）
-    let serializedPrompt = prompt.trim();
-    if (selectedSegment && segmentRef) {
-      const token = `${selectedSegment.startSeconds}-${selectedSegment.endSeconds} 秒`;
-      const offset = Math.max(0, Math.min(prompt.length, segmentRef.offset ?? prompt.length));
-      serializedPrompt = `${prompt.slice(0, offset)}${token}${prompt.slice(offset)}`.trim();
-    }
+    if (!prompt.trim() || (selectedAnchors.length === 0 && activeSegments.length === 0) || isSending) return;
+    // 每个片段 chip 在其 offset 处展开为规范时间文字；从后往前插入，避免前面的插入使后续 offset 失效
+    let serializedPrompt = prompt;
+    [...activeSegments]
+      .sort((a, b) => (b.reference.offset ?? 0) - (a.reference.offset ?? 0))
+      .forEach(({ reference, range }) => {
+        const token = `${range.startSeconds}-${range.endSeconds} 秒`;
+        const offset = Math.max(0, Math.min(serializedPrompt.length, reference.offset ?? serializedPrompt.length));
+        serializedPrompt = `${serializedPrompt.slice(0, offset)}${token}${serializedPrompt.slice(offset)}`;
+      });
     const request: VideoEditRequest = {
       sourceVideoUrl: videoSrc,
-      prompt: serializedPrompt,
-      scope: selectedSegment ? 'regenerate_time_range' : 'track_same_subject_full_clip',
+      prompt: serializedPrompt.trim(),
+      scope: activeSegments.length > 0 ? 'regenerate_time_range' : 'track_same_subject_full_clip',
       anchors: selectedAnchors,
-      timeRange: selectedSegment,
+      timeRanges: activeSegments.map(item => item.range),
     };
     setIsSending(true);
     onSubmit(request);
@@ -938,9 +1012,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                 <span className={`shrink-0 tabular-nums ${mutedText}`}>
                   {segmentDraft
                     ? `${formatTimelineTime(Math.min(segmentDraft.anchorTime, segmentDraft.currentTime))} → ${formatTimelineTime(Math.max(segmentDraft.anchorTime, segmentDraft.currentTime))}`
-                    : segmentRange
-                      ? `已选 ${segmentRange.startSeconds}-${segmentRange.endSeconds} 秒`
-                      : '尚未选取'}
+                    : `已添加 ${segments.length}/${MAX_SEGMENTS} 段${pendingRange ? ` · 待添加 ${pendingRange.startSeconds}-${pendingRange.endSeconds} 秒` : ''}`}
                 </span>
               </div>
             )}
@@ -966,22 +1038,40 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                   <div key={index} className={`h-full flex-1 ${isDark ? 'bg-zinc-800' : 'bg-zinc-200'}`} />
                 ))}
               </div>
-              {(segmentDraft || segmentRange) && duration > 0 && (() => {
-                const startSec = segmentDraft
-                  ? Math.min(segmentDraft.anchorTime, segmentDraft.currentTime)
-                  : segmentRange!.startSeconds;
-                const endSec = segmentDraft
-                  ? Math.max(segmentDraft.anchorTime, segmentDraft.currentTime)
-                  : segmentRange!.endSeconds;
-                const leftPct = Math.max(0, Math.min(100, startSec / duration * 100));
-                const widthPct = Math.max(0.5, Math.min(100 - leftPct, (endSec - startSec) / duration * 100));
-                const showHandles = segmentMode && !segmentDraft;
-                const isSketching = segmentDraft?.kind === 'select';
-                const renderTrimHandle = (edge: 'start' | 'end') => (
+              {(segments.length > 0 || pendingRange || segmentDraft) && duration > 0 && (() => {
+                type Overlay = { key: string; startSec: number; endSec: number; order?: number; targetId?: string; sketch?: boolean };
+                const overlays: Overlay[] = [];
+                segments.forEach((entry, index) => {
+                  const trimming = segmentDraft?.kind === 'trim' && segmentDraft.targetId === entry.id;
+                  overlays.push({
+                    key: entry.id,
+                    startSec: trimming ? Math.min(segmentDraft!.anchorTime, segmentDraft!.currentTime) : entry.range.startSeconds,
+                    endSec: trimming ? Math.max(segmentDraft!.anchorTime, segmentDraft!.currentTime) : entry.range.endSeconds,
+                    order: index + 1,
+                    targetId: entry.id,
+                  });
+                });
+                if (pendingRange) {
+                  const trimmingPending = segmentDraft?.kind === 'trim' && !segmentDraft.targetId;
+                  overlays.push({
+                    key: 'pending',
+                    startSec: trimmingPending ? Math.min(segmentDraft!.anchorTime, segmentDraft!.currentTime) : pendingRange.startSeconds,
+                    endSec: trimmingPending ? Math.max(segmentDraft!.anchorTime, segmentDraft!.currentTime) : pendingRange.endSeconds,
+                  });
+                }
+                if (segmentDraft?.kind === 'select') {
+                  overlays.push({
+                    key: 'sketch',
+                    startSec: Math.min(segmentDraft.anchorTime, segmentDraft.currentTime),
+                    endSec: Math.max(segmentDraft.anchorTime, segmentDraft.currentTime),
+                    sketch: true,
+                  });
+                }
+                const renderTrimHandle = (edge: 'start' | 'end', targetId?: string) => (
                   <div
                     className={`pointer-events-auto absolute inset-y-0 z-20 flex w-4 cursor-ew-resize items-center justify-center ${edge === 'start' ? '-left-[8px]' : '-right-[8px]'}`}
                     title={edge === 'start' ? '拖动调整片段起点' : '拖动调整片段终点'}
-                    onPointerDown={handleTrimPointerDown(edge)}
+                    onPointerDown={handleTrimPointerDown(edge, targetId)}
                     onPointerMove={handleTrimPointerMove}
                     onPointerUp={handleTrimPointerUp}
                     onPointerCancel={handleTrimPointerUp}
@@ -994,20 +1084,31 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
                     </span>
                   </div>
                 );
-                return (
-                  <div
-                    className={`pointer-events-none absolute top-3 bottom-0 z-10 ${isSketching ? 'border border-dashed' : 'border-2'} ${isDark ? 'border-[#6E70E8] bg-[#4446CE]/40' : 'border-[#3B3DB8] bg-[#4446CE]/25'}`}
-                    style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-                  >
-                    {widthPct >= 8 && (
-                      <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white">
-                        {(endSec - startSec).toFixed(1)}s
-                      </span>
-                    )}
-                    {showHandles && renderTrimHandle('start')}
-                    {showHandles && renderTrimHandle('end')}
-                  </div>
-                );
+                return overlays.map(overlay => {
+                  const leftPct = Math.max(0, Math.min(100, overlay.startSec / duration * 100));
+                  const widthPct = Math.max(0.5, Math.min(100 - leftPct, (overlay.endSec - overlay.startSec) / duration * 100));
+                  const showHandles = segmentMode && !overlay.sketch;
+                  const label = overlay.order
+                    ? `${overlay.order} · ${(overlay.endSec - overlay.startSec).toFixed(1)}s`
+                    : overlay.sketch
+                      ? `${(overlay.endSec - overlay.startSec).toFixed(1)}s`
+                      : `待添加 · ${(overlay.endSec - overlay.startSec).toFixed(1)}s`;
+                  return (
+                    <div
+                      key={overlay.key}
+                      className={`pointer-events-none absolute top-3 bottom-0 z-10 ${overlay.sketch ? 'border border-dashed' : 'border-2'} ${isDark ? 'border-[#6E70E8] bg-[#4446CE]/40' : 'border-[#3B3DB8] bg-[#4446CE]/25'}`}
+                      style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                    >
+                      {widthPct >= 8 && (
+                        <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white">
+                          {label}
+                        </span>
+                      )}
+                      {showHandles && renderTrimHandle('start', overlay.targetId)}
+                      {showHandles && renderTrimHandle('end', overlay.targetId)}
+                    </div>
+                  );
+                });
               })()}
               <div
                 className={`absolute top-0 bottom-0 z-30 w-0.5 rounded-full ${isDark ? 'bg-white' : 'bg-black'}`}
@@ -1065,24 +1166,38 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
 
           <div className="mt-4">
             <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-semibold">修改指令</span>
                 <span className={`text-[11px] ${mutedText}`}>已添加 {anchors.length} 个关键帧</span>
-                {segmentRange && (
-                  <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${isDark ? 'bg-[#4446CE]/20 text-[#B9BAFF]' : 'bg-[#F0F1FF] text-[#4446CE]'}`}>
-                    片段 {segmentRange.startSeconds}-{segmentRange.endSeconds} 秒
+                {segments.map((entry, index) => (
+                  <span key={entry.id} className={`group flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${isDark ? 'bg-[#4446CE]/20 text-[#B9BAFF]' : 'bg-[#F0F1FF] text-[#4446CE]'}`}>
+                    {index + 1} · {entry.range.startSeconds}-{entry.range.endSeconds} 秒
+                    <button
+                      type="button"
+                      className="flex h-4 w-4 items-center justify-center rounded text-xs leading-none opacity-60 hover:bg-white/15 hover:opacity-100"
+                      title="移除该片段及其提示词描述"
+                      onClick={() => removeSegmentFromPrompt(entry.id)}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+                {pendingRange && (
+                  <span className={`rounded-md border border-dashed px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${isDark ? 'border-[#8F91F4] text-[#B9BAFF]' : 'border-[#4446CE] text-[#4446CE]'}`}>
+                    待添加 {pendingRange.startSeconds}-{pendingRange.endSeconds} 秒
                   </span>
                 )}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-2">
                 <button
                   type="button"
-                  disabled={!segmentRange || segmentChipAdded}
-                  className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition-opacity disabled:cursor-not-allowed disabled:opacity-40 ${segmentRange && !segmentChipAdded ? 'bg-[#4446CE] text-white' : isDark ? 'bg-zinc-700 text-zinc-200' : 'bg-gray-200 text-gray-700'}`}
+                  disabled={!pendingRange || segmentLimitReached}
+                  className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition-opacity disabled:cursor-not-allowed disabled:opacity-40 ${pendingRange && !segmentLimitReached ? 'bg-[#4446CE] text-white' : isDark ? 'bg-zinc-700 text-zinc-200' : 'bg-gray-200 text-gray-700'}`}
                   onClick={addSegmentToPrompt}
-                  title={segmentChipAdded ? '片段已加入提示词，在时间轴上重选即可更新区间' : '把选中片段作为变量插入提示词，发送时自动展开为规范时间区间'}
+                  title={segmentLimitReached ? `最多 ${MAX_SEGMENTS} 个片段` : '把待添加片段写入提示词（自动追加一段完整编辑指令）'}
                 >
-                  <Icons.Scissors size={14} />{segmentChipAdded ? '片段已添加' : '添加片段'}
+                  <Icons.Scissors size={14} />
+                  {segmentLimitReached ? `已达 ${MAX_SEGMENTS} 段上限` : `添加片段 ${segments.length}/${MAX_SEGMENTS}`}
                 </button>
                 <button type="button" disabled={segmentMode || !hasDrawing || !videoSize.width || !videoSize.height || !duration} className="flex h-8 items-center gap-1.5 rounded-lg bg-[#4446CE] px-3 text-xs font-semibold text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40" onClick={createAnchor} title="把当前标注帧加入提示词"><Icons.Plus size={14} />添加当前帧</button>
               </div>
@@ -1091,7 +1206,7 @@ export const VideoEditPanel: React.FC<VideoEditPanelProps> = ({
               value={prompt}
               onChange={setPrompt}
               references={references}
-              onReferencesChange={setReferences}
+              onReferencesChange={handlePromptReferencesChange}
               inputMedia={promptInputMedia}
               mode="omni"
               placeholder="描述要做的修改，例如：消除画面右侧的路人、将桌上的水杯替换为一束红玫瑰；用「片段编辑」选取时段后点「添加片段」，自动生成编辑指令模板，时间区间以变量插入"

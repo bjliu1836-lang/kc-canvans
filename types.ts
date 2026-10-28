@@ -92,7 +92,8 @@ export interface VideoEditRequest {
   prompt: string;
   scope: 'track_same_subject_full_clip' | 'regenerate_time_range';
   anchors: VideoEditAnchor[];
-  timeRange?: VideoEditTimeRange;
+  /** 待重生成的时间区间；最多 3 段，与提示词中的片段变量一一对应 */
+  timeRanges?: VideoEditTimeRange[];
 }
 
 export interface ImageVersionSnapshot {
